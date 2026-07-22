@@ -4,6 +4,7 @@ from scipy.sparse import block_diag, hstack
 from pylgm.config import RunConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import build_fixed, build_iid, build_random_walk
+from pylgm.exceptions import ConfigurationError
 from pylgm.ir.model import CompiledLGM, LatentBlock
 
 
@@ -26,6 +27,15 @@ def _structured_blocks(config: RunConfig, panel: CanonicalPanel) -> list[LatentB
                 )
             )
     return blocks
+
+
+def _qualified_labels(blocks: list[LatentBlock]) -> tuple[str, ...]:
+    labels = tuple(
+        f"{block.name}:{label}" for block in blocks for label in block.labels
+    )
+    if len(labels) != len(set(labels)):
+        raise ConfigurationError("duplicate latent labels after qualification")
+    return labels
 
 
 def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
@@ -58,9 +68,7 @@ def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
         design=hstack([block.design for block in blocks], format="csr"),
         precision=block_diag([block.precision for block in blocks], format="csr"),
         constraints=constraints,
-        labels=tuple(
-            f"{block.name}:{label}" for block in blocks for label in block.labels
-        ),
+        labels=_qualified_labels(blocks),
         sigma=float(config.model.sigma),
         blocks=tuple(blocks),
     )
