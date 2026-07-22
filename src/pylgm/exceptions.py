@@ -1,3 +1,6 @@
+from numpy.linalg import LinAlgError
+
+
 class PyLGMError(Exception):
     """Base class for typed pyLGM errors."""
 
@@ -22,5 +25,9 @@ class InferenceError(PyLGMError):
     """Inference cannot produce a valid result for a compiled model."""
 
 
-class NumericalError(InferenceError, ArithmeticError):
+class NumericalError(InferenceError, LinAlgError, ArithmeticError):
     """Numerical inference produced an invalid or non-finite result."""
+
+
+class DenseReferenceLimitError(InferenceError):
+    """The small/medium dense reference engine's safety limit was exceeded."""

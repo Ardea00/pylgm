@@ -12,7 +12,16 @@ def test_iid_uses_sorted_levels() -> None:
     np.testing.assert_allclose(block.precision.toarray(), np.eye(2) * 2.0)
 
 
-def test_rw2_has_rank_two_null_space_constraints() -> None:
+def test_rw2_has_rank_two_null_space_constraints(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "pylgm.effects.random_walk.np.eye",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("random-walk construction must remain sparse")
+        ),
+        raising=False,
+    )
     frame = pd.DataFrame({"month": [1, 2, 3, 4]})
     block = build_random_walk(frame, "trend", "month", 3.0, order=2)
     assert block.precision.shape == (4, 4)

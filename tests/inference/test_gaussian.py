@@ -1,8 +1,11 @@
+import warnings
+
 import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import ModelValidationError
+from pylgm.exceptions import DenseReferenceLimitError, ModelValidationError, NumericalError
+from pylgm.inference import gaussian
 from pylgm.inference import fit_gaussian
 from pylgm.ir.model import CompiledLGM
 
@@ -299,3 +302,109 @@ def test_nonfinite_sparse_design_data_is_rejected(bad_design_value: float) -> No
             sigma=1.0,
             blocks=(),
         )
+
+
+def test_extreme_finite_response_raises_typed_numerical_error_without_warnings() -> None:
+    model = CompiledLGM(
+        y=np.array([1e308]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        with pytest.raises(NumericalError, match="non-finite|numerical"):
+            fit_gaussian(model)
+
+    assert not recorded
+
+
+def test_dense_reference_dimension_limit_runs_before_dense_algebra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = CompiledLGM(
+        y=np.array([1.0, 2.0]),
+        observed=np.array([True, True]),
+        offset=np.zeros(2),
+        design=csr_matrix(np.eye(2)),
+        precision=csr_matrix(np.eye(2)),
+        constraints=np.empty((0, 2)),
+        labels=("a", "b"),
+        sigma=1.0,
+        blocks=(),
+    )
+    monkeypatch.setattr(gaussian, "_MAX_DENSE_LATENT_DIMENSION", 1)
+    monkeypatch.setattr(
+        gaussian,
+        "null_space",
+        lambda constraints: pytest.fail("dense algebra ran before preflight"),
+    )
+
+    with pytest.raises(DenseReferenceLimitError, match="allow_large_dense"):
+        fit_gaussian(model)
+
+
+def test_dense_reference_estimated_byte_limit_can_be_explicitly_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = CompiledLGM(
+        y=np.array([2.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+    monkeypatch.setattr(gaussian, "_MAX_DENSE_BYTES", 1)
+
+    with pytest.raises(DenseReferenceLimitError, match="estimated dense workspace"):
+        fit_gaussian(model)
+
+    result = fit_gaussian(model, allow_large_dense=True)
+    np.testing.assert_allclose(result.mean, [1.0])
+
+
+def test_constrained_gaussian_matches_independent_one_coordinate_solution() -> None:
+    model = CompiledLGM(
+        y=np.array([2.0, -1.0]),
+        observed=np.array([True, True]),
+        offset=np.zeros(2),
+        design=csr_matrix(np.eye(2)),
+        precision=csr_matrix([[1.0, -1.0], [-1.0, 1.0]]),
+        constraints=np.array([[1.0, 1.0]]),
+        labels=("a", "b"),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    result = fit_gaussian(model)
+
+    basis = np.array([1.0, -1.0]) / np.sqrt(2.0)
+    prior_precision = float(basis @ model.precision.toarray() @ basis)
+    posterior_precision = prior_precision + float(basis @ basis)
+    score = float(basis @ model.y)
+    coordinate_mean = score / posterior_precision
+    expected_mean = basis * coordinate_mean
+    expected_covariance = np.outer(basis, basis) / posterior_precision
+    expected_quadratic = float(
+        np.sum((model.y - basis * coordinate_mean) ** 2)
+        + prior_precision * coordinate_mean**2
+    )
+    expected_log_marginal = -0.5 * (
+        2 * np.log(2 * np.pi)
+        - np.log(prior_precision)
+        + np.log(posterior_precision)
+        + expected_quadratic
+    )
+    np.testing.assert_allclose(result.mean, expected_mean)
+    np.testing.assert_allclose(result.covariance, expected_covariance)
+    np.testing.assert_allclose(result.log_marginal_likelihood, expected_log_marginal)
