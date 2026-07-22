@@ -1,29 +1,34 @@
 import numpy as np
-from scipy.sparse import block_diag, hstack
 
 from pylgm.config import RunConfig
+from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import build_fixed, build_iid, build_random_walk
 from pylgm.exceptions import CompilationError, DataContractError
-from pylgm.ir.model import CompiledLGM, LatentBlock
+from pylgm.ir import CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
+from pylgm.ir.model import LatentBlock
 
 
-def _structured_blocks(config: RunConfig, panel: CanonicalPanel) -> list[LatentBlock]:
+def _structured_blocks(
+    model: ModelConfig,
+    panel: CanonicalPanel,
+    optimized: tuple[str, ...] = (),
+) -> list[LatentBlock]:
     blocks: list[LatentBlock] = []
     frame = panel.frame
-    for effect in config.model.effects:
+    for effect in model.effects:
+        parameter = f"{effect.name}.precision"
+        precision = 1.0 if parameter in optimized else effect.precision
         try:
             if effect.type == "iid":
-                block = build_iid(
-                    frame, effect.name, effect.index, effect.precision
-                )
+                block = build_iid(frame, effect.name, effect.index, precision)
             else:
                 order = 1 if effect.type == "rw1" else 2
                 block = build_random_walk(
                     frame,
                     effect.name,
                     effect.index,
-                    effect.precision,
+                    precision,
                     order,
                 )
         except Exception as error:
@@ -43,14 +48,16 @@ def _qualified_labels(blocks: list[LatentBlock]) -> tuple[str, ...]:
     return labels
 
 
-def _validate_required_columns(config: RunConfig, frame_columns: object) -> None:
+def _validate_required_columns(
+    data: DataConfig, model: ModelConfig, frame_columns: object
+) -> None:
     columns = set(frame_columns)
-    required_data = {*config.data.panel, config.data.time, config.data.response}
+    required_data = {*data.panel, data.time, data.response}
     missing_data = sorted(required_data.difference(columns))
     if missing_data:
         raise DataContractError(f"missing configured data columns: {missing_data}")
     missing_indexes = sorted(
-        {effect.index for effect in config.model.effects}.difference(columns)
+        {effect.index for effect in model.effects}.difference(columns)
     )
     if missing_indexes:
         raise DataContractError(
@@ -58,60 +65,90 @@ def _validate_required_columns(config: RunConfig, frame_columns: object) -> None
         )
 
 
-def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
-    if panel.response != config.data.response:
+def _validate_optimized_names(model: ModelConfig, optimized: tuple[str, ...]) -> None:
+    if any(not isinstance(name, str) for name in optimized):
+        raise CompilationError("optimized parameter names must be strings")
+    if len(optimized) != len(set(optimized)):
+        raise CompilationError("optimized parameter names must be unique")
+    allowed = {"sigma", *(f"{effect.name}.precision" for effect in model.effects)}
+    unknown = sorted(set(optimized).difference(allowed))
+    if unknown:
+        raise CompilationError(f"unknown optimized parameter names: {unknown}")
+
+
+def compile_gaussian_family(
+    data: DataConfig,
+    model: ModelConfig,
+    panel: CanonicalPanel,
+    optimized: tuple[str, ...],
+) -> CompiledGaussianFamily:
+    optimized = tuple(optimized)
+    _validate_optimized_names(model, optimized)
+    if panel.response != data.response:
         raise DataContractError(
             "panel response metadata does not match configuration: "
-            f"{panel.response!r} != {config.data.response!r}"
+            f"{panel.response!r} != {data.response!r}"
         )
-    expected_keys = (*config.data.panel, config.data.time)
+    expected_keys = (*data.panel, data.time)
     if panel.key_columns != expected_keys:
         raise DataContractError(
             "panel key metadata does not match configuration: "
             f"{panel.key_columns!r} != {expected_keys!r}"
         )
     frame = panel.frame
-    _validate_required_columns(config, frame.columns)
+    _validate_required_columns(data, model, frame.columns)
     try:
         fixed = build_fixed(
             frame,
-            config.model.fixed,
-            config.model.fixed_prior_precision,
+            model.fixed,
+            model.fixed_prior_precision,
         )
     except Exception as error:
         raise CompilationError(f"failed to compile fixed formula: {error}") from error
+    structured_optimized = tuple(
+        name for name in optimized if name.endswith(".precision")
+    )
     blocks = [fixed]
-    blocks.extend(_structured_blocks(config, panel))
+    if structured_optimized:
+        blocks.extend(_structured_blocks(model, panel, optimized))
+    else:
+        blocks.extend(_structured_blocks(model, panel))
     wrong_rows = [block.name for block in blocks if block.design.shape[0] != len(frame)]
     if wrong_rows:
         raise CompilationError(
             f"latent block design row count does not match the panel: {wrong_rows}"
         )
-    widths = [block.design.shape[1] for block in blocks]
-    total = sum(widths)
-    constraint_rows: list[np.ndarray] = []
-    start = 0
-    for block, width in zip(blocks, widths, strict=True):
-        for local in block.constraints:
-            row = np.zeros(total)
-            row[start : start + width] = local
-            constraint_rows.append(row)
-        start += width
-    constraints = (
-        np.vstack(constraint_rows) if constraint_rows else np.empty((0, total))
-    )
+    _qualified_labels(blocks)
     try:
         y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
-        return CompiledLGM(
+        scalable_blocks = tuple(
+            ScalableBlock(
+                block,
+                f"{block.name}.precision"
+                if f"{block.name}.precision" in optimized
+                else None,
+                1.0,
+            )
+            for block in blocks
+        )
+        return CompiledGaussianFamily(
             y=y,
             observed=panel.observed,
             offset=np.zeros(len(frame)),
-            design=hstack([block.design for block in blocks], format="csr"),
-            precision=block_diag([block.precision for block in blocks], format="csr"),
-            constraints=constraints,
-            labels=_qualified_labels(blocks),
-            sigma=float(config.model.sigma),
-            blocks=tuple(blocks),
+            blocks=scalable_blocks,
+            parameter_names=optimized,
+            initial=Hyperparameters(
+                sigma=float(model.sigma),
+                precisions={
+                    effect.name: float(effect.precision) for effect in model.effects
+                },
+            ),
         )
     except (TypeError, ValueError) as error:
-        raise CompilationError(f"compiled model is invalid: {error}") from error
+        raise CompilationError(f"compiled Gaussian family is invalid: {error}") from error
+
+
+def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
+    return compile_gaussian_family(
+        config.data, config.model, panel, optimized=()
+    ).materialize({})
