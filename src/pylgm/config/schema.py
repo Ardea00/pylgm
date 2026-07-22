@@ -1,9 +1,26 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
-FinitePositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+def _require_ordinary_number(value: object) -> object:
+    if type(value) not in (int, float):
+        raise ValueError("hyperparameter must be an ordinary int or float number")
+    return value
+
+
+FinitePositiveFloat = Annotated[
+    float,
+    BeforeValidator(_require_ordinary_number),
+    Field(gt=0, allow_inf_nan=False),
+]
 
 
 class StrictModel(BaseModel):
@@ -14,6 +31,15 @@ class DataConfig(StrictModel):
     time: str
     response: str
     panel: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def disjoint_semantic_roles(self) -> "DataConfig":
+        if len(self.panel) != len(set(self.panel)):
+            raise ValueError("panel dimensions must be unique")
+        roles = (self.time, self.response, *self.panel)
+        if len(roles) != len(set(roles)):
+            raise ValueError("time, response, and panel semantic roles must be disjoint")
+        return self
 
 
 class EffectConfig(StrictModel):

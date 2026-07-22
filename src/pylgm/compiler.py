@@ -4,7 +4,7 @@ from scipy.sparse import block_diag, hstack
 from pylgm.config import RunConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import build_fixed, build_iid, build_random_walk
-from pylgm.exceptions import CompilationError, ConfigurationError, DataContractError
+from pylgm.exceptions import CompilationError, DataContractError
 from pylgm.ir.model import CompiledLGM, LatentBlock
 
 
@@ -39,7 +39,7 @@ def _qualified_labels(blocks: list[LatentBlock]) -> tuple[str, ...]:
         f"{block.name}:{label}" for block in blocks for label in block.labels
     )
     if len(labels) != len(set(labels)):
-        raise ConfigurationError("duplicate latent labels after qualification")
+        raise CompilationError("duplicate latent labels after qualification")
     return labels
 
 
@@ -59,6 +59,17 @@ def _validate_required_columns(config: RunConfig, frame_columns: object) -> None
 
 
 def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
+    if panel.response != config.data.response:
+        raise DataContractError(
+            "panel response metadata does not match configuration: "
+            f"{panel.response!r} != {config.data.response!r}"
+        )
+    expected_keys = (*config.data.panel, config.data.time)
+    if panel.key_columns != expected_keys:
+        raise DataContractError(
+            "panel key metadata does not match configuration: "
+            f"{panel.key_columns!r} != {expected_keys!r}"
+        )
     frame = panel.frame
     _validate_required_columns(config, frame.columns)
     try:

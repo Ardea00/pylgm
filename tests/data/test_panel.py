@@ -43,10 +43,10 @@ def test_panel_is_value_isolated_from_source_and_accessor_mutations() -> None:
 
 
 def test_duplicate_column_names_fail_at_the_panel_boundary() -> None:
-    frame = pd.DataFrame([[1, 1.0]], columns=["month", "month"])
+    frame = pd.DataFrame([[1, 1.0, 2.0]], columns=["month", "y", "y"])
 
     with pytest.raises(DataContractError, match="unique"):
-        CanonicalPanel.from_frame(frame, DataConfig(time="month", response="month"))
+        CanonicalPanel.from_frame(frame, DataConfig(time="month", response="y"))
 
 
 def test_null_key_fails_with_a_typed_data_error() -> None:

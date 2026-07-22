@@ -170,3 +170,97 @@ def test_compiled_lgm_requires_global_constraints_to_match_blocks() -> None:
             sigma=1.0,
             blocks=(block,),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("design", csr_matrix([[1.0 + 1.0j], [1.0 + 0.0j]])),
+        ("precision", csr_matrix([[1.0 + 0.0j]])),
+        ("constraints", np.array([[1.0 + 0.0j]])),
+    ],
+)
+def test_latent_block_rejects_complex_dense_and_sparse_payloads(
+    field: str, value: object
+) -> None:
+    arguments: dict[str, object] = {
+        "name": "effect",
+        "labels": ("level",),
+        "design": csr_matrix(np.ones((2, 1))),
+        "precision": csr_matrix([[1.0]]),
+        "constraints": np.empty((0, 1)),
+    }
+    arguments[field] = value
+
+    with pytest.raises(ModelValidationError, match="real numeric"):
+        LatentBlock(**arguments)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("y", np.array([1.0 + 0.0j, 2.0 + 1.0j])),
+        ("offset", np.array([0.0 + 0.0j, 0.0 + 0.0j])),
+        ("design", csr_matrix([[1.0 + 0.0j], [1.0 + 0.0j]])),
+        ("precision", csr_matrix([[1.0 + 0.0j]])),
+        ("constraints", np.empty((0, 1), dtype=complex)),
+    ],
+)
+def test_compiled_lgm_rejects_complex_dense_and_sparse_payloads(
+    field: str, value: object
+) -> None:
+    arguments: dict[str, object] = {
+        "y": np.array([1.0, 2.0]),
+        "observed": np.array([True, True]),
+        "offset": np.zeros(2),
+        "design": csr_matrix(np.ones((2, 1))),
+        "precision": csr_matrix([[1.0]]),
+        "constraints": np.empty((0, 1)),
+        "labels": ("x",),
+        "sigma": 1.0,
+        "blocks": (),
+    }
+    arguments[field] = value
+
+    with pytest.raises(ModelValidationError, match="real numeric"):
+        CompiledLGM(**arguments)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("y", object()),
+        ("offset", [[0.0], [0.0, 1.0]]),
+        ("observed", [[True], [False, True]]),
+        ("sigma", object()),
+    ],
+)
+def test_invalid_compiled_scalar_and_dtype_inputs_are_typed_model_errors(
+    field: str, value: object
+) -> None:
+    arguments: dict[str, object] = {
+        "y": np.array([1.0, 2.0]),
+        "observed": np.array([True, True]),
+        "offset": np.zeros(2),
+        "design": csr_matrix(np.ones((2, 1))),
+        "precision": csr_matrix([[1.0]]),
+        "constraints": np.empty((0, 1)),
+        "labels": ("x",),
+        "sigma": 1.0,
+        "blocks": (),
+    }
+    arguments[field] = value
+
+    with pytest.raises(ModelValidationError):
+        CompiledLGM(**arguments)  # type: ignore[arg-type]
+
+
+def test_invalid_latent_constraint_array_is_a_typed_model_error() -> None:
+    with pytest.raises(ModelValidationError):
+        LatentBlock(
+            "effect",
+            ("level",),
+            csr_matrix(np.ones((2, 1))),
+            csr_matrix([[1.0]]),
+            [[1.0], [1.0, 2.0]],  # type: ignore[arg-type]
+        )

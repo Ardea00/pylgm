@@ -95,3 +95,43 @@ def test_fixed_effect_name_is_reserved(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="reserved"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "{sigma: true}",
+        "{sigma: '1.0'}",
+        "{sigma: 1, fixed_prior_precision: false}",
+        "{sigma: 1, fixed_prior_precision: '0.1'}",
+        "{sigma: 1, effects: [{name: trend, type: rw1, index: t, precision: true}]}",
+        "{sigma: 1, effects: [{name: trend, type: rw1, index: t, precision: '2'}]}",
+    ],
+)
+def test_hyperparameters_reject_booleans_and_coercive_strings(
+    tmp_path: Path, model: str
+) -> None:
+    path = tmp_path / "strict-hyperparameter.yaml"
+    path.write_text(
+        f"schema_version: 1\ndata: {{time: t, response: y}}\nmodel: {model}\n"
+    )
+
+    with pytest.raises(ConfigurationError, match="number|numeric"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "{time: t, response: y, panel: [region, region]}",
+        "{time: y, response: y}",
+        "{time: t, response: y, panel: [t]}",
+        "{time: t, response: y, panel: [y]}",
+    ],
+)
+def test_data_semantic_roles_are_unique_and_disjoint(tmp_path: Path, data: str) -> None:
+    path = tmp_path / "data-roles.yaml"
+    path.write_text(f"schema_version: 1\ndata: {data}\nmodel: {{sigma: 1}}\n")
+
+    with pytest.raises(ConfigurationError, match="unique|disjoint"):
+        load_config(path)

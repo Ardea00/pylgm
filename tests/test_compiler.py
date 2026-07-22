@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
+from typing import cast
 
 from pylgm.compiler import compile_model
 from pylgm.config.schema import RunConfig
@@ -121,16 +122,11 @@ def _config_with_effect_index(index: str = "group") -> RunConfig:
 
 def test_compiler_rejects_panel_missing_configured_data_columns() -> None:
     config = _config_with_effect_index()
-    other_data = RunConfig.model_validate(
-        {
-            "schema_version": 1,
-            "data": {"time": "other_time", "response": "other_y"},
-            "model": {"sigma": 1.0},
-        }
-    ).data
-    panel = CanonicalPanel.from_frame(
-        pd.DataFrame({"other_time": [1], "other_y": [1.0], "x": [0.0], "group": ["A"]}),
-        other_data,
+    panel = CanonicalPanel(
+        pd.DataFrame({"x": [0.0], "group": ["A"]}),
+        np.array([True]),
+        ("month",),
+        "y",
     )
 
     with pytest.raises(DataContractError, match="missing configured data columns"):
@@ -204,4 +200,68 @@ def test_compiler_rejects_block_with_wrong_panel_row_count(
     monkeypatch.setattr("pylgm.compiler._structured_blocks", lambda config, panel: [bad_block])
 
     with pytest.raises(CompilationError, match="row count"):
+        compile_model(config, panel)
+
+
+class _MetadataOnlyPanel:
+    def __init__(self, response: str, key_columns: tuple[str, ...]) -> None:
+        self.response = response
+        self.key_columns = key_columns
+
+    @property
+    def frame(self) -> pd.DataFrame:
+        raise AssertionError("frame accessed before panel metadata validation")
+
+
+def test_compiler_rejects_panel_response_metadata_mismatch_before_frame_access() -> None:
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "time", "response": "y"},
+            "model": {"sigma": 1.0},
+        }
+    )
+    panel = cast(CanonicalPanel, _MetadataOnlyPanel("other_y", ("time",)))
+
+    with pytest.raises(DataContractError, match="response metadata"):
+        compile_model(config, panel)
+
+
+def test_compiler_rejects_panel_key_metadata_mismatch_before_frame_access() -> None:
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "time", "response": "y", "panel": ["region"]},
+            "model": {"sigma": 1.0},
+        }
+    )
+    panel = cast(CanonicalPanel, _MetadataOnlyPanel("y", ("time", "region")))
+
+    with pytest.raises(DataContractError, match="key metadata"):
+        compile_model(config, panel)
+
+
+def test_qualified_label_collision_is_a_compilation_error() -> None:
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "time", "response": "y"},
+            "model": {
+                "fixed": "0",
+                "sigma": 1.0,
+                "effects": [
+                    {"name": "a:b", "type": "iid", "index": "first"},
+                    {"name": "a", "type": "iid", "index": "second"},
+                ],
+            },
+        }
+    )
+    panel = CanonicalPanel.from_frame(
+        pd.DataFrame(
+            {"time": [1], "y": [1.0], "first": ["c"], "second": ["b:c"]}
+        ),
+        config.data,
+    )
+
+    with pytest.raises(CompilationError, match="duplicate latent labels"):
         compile_model(config, panel)

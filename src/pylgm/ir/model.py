@@ -20,13 +20,22 @@ def _readonly_csr_matrix(value: csr_matrix) -> csr_matrix:
     return result
 
 
-def _numeric_array(value: np.ndarray, name: str, dimensions: int) -> np.ndarray:
-    result = np.asarray(value)
+def _array(value: object, name: str) -> np.ndarray:
+    try:
+        return np.asarray(value)
+    except (TypeError, ValueError) as error:
+        raise ModelValidationError(f"{name} must be a regular array") from error
+
+
+def _numeric_array(
+    value: object, name: str, dimensions: int, *, require_finite: bool = True
+) -> np.ndarray:
+    result = _array(value, name)
     if result.ndim != dimensions:
         raise ModelValidationError(f"{name} must be {dimensions}-dimensional")
-    if not np.issubdtype(result.dtype, np.number):
-        raise ModelValidationError(f"{name} must have a numeric dtype")
-    if not np.isfinite(result).all():
+    if not np.issubdtype(result.dtype, np.number) or not np.isrealobj(result):
+        raise ModelValidationError(f"{name} must have a real numeric dtype")
+    if require_finite and not np.isfinite(result).all():
         raise ModelValidationError(f"{name} must be finite")
     return result
 
@@ -34,8 +43,8 @@ def _numeric_array(value: np.ndarray, name: str, dimensions: int) -> np.ndarray:
 def _numeric_csr(value: csr_matrix, name: str) -> csr_matrix:
     if not isinstance(value, csr_matrix):
         raise ModelValidationError(f"{name} must be a CSR sparse matrix")
-    if not np.issubdtype(value.dtype, np.number):
-        raise ModelValidationError(f"{name} must have a numeric dtype")
+    if not np.issubdtype(value.dtype, np.number) or not np.isrealobj(value.data):
+        raise ModelValidationError(f"{name} must have a real numeric dtype")
     if not np.isfinite(value.data).all():
         raise ModelValidationError(f"{name} data must be finite")
     return value
@@ -150,11 +159,8 @@ class CompiledLGM:
         sigma: float,
         blocks: tuple[LatentBlock, ...],
     ) -> None:
-        y = np.asarray(y)
-        observed = np.asarray(observed)
-        offset = np.asarray(offset)
-        if y.ndim != 1 or not np.issubdtype(y.dtype, np.number):
-            raise ModelValidationError("y must be a one-dimensional numeric array")
+        y = _numeric_array(y, "y", 1, require_finite=False)
+        observed = _array(observed, "observed")
         if observed.ndim != 1 or not np.issubdtype(observed.dtype, np.bool_):
             raise ModelValidationError(
                 "observed must be a one-dimensional boolean array"
@@ -163,8 +169,14 @@ class CompiledLGM:
         design = _numeric_csr(design, "design")
         precision = _numeric_csr(precision, "precision")
         constraints = _numeric_array(constraints, "constraints", 2)
-        labels = tuple(labels)
-        blocks = tuple(blocks)
+        try:
+            labels = tuple(labels)
+        except TypeError as error:
+            raise ModelValidationError("labels must be an iterable of strings") from error
+        try:
+            blocks = tuple(blocks)
+        except TypeError as error:
+            raise ModelValidationError("blocks must be an iterable of latent blocks") from error
         rows, width = design.shape
         if not (y.size == observed.size == offset.size == rows):
             raise ModelValidationError(
@@ -185,11 +197,9 @@ class CompiledLGM:
             raise ModelValidationError("labels must be strings")
         if len(labels) != len(set(labels)):
             raise ModelValidationError("labels must be unique")
-        if (
-            isinstance(sigma, (bool, np.bool_))
-            or not np.isfinite(sigma)
-            or sigma <= 0
-        ):
+        sigma_array = _numeric_array(sigma, "sigma", 0)
+        sigma_value = float(sigma_array)
+        if sigma_value <= 0:
             raise ModelValidationError("sigma must be finite and positive")
         block_names = [block.name for block in blocks]
         if len(block_names) != len(set(block_names)):
@@ -232,7 +242,7 @@ class CompiledLGM:
         object.__setattr__(self, "_precision", _readonly_csr_matrix(precision))
         object.__setattr__(self, "_constraints", _readonly_array(constraints))
         object.__setattr__(self, "labels", labels)
-        object.__setattr__(self, "sigma", float(sigma))
+        object.__setattr__(self, "sigma", sigma_value)
         object.__setattr__(self, "blocks", blocks)
 
     @property
