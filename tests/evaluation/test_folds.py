@@ -127,6 +127,66 @@ def test_incomparable_time_levels_raise_a_typed_error() -> None:
         build_fold_definitions(frame, data_config(), evaluation())
 
 
+def test_ordered_categorical_time_uses_declared_order_for_horizon_and_materialization() -> None:
+    frame = pd.DataFrame(
+        {
+            "region": ["A", "A", "A"],
+            "month": pd.Categorical(
+                ["Mar", "Jan", "Feb"],
+                categories=["Jan", "Feb", "Mar"],
+                ordered=True,
+            ),
+            "y": [3.0, 1.0, 2.0],
+        }
+    )
+    config = evaluation(origins=OriginConfig(values=("Jan",)))
+
+    definitions = build_fold_definitions(frame, data_config(), config)
+    fold = materialize_fold(frame, data_config(), config, definitions[0])
+
+    assert definitions == (FoldDefinition(origin="Jan", target="Feb", horizon=1),)
+    assert fold.training_frame["month"].tolist() == ["Jan"]
+    assert fold.model_frame["month"].tolist() == ["Jan", "Feb"]
+    assert fold.model_frame.loc[fold.model_frame["month"].eq("Feb"), "y"].isna().all()
+    assert fold.target_frame["month"].tolist() == ["Feb"]
+    assert fold.target_frame["y"].tolist() == [2.0]
+
+
+def test_unordered_categorical_time_fails_with_a_typed_order_error() -> None:
+    frame = pd.DataFrame(
+        {
+            "region": ["A", "A", "A"],
+            "month": pd.Categorical(
+                ["Jan", "Feb", "Mar"],
+                categories=["Jan", "Feb", "Mar"],
+                ordered=False,
+            ),
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
+
+    with pytest.raises(FoldConstructionError, match="categorical.*ordered"):
+        build_fold_definitions(frame, data_config(), evaluation())
+
+
+def test_ordered_categorical_unused_categories_are_not_fold_levels() -> None:
+    frame = pd.DataFrame(
+        {
+            "region": ["A", "A"],
+            "month": pd.Categorical(
+                ["Mar", "Jan"],
+                categories=["Jan", "Feb", "Mar"],
+                ordered=True,
+            ),
+            "y": [3.0, 1.0],
+        }
+    )
+
+    definitions = build_fold_definitions(frame, data_config(), evaluation())
+
+    assert definitions == (FoldDefinition(origin="Jan", target="Mar", horizon=1),)
+
+
 def test_expanding_and_rolling_windows_keep_the_correct_training_levels(
     panel_frame: pd.DataFrame,
 ) -> None:

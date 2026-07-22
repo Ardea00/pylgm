@@ -109,10 +109,16 @@ def _validate_source(
 
 
 def _ordered_levels(frame: pd.DataFrame, time: str) -> tuple[object, ...]:
-    try:
-        levels = tuple(sorted(frame[time].drop_duplicates().tolist()))
-    except (TypeError, ValueError) as error:
-        raise FoldConstructionError("time levels must have a total order") from error
+    values = frame[time]
+    if isinstance(values.dtype, pd.CategoricalDtype):
+        if not values.cat.ordered:
+            raise FoldConstructionError("categorical time levels must be ordered")
+        levels = tuple(values.cat.remove_unused_categories().cat.categories.tolist())
+    else:
+        try:
+            levels = tuple(sorted(values.drop_duplicates().tolist()))
+        except (TypeError, ValueError) as error:
+            raise FoldConstructionError("time levels must have a total order") from error
     if not levels:
         raise FoldConstructionError("evaluation frame contains no time levels")
     return levels
