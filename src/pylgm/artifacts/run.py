@@ -136,7 +136,10 @@ def _publish_no_replace(source: Path, destination: Path) -> None:
             _raise_publish_error(destination)
         return
     if os.name == "nt":
-        move_file = ctypes.windll.kernel32.MoveFileW
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        move_file = kernel32.MoveFileExW
+        move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        move_file.restype = ctypes.c_int
         if not move_file(str(source), str(destination), 0x8):
             error = ctypes.get_last_error()
             if error in {80, 183}:

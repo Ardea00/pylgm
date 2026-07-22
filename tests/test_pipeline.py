@@ -1,10 +1,12 @@
 import json
+import ctypes
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import numpy as np
 
 from pylgm import Pipeline
 from pylgm.artifacts import run as run_artifacts
@@ -149,6 +151,38 @@ def test_panel_contract_rejects_unsupported_object_values_before_inference() -> 
         CanonicalPanel.from_frame(frame, DataConfig(time="month", response="y"))
 
 
+def test_object_fingerprint_supports_exact_numpy_complex_and_longdouble_scalars() -> None:
+    complex_first = pd.DataFrame({"month": [1], "y": [1.0], "value": [np.complex128(1 + 2j)]})
+    complex_second = pd.DataFrame({"month": [1], "y": [1.0], "value": [np.complex128(1 + 3j)]})
+
+    assert _fingerprint(complex_first) != _fingerprint(complex_second)
+
+    first = np.longdouble(1)
+    second = np.nextafter(first, np.longdouble(2))
+    if second != first:
+        longdouble_first = pd.DataFrame({"month": [1], "y": [1.0], "value": [first]})
+        longdouble_second = pd.DataFrame({"month": [1], "y": [1.0], "value": [second]})
+        assert _fingerprint(longdouble_first) != _fingerprint(longdouble_second)
+
+
+def test_object_fingerprint_distinguishes_period_frequency_and_interval_endpoints() -> None:
+    monthly = pd.DataFrame({"month": [1], "y": [1.0], "value": [pd.Period(ordinal=1, freq="M")]})
+    daily = pd.DataFrame({"month": [1], "y": [1.0], "value": [pd.Period(ordinal=1, freq="D")]})
+    integer_interval = pd.DataFrame({"month": [1], "y": [1.0], "value": [pd.Interval(1, 2)]})
+    float_interval = pd.DataFrame({"month": [1], "y": [1.0], "value": [pd.Interval(1.0, 2.0)]})
+
+    assert _fingerprint(monthly) != _fingerprint(daily)
+    assert _fingerprint(integer_interval) != _fingerprint(float_interval)
+
+
+def test_panel_contract_rejects_unsupported_numpy_scalar_before_fingerprint() -> None:
+    unsupported = np.array((1, 2), dtype=[("left", "i4"), ("right", "i4")])[()]
+    frame = pd.DataFrame({"month": [1], "y": [1.0], "value": [unsupported]})
+
+    with pytest.raises(DataContractError, match="unsupported object value type"):
+        CanonicalPanel.from_frame(frame, DataConfig(time="month", response="y"))
+
+
 def test_pipeline_removes_temporary_artifact_directory_after_write_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -213,3 +247,42 @@ def test_pipeline_does_not_overwrite_destination_created_during_publish(
 
     assert (output / "owner.txt").read_text() == "other writer"
     assert not list(tmp_path.glob(".run.tmp-*"))
+
+
+def test_windows_publisher_declares_movefileex_signature_and_maps_existing_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class MoveFileEx:
+        def __init__(self, result: int) -> None:
+            self.result = result
+            self.argtypes: object = None
+            self.restype: object = None
+            self.calls: list[tuple[object, ...]] = []
+
+        def __call__(self, *args: object) -> int:
+            self.calls.append(args)
+            return self.result
+
+    class Kernel32:
+        def __init__(self, move: MoveFileEx) -> None:
+            self.MoveFileExW = move
+
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    move = MoveFileEx(1)
+    monkeypatch.setattr(run_artifacts.sys, "platform", "win32")
+    monkeypatch.setattr(run_artifacts.os, "name", "nt")
+    monkeypatch.setattr(run_artifacts.ctypes, "WinDLL", lambda *args, **kwargs: Kernel32(move), raising=False)
+    monkeypatch.setattr(run_artifacts, "_destination_exists", lambda path: False)
+
+    run_artifacts._publish_no_replace(source, destination)
+
+    assert move.argtypes == [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    assert move.restype is ctypes.c_int
+    assert move.calls == [(str(source), str(destination), 0x8)]
+
+    existing = MoveFileEx(0)
+    monkeypatch.setattr(run_artifacts.ctypes, "WinDLL", lambda *args, **kwargs: Kernel32(existing), raising=False)
+    monkeypatch.setattr(run_artifacts.ctypes, "get_last_error", lambda: 183, raising=False)
+    with pytest.raises(FileExistsError):
+        run_artifacts._publish_no_replace(source, destination)

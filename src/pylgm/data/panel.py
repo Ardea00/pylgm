@@ -1,34 +1,10 @@
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal
-
 import numpy as np
 import pandas as pd
 
 from pylgm.config.schema import DataConfig
+from pylgm.data.scalars import is_supported_object_value
 from pylgm.exceptions import DataContractError
-
-
-def _is_supported_object_value(value: object) -> bool:
-    return value is None or value is pd.NA or value is pd.NaT or isinstance(
-        value,
-        (
-            bool,
-            int,
-            float,
-            str,
-            bytes,
-            bytearray,
-            memoryview,
-            datetime,
-            date,
-            Decimal,
-            np.generic,
-            pd.Timedelta,
-            pd.Period,
-            pd.Interval,
-        ),
-    )
 
 
 def _validate_frame_contract(frame: pd.DataFrame) -> None:
@@ -39,7 +15,7 @@ def _validate_frame_contract(frame: pd.DataFrame) -> None:
         if values.dtype != object:
             continue
         for value in values:
-            if not _is_supported_object_value(value):
+            if not is_supported_object_value(value):
                 raise DataContractError(
                     f"unsupported object value type in column {column!r}: "
                     f"{type(value).__qualname__}"

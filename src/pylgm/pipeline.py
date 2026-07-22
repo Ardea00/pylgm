@@ -16,6 +16,7 @@ from pylgm.artifacts.run import write_run
 from pylgm.compiler import compile_model
 from pylgm.config import RunConfig, load_config
 from pylgm.data import CanonicalPanel
+from pylgm.data.scalars import is_supported_numpy_scalar
 from pylgm.inference import GaussianResult, fit_gaussian
 
 
@@ -60,7 +61,7 @@ def _dtype_descriptor(dtype: Any) -> bytes:
             _record("unit", dtype.unit.encode()) + _timezone_descriptor(dtype.tz),
         )
     if isinstance(dtype, pd.PeriodDtype):
-        return _record("period-dtype", _record("freq", dtype.freqstr.encode()))
+        return _record("period-dtype", _record("freq", _frequency_string(dtype).encode()))
     if isinstance(dtype, pd.IntervalDtype):
         return _record(
             "interval-dtype",
@@ -83,6 +84,25 @@ def _dtype_descriptor(dtype: Any) -> bytes:
     return _record("numpy-dtype", np.dtype(dtype).str.encode())
 
 
+def _frequency_string(value: Any) -> str:
+    frequency = getattr(value, "freqstr", None) or getattr(value, "_freqstr", None)
+    if frequency is None:
+        frequency = getattr(getattr(value, "freq", None), "rule_code", None)
+    if not frequency:
+        raise TypeError(f"unsupported period frequency: {type(value).__qualname__}")
+    return str(frequency)
+
+
+def _numpy_scalar_descriptor(value: Any, dtype: np.dtype[Any]) -> bytes:
+    """Encode a NumPy scalar in canonical big-endian dtype and exact bytes."""
+    canonical_dtype = dtype.newbyteorder(">")
+    array = np.asarray(value, dtype=dtype).astype(canonical_dtype, copy=False)
+    return _record(
+        "numpy-scalar",
+        _record("dtype", canonical_dtype.str.encode()) + _record("value", array.tobytes()),
+    )
+
+
 def _scalar_descriptor(value: Any, dtype: Any) -> bytes:
     """Encode supported scalar values without repr, pickle, or lossy hashing."""
     object_dtype = is_object_dtype(dtype)
@@ -92,7 +112,7 @@ def _scalar_descriptor(value: Any, dtype: Any) -> bytes:
         return _record("object-pandas-na" if object_dtype else "missing")
     if value is pd.NaT:
         return _record("object-nat" if object_dtype else "missing")
-    if isinstance(value, (float, np.floating)) and np.isnan(value):
+    if not object_dtype and isinstance(value, (float, np.floating)) and np.isnan(value):
         return _record("object-float-nan" if object_dtype else "missing")
     if isinstance(dtype, pd.CategoricalDtype):
         return _scalar_descriptor(value, dtype.categories.dtype)
@@ -118,6 +138,19 @@ def _scalar_descriptor(value: Any, dtype: Any) -> bytes:
             + _record("digits", bytes(decimal.digits))
             + _record("exponent", str(decimal.exponent).encode()),
         )
+    if isinstance(value, np.generic):
+        if not is_supported_numpy_scalar(value):
+            raise TypeError(f"unsupported NumPy scalar type: {value.dtype}")
+        return _numpy_scalar_descriptor(value, value.dtype)
+    if not object_dtype:
+        try:
+            numeric_dtype = np.dtype(dtype)
+        except TypeError:
+            numeric_dtype = None
+        if numeric_dtype is not None and numeric_dtype.kind in frozenset("biufc"):
+            return _numpy_scalar_descriptor(value, numeric_dtype)
+    if isinstance(value, float) and np.isnan(value):
+        return _record("object-float-nan")
     if isinstance(value, (bool, np.bool_)):
         return _record("bool", b"1" if value else b"0")
     if isinstance(value, (int, np.integer)):
@@ -128,18 +161,20 @@ def _scalar_descriptor(value: Any, dtype: Any) -> bytes:
         return _record("string", str(value).encode("utf-8"))
     if isinstance(value, (bytes, bytearray, memoryview)):
         return _record("bytes", bytes(value))
-    if isinstance(value, np.datetime64):
-        return _record("datetime64-nanoseconds", int(value.astype("datetime64[ns]").astype("int64")).to_bytes(8, "big", signed=True))
     if isinstance(value, (pd.Timedelta, np.timedelta64)):
         nanoseconds = pd.Timedelta(value).value
         return _record("timedelta-nanoseconds", int(nanoseconds).to_bytes(8, "big", signed=True))
     if isinstance(value, pd.Period):
-        return _record("period-ordinal", int(value.ordinal).to_bytes(8, "big", signed=True))
+        return _record(
+            "period",
+            _record("ordinal", int(value.ordinal).to_bytes(8, "big", signed=True))
+            + _record("freq", _frequency_string(value).encode()),
+        )
     if isinstance(value, pd.Interval):
         return _record(
             "interval",
-            _scalar_descriptor(value.left, dtype.subtype)
-            + _scalar_descriptor(value.right, dtype.subtype)
+            _scalar_descriptor(value.left, object)
+            + _scalar_descriptor(value.right, object)
             + _record("closed", value.closed.encode()),
         )
     raise TypeError(f"unsupported frame value type: {type(value).__qualname__}")
