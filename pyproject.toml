@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pylgm"
+version = "0.1.0"
+description = "Configuration-driven latent Gaussian models for panel data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Andrea Panozzo" }]
+dependencies = [
+  "formulaic>=1.1",
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "pydantic>=2.8",
+  "pyyaml>=6.0",
+  "scipy>=1.14",
+  "typer>=0.15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.9"]
+
+[project.scripts]
+pylgm = "pylgm.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pylgm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
