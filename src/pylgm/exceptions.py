@@ -13,6 +13,14 @@ class DataContractError(PyLGMError):
     """Input data violates the canonical panel contract."""
 
 
+class FoldConstructionError(PyLGMError):
+    """Evaluation data cannot form a leakage-safe predictive fold."""
+
+
+class CovariateAvailabilityError(FoldConstructionError):
+    """A predictive fold requires a covariate unavailable at its origin."""
+
+
 class CompilationError(PyLGMError):
     """Validated configuration and data could not be compiled into model IR."""
 
