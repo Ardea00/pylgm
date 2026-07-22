@@ -11,7 +11,12 @@ from pylgm.ir import CompiledGaussianFamily
 from pylgm.optimization.result import EmpiricalBayesResult, OptimizationDiagnostics
 
 
-_INVALID_OBJECTIVE = float(np.finfo(float).max)
+def _transform_objective(raw_objective: float) -> float:
+    magnitude = float(np.log1p(abs(raw_objective)))
+    return -magnitude if raw_objective < 0.0 else magnitude
+
+
+_INVALID_OBJECTIVE = _transform_objective(float(np.finfo(float).max)) + 1.0
 # Absolute distance in log space used both to snap and report active bounds.
 _LOG_BOUND_ATOL = 1e-8
 
@@ -53,6 +58,7 @@ class OptimizationBounds:
 @dataclass(frozen=True)
 class _Evaluation:
     objective: float
+    raw_objective: float | None
     fit: GaussianResult | None
     parameters: Mapping[str, float] | None
 
@@ -105,9 +111,20 @@ def _parameter_values(
         transformed = np.exp(np.asarray(log_parameters, dtype=float))
     transformed = np.clip(transformed, lower, upper)
     for index, value in enumerate(log_parameters):
-        if abs(value - log_lower[index]) <= _LOG_BOUND_ATOL:
+        low = log_lower[index]
+        high = log_upper[index]
+        if value == low:
             transformed[index] = lower[index]
-        elif abs(value - log_upper[index]) <= _LOG_BOUND_ATOL:
+            continue
+        if value == high:
+            transformed[index] = upper[index]
+            continue
+        tolerance = _log_bound_tolerance(low, high)
+        low_distance = abs(value - low)
+        high_distance = abs(value - high)
+        if low_distance < high_distance and low_distance <= tolerance:
+            transformed[index] = lower[index]
+        elif high_distance < low_distance and high_distance <= tolerance:
             transformed[index] = upper[index]
     if not np.isfinite(transformed).all() or np.any(transformed <= 0):
         raise NumericalError("log-transformed parameters must be finite and positive")
@@ -115,6 +132,11 @@ def _parameter_values(
         name: float(value)
         for name, value in zip(names, transformed, strict=True)
     }
+
+
+def _log_bound_tolerance(lower: float, upper: float) -> float:
+    half_gap = (upper - lower) / 2.0
+    return min(_LOG_BOUND_ATOL, float(np.nextafter(half_gap, 0.0)))
 
 
 def optimize_empirical_bayes(
@@ -126,6 +148,15 @@ def optimize_empirical_bayes(
     names, initial_values = _validate_problem(family, bounds, initial)
     lower = np.log([bounds[name].lower for name in names])
     upper = np.log([bounds[name].upper for name in names])
+    collapsed = tuple(
+        name
+        for name, low, high in zip(names, lower, upper, strict=True)
+        if not low < high
+    )
+    if collapsed:
+        raise OptimizationError(
+            f"natural bounds for parameters {collapsed!r} collapse in log space"
+        )
     natural_lower = np.asarray([bounds[name].lower for name in names])
     natural_upper = np.asarray([bounds[name].upper for name in names])
     start = np.log([initial_values[name] for name in names])
@@ -133,12 +164,12 @@ def optimize_empirical_bayes(
 
     cache: dict[tuple[float, ...], _Evaluation] = {}
     failures: list[str] = []
-    failure_causes: list[InferenceError] = []
+    latest_failure: InferenceError | None = None
     evaluations = 0
     cache_hits = 0
 
     def objective(log_parameters: np.ndarray) -> float:
-        nonlocal evaluations, cache_hits
+        nonlocal evaluations, cache_hits, latest_failure
         key = tuple(float(value) for value in log_parameters)
         if key in cache:
             cache_hits += 1
@@ -154,16 +185,21 @@ def optimize_empirical_bayes(
                 upper,
             )
             fit = fit_gaussian(family.materialize(parameters))
-            objective_value = -float(fit.log_marginal_likelihood)
-            if not np.isfinite(objective_value):
+            raw_objective = -float(fit.log_marginal_likelihood)
+            if not np.isfinite(raw_objective):
                 raise NumericalError("optimization objective must be finite")
-            evaluation = _Evaluation(objective_value, fit, parameters)
+            evaluation = _Evaluation(
+                _transform_objective(raw_objective),
+                raw_objective,
+                fit,
+                parameters,
+            )
         except InferenceError as error:
-            failure_causes.append(error)
+            latest_failure = error
             failures.append(
                 f"log_parameters={key!r}: {type(error).__name__}: {error}"
             )
-            evaluation = _Evaluation(_INVALID_OBJECTIVE, None, None)
+            evaluation = _Evaluation(_INVALID_OBJECTIVE, None, None, None)
         cache[key] = evaluation
         return evaluation.objective
 
@@ -174,8 +210,8 @@ def optimize_empirical_bayes(
             cache_hits=cache_hits,
             numerical_failures=tuple(failures),
         )
-        if failure_causes:
-            raise error from failure_causes[-1]
+        if latest_failure is not None:
+            raise error from latest_failure
         raise error
 
     started = perf_counter()
@@ -185,6 +221,7 @@ def optimize_empirical_bayes(
             start,
             method="L-BFGS-B",
             bounds=scipy_bounds,
+            options={"ftol": 1e-12, "gtol": 1e-10},
         )
     elapsed_seconds = perf_counter() - started
 
@@ -208,18 +245,19 @@ def optimize_empirical_bayes(
             "empirical-Bayes optimization did not produce a valid final point"
         )
     assert final_evaluation.parameters is not None
+    assert final_evaluation.raw_objective is not None
 
     active_bounds = tuple(
         name
         for name, value, low, high in zip(
             names, final_vector, lower, upper, strict=True
         )
-        if np.isclose(value, low, rtol=0.0, atol=_LOG_BOUND_ATOL)
-        or np.isclose(value, high, rtol=0.0, atol=_LOG_BOUND_ATOL)
+        if min(abs(value - low), abs(value - high))
+        <= _log_bound_tolerance(low, high)
     )
     diagnostics = OptimizationDiagnostics(
         converged=True,
-        objective=final_evaluation.objective,
+        objective=final_evaluation.raw_objective,
         evaluations=evaluations,
         cache_hits=cache_hits,
         elapsed_seconds=elapsed_seconds,
