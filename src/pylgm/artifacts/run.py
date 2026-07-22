@@ -2,7 +2,11 @@
 
 import hashlib
 import json
+import os
+import errno
 import platform
+import shutil
+import tempfile
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -70,8 +74,29 @@ def write_run(
         "labels": list(result.labels),
     }
 
-    output.mkdir(parents=True, exist_ok=False)
-    (output / "resolved_config.json").write_bytes(_canonical_json(resolved_config))
-    np.savez_compressed(output / "posterior.npz", mean=result.mean, covariance=result.covariance)
-    (output / "summary.json").write_bytes(_canonical_json(summary))
-    (output / "environment.json").write_bytes(_canonical_json(environment))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    lock = output.parent / f".{output.name}.lock"
+    try:
+        lock_descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as error:
+        raise FileExistsError(f"run output is being created: {output}") from error
+    else:
+        os.close(lock_descriptor)
+
+    temporary: Path | None = None
+    try:
+        if output.exists():
+            raise FileExistsError(errno.EEXIST, "File exists", output)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
+        (temporary / "resolved_config.json").write_bytes(_canonical_json(resolved_config))
+        np.savez_compressed(temporary / "posterior.npz", mean=result.mean, covariance=result.covariance)
+        (temporary / "summary.json").write_bytes(_canonical_json(summary))
+        (temporary / "environment.json").write_bytes(_canonical_json(environment))
+        if output.exists():
+            raise FileExistsError(errno.EEXIST, "File exists", output)
+        os.rename(temporary, output)
+        temporary = None
+    finally:
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
+        lock.unlink(missing_ok=True)
