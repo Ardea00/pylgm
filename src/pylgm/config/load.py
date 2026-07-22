@@ -6,6 +6,7 @@ from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode
 
 from pylgm.config.schema import RunConfig
+from pylgm.config.experiment import ExperimentConfig, resolve_candidates
 from pylgm.exceptions import ConfigurationError
 
 
@@ -35,4 +36,14 @@ def load_config(path: Path) -> RunConfig:
         payload = yaml.load(path.read_text(), Loader=_UniqueKeySafeLoader)
         return RunConfig.model_validate(payload)
     except (OSError, yaml.YAMLError, ValidationError, TypeError) as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
+def load_experiment_config(path: Path) -> ExperimentConfig:
+    try:
+        payload = yaml.load(path.read_text(), Loader=_UniqueKeySafeLoader)
+        config = ExperimentConfig.model_validate(payload)
+        resolve_candidates(config)
+        return config
+    except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as exc:
         raise ConfigurationError(str(exc)) from exc
