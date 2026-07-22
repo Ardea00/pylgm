@@ -21,6 +21,10 @@ class CovariateAvailabilityError(FoldConstructionError):
     """A predictive fold requires a covariate unavailable at its origin."""
 
 
+class SelectionError(PyLGMError):
+    """Predictive comparison cannot determine an eligible candidate."""
+
+
 class CompilationError(PyLGMError):
     """Validated configuration and data could not be compiled into model IR."""
 
