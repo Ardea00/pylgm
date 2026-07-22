@@ -31,3 +31,7 @@ class NumericalError(InferenceError, LinAlgError, ArithmeticError):
 
 class DenseReferenceLimitError(InferenceError):
     """The small/medium dense reference engine's safety limit was exceeded."""
+
+
+class OptimizationError(PyLGMError):
+    """Hyperparameter optimization did not produce a valid optimum."""
