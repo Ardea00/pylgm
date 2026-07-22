@@ -3,7 +3,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
-from scipy.sparse import block_diag, hstack
+from scipy.sparse import block_diag, csr_matrix, hstack
 
 from pylgm.exceptions import ModelValidationError
 from pylgm.ir.model import CompiledLGM, LatentBlock
@@ -93,6 +93,18 @@ def _assemble_compiled_model(
     blocks: tuple[LatentBlock, ...],
     sigma: float,
 ) -> CompiledLGM:
+    if not blocks:
+        return CompiledLGM(
+            y=y,
+            observed=observed,
+            offset=offset,
+            design=csr_matrix((y.size, 0)),
+            precision=csr_matrix((0, 0)),
+            constraints=np.empty((0, 0)),
+            labels=(),
+            sigma=sigma,
+            blocks=(),
+        )
     widths = [block.design.shape[1] for block in blocks]
     total = sum(widths)
     constraint_rows: list[np.ndarray] = []
@@ -175,11 +187,32 @@ class CompiledGaussianFamily:
             raise ModelValidationError("parameter names must be non-empty strings")
         if len(names) != len(set(names)):
             raise ModelValidationError("parameter names must be unique")
-        bindings = {item.parameter for item in block_values if item.parameter is not None}
-        if not bindings.issubset(names):
-            raise ModelValidationError("scalable block parameters must be declared")
         if not isinstance(initial, Hyperparameters):
             raise ModelValidationError("family initial values must be hyperparameters")
+        bindings = tuple(
+            item.parameter for item in block_values if item.parameter is not None
+        )
+        if len(bindings) != len(set(bindings)):
+            raise ModelValidationError("scalable block parameters must be unique")
+        for item in block_values:
+            if item.parameter is None:
+                continue
+            expected = f"{item.block.name}.precision"
+            if item.parameter != expected:
+                raise ModelValidationError(
+                    "scalable block parameter must match its block precision"
+                )
+            if item.block.name not in initial.precisions:
+                raise ModelValidationError(
+                    "bound scalable blocks require an initial configured precision"
+                )
+        expected_names = set(bindings)
+        if "sigma" in names:
+            expected_names.add("sigma")
+        if set(names) != expected_names:
+            raise ModelValidationError(
+                "parameter names must exactly match bound block precisions and sigma"
+            )
         object.__setattr__(self, "_y", _readonly_array(y_value))
         object.__setattr__(self, "_observed", _readonly_array(observed_value))
         object.__setattr__(self, "_offset", _readonly_array(offset_value))

@@ -4,7 +4,7 @@ import pytest
 from scipy.sparse import csr_matrix
 from typing import cast
 
-from pylgm.compiler import compile_model
+from pylgm.compiler import compile_gaussian_family, compile_model
 from pylgm.config.schema import RunConfig
 from pylgm.data import CanonicalPanel
 from pylgm.exceptions import CompilationError, DataContractError
@@ -265,3 +265,19 @@ def test_qualified_label_collision_is_a_compilation_error() -> None:
 
     with pytest.raises(CompilationError, match="duplicate latent labels"):
         compile_model(config, panel)
+
+
+@pytest.mark.parametrize("optimized", [("unknown",), ("sigma", "sigma"), (1,)])
+def test_gaussian_family_compiler_rejects_invalid_optimized_names(
+    optimized: tuple[object, ...],
+) -> None:
+    config = _config_with_effect_index()
+    panel = CanonicalPanel.from_frame(
+        pd.DataFrame({"month": [1], "y": [1.0], "x": [0.0], "group": ["A"]}),
+        config.data,
+    )
+
+    with pytest.raises(CompilationError, match="optimized parameter names|unknown"):
+        compile_gaussian_family(
+            config.data, config.model, panel, optimized=optimized  # type: ignore[arg-type]
+        )
