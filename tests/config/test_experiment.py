@@ -3,6 +3,7 @@ import json
 import pytest
 
 from pylgm.config import ExperimentConfig, load_experiment_config, resolve_candidates
+from pylgm.config.experiment import ExperimentDataConfig
 from pylgm.exceptions import ConfigurationError
 
 
@@ -308,3 +309,14 @@ def test_resolved_candidate_serializes_to_an_isolated_json_ready_mapping(
     assert config.inference.hyperparameters.optimize["sigma"].upper == 5.0
     assert other[0].model.effects[0].name == "trend"
     assert other[0].optimize["sigma"].upper == 5.0
+
+
+def test_omitted_covariates_default_is_immutable_isolated_and_serializable() -> None:
+    first = ExperimentDataConfig(time="month", response="y")
+    second = ExperimentDataConfig(time="month", response="y")
+
+    assert first.covariates is not second.covariates
+    assert first.model_dump()["covariates"] == {}
+    assert first.model_dump_json() == second.model_dump_json()
+    with pytest.raises(TypeError):
+        first.covariates["lag1"] = object()  # type: ignore[index]

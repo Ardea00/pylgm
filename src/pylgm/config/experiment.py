@@ -48,7 +48,9 @@ class CovariateConfig(StrictModel):
 
 class ExperimentDataConfig(DataConfig):
     vintage: str | None = None
-    covariates: Mapping[str, CovariateConfig] = Field(default_factory=dict)
+    covariates: Mapping[str, CovariateConfig] = Field(
+        default_factory=dict, validate_default=True
+    )
 
     @field_validator("covariates")
     @classmethod
