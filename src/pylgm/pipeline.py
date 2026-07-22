@@ -3,12 +3,14 @@
 import hashlib
 import struct
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_extension_array_dtype
+from pandas.api.types import is_extension_array_dtype, is_object_dtype
 
 from pylgm.artifacts.run import write_run
 from pylgm.compiler import compile_model
@@ -70,7 +72,11 @@ def _dtype_descriptor(dtype: Any) -> bytes:
             _dtype_descriptor(dtype.subtype) + _scalar_descriptor(dtype.fill_value, dtype.subtype),
         )
     if isinstance(dtype, pd.StringDtype):
-        return _record("string-dtype", _record("storage", dtype.storage.encode()))
+        return _record(
+            "string-dtype",
+            _record("storage", dtype.storage.encode())
+            + _record("na-value", _scalar_descriptor(dtype.na_value, object)),
+        )
     if is_extension_array_dtype(dtype):
         name = f"{type(dtype).__module__}.{type(dtype).__qualname__}".encode()
         return _record("extension-dtype", _record("class", name) + _record("name", dtype.name.encode()))
@@ -79,12 +85,39 @@ def _dtype_descriptor(dtype: Any) -> bytes:
 
 def _scalar_descriptor(value: Any, dtype: Any) -> bytes:
     """Encode supported scalar values without repr, pickle, or lossy hashing."""
-    if value is None or value is pd.NA or value is pd.NaT:
-        return _record("missing")
+    object_dtype = is_object_dtype(dtype)
+    if value is None:
+        return _record("object-none" if object_dtype else "missing")
+    if value is pd.NA:
+        return _record("object-pandas-na" if object_dtype else "missing")
+    if value is pd.NaT:
+        return _record("object-nat" if object_dtype else "missing")
     if isinstance(value, (float, np.floating)) and np.isnan(value):
-        return _record("missing")
+        return _record("object-float-nan" if object_dtype else "missing")
     if isinstance(dtype, pd.CategoricalDtype):
         return _scalar_descriptor(value, dtype.categories.dtype)
+    if isinstance(value, pd.Timestamp):
+        timezone = _record("naive") if value.tz is None else _timezone_descriptor(value.tz)
+        return _record(
+            "timestamp",
+            int(value.value).to_bytes(8, "big", signed=True) + timezone,
+        )
+    if isinstance(value, datetime):
+        timezone = _record("naive") if value.tzinfo is None else _timezone_descriptor(value.tzinfo)
+        return _record(
+            "datetime",
+            int(pd.Timestamp(value).value).to_bytes(8, "big", signed=True) + timezone,
+        )
+    if isinstance(value, date):
+        return _record("date", value.isoformat().encode())
+    if isinstance(value, Decimal):
+        decimal = value.as_tuple()
+        return _record(
+            "decimal",
+            _record("sign", str(decimal.sign).encode())
+            + _record("digits", bytes(decimal.digits))
+            + _record("exponent", str(decimal.exponent).encode()),
+        )
     if isinstance(value, (bool, np.bool_)):
         return _record("bool", b"1" if value else b"0")
     if isinstance(value, (int, np.integer)):
@@ -95,8 +128,6 @@ def _scalar_descriptor(value: Any, dtype: Any) -> bytes:
         return _record("string", str(value).encode("utf-8"))
     if isinstance(value, (bytes, bytearray, memoryview)):
         return _record("bytes", bytes(value))
-    if isinstance(value, pd.Timestamp):
-        return _record("timestamp-nanoseconds", int(value.value).to_bytes(8, "big", signed=True))
     if isinstance(value, np.datetime64):
         return _record("datetime64-nanoseconds", int(value.astype("datetime64[ns]").astype("int64")).to_bytes(8, "big", signed=True))
     if isinstance(value, (pd.Timedelta, np.timedelta64)):
@@ -121,7 +152,8 @@ def _panel_fingerprint(panel: CanonicalPanel) -> str:
     schema = _sequence(
         "schema",
         [
-            _record("column", str(column).encode("utf-8")) + _dtype_descriptor(frame.dtypes.iloc[index])
+            _record("column-string", column.encode("utf-8"))
+            + _dtype_descriptor(frame.dtypes.iloc[index])
             for index, column in enumerate(columns)
         ],
     )
