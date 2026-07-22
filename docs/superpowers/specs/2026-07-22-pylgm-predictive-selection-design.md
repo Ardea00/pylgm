@@ -97,6 +97,8 @@ pipeline.
 Candidates inherit the base model and may override schema-approved model fields.
 List overrides replace the complete list. Before execution, every candidate is
 expanded into and persisted as a complete resolved model.
+Candidates inherit global optimization bounds or replace them with a complete
+candidate-specific mapping when their effect names differ.
 
 Only `strategy: empirical_bayes` is accepted in this release. Unknown strategies
 fail configuration validation; no strategy is selected implicitly.
@@ -127,6 +129,12 @@ Evaluation modes:
 - `vintage`: requires a configured vintage/as-of column and keeps only values whose
   vintage was available at the origin.
 
+Vintage input may contain repeated panel/time keys across releases. The model frame
+uses the latest release available at the origin; scoring truth uses the latest
+release in the supplied evaluation dataset and is labeled accordingly. A future
+target row or covariate must exist in the origin snapshot to be used; otherwise the
+fold fails instead of borrowing it from a later release.
+
 Every formula covariate has a declared availability policy: `known_future`,
 `observed_with_lag`, or `unavailable_future`. A fold fails before fitting if a target
 uses a covariate unavailable at that origin. Prediction outputs retain panel keys,
@@ -156,6 +164,8 @@ The milestone includes a persistence forecaster: each target prediction equals t
 most recent response available at the origin for the same panel key. It uses the same origins,
 horizons, target rows, and metrics as LGM candidates. It is not optimized and cannot
 be selected as the final LGM model unless a later design explicitly permits that.
+Its predictive variance is estimated separately by horizon from persistence errors
+available before the origin, so its probabilistic score also remains leakage-free.
 
 No general external-model plugin API is added now.
 
