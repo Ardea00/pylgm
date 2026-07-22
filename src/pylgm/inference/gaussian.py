@@ -81,6 +81,12 @@ def fit_gaussian(model: CompiledLGM) -> GaussianResult:
         raise ValueError("design must have one column per latent variable")
     if len(model.labels) != latent_size:
         raise ValueError("labels must have one entry per latent variable")
+    if not np.isfinite(y[observed]).all():
+        raise ValueError("observed y values must be finite")
+    if not np.isfinite(offset).all():
+        raise ValueError("offset must be finite")
+    if not np.isfinite(design.data).all():
+        raise ValueError("design data must be finite")
 
     basis = _constraint_null_space(constraints, latent_size)
     observed_design = design[observed]

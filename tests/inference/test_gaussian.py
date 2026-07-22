@@ -259,3 +259,56 @@ def test_sigma_must_have_a_finite_positive_variance(sigma: float) -> None:
 
     with pytest.raises(ValueError, match="sigma squared must be finite and positive"):
         fit_gaussian(model)
+
+
+def test_observed_nan_response_fails_before_zero_dimensional_inference() -> None:
+    model = CompiledLGM(
+        y=np.array([np.nan]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.array([[1.0]]),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="observed y values must be finite"):
+        fit_gaussian(model)
+
+
+@pytest.mark.parametrize("bad_offset", [np.nan, np.inf])
+def test_nonfinite_offset_is_rejected_for_predictions(bad_offset: float) -> None:
+    model = CompiledLGM(
+        y=np.array([1.0, np.nan]),
+        observed=np.array([True, False]),
+        offset=np.array([0.0, bad_offset]),
+        design=csr_matrix([[1.0], [1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="offset must be finite"):
+        fit_gaussian(model)
+
+
+@pytest.mark.parametrize("bad_design_value", [np.nan, np.inf])
+def test_nonfinite_sparse_design_data_is_rejected(bad_design_value: float) -> None:
+    model = CompiledLGM(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[bad_design_value]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="design data must be finite"):
+        fit_gaussian(model)
