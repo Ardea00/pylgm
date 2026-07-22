@@ -31,7 +31,16 @@ def _canonical_json(value: Any) -> bytes:
 
 
 def _environment() -> dict[str, Any]:
-    dependencies = ["pylgm", "numpy", "scipy", "pandas", "formulaic", "pydantic"]
+    dependencies = [
+        "pylgm",
+        "numpy",
+        "scipy",
+        "pandas",
+        "formulaic",
+        "pydantic",
+        "PyYAML",
+        "typer",
+    ]
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -121,18 +130,41 @@ def _publish_no_replace(source: Path, destination: Path) -> None:
             _raise_publish_error(destination)
         return
     if sys.platform.startswith("linux"):
-        syscall_number = _RENAMEAT2_SYSCALLS.get(platform.machine().lower())
-        if syscall_number is None:
-            raise OSError(errno.ENOTSUP, "renameat2 is unsupported on this architecture")
-        syscall = ctypes.CDLL(None, use_errno=True).syscall
-        if syscall(
-            syscall_number,
-            _AT_FDCWD,
-            os.fsencode(source),
-            _AT_FDCWD,
-            os.fsencode(destination),
-            _RENAME_NOREPLACE,
-        ) != 0:
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename = getattr(libc, "renameat2", None)
+        if rename is not None:
+            rename.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            rename.restype = ctypes.c_int
+            status = rename(
+                _AT_FDCWD,
+                os.fsencode(source),
+                _AT_FDCWD,
+                os.fsencode(destination),
+                _RENAME_NOREPLACE,
+            )
+        else:
+            syscall_number = _RENAMEAT2_SYSCALLS.get(platform.machine().lower())
+            if syscall_number is None:
+                raise OSError(
+                    errno.ENOTSUP,
+                    "atomic no-replace renameat2 is unsupported on this Linux platform",
+                )
+            syscall = libc.syscall
+            status = syscall(
+                syscall_number,
+                _AT_FDCWD,
+                os.fsencode(source),
+                _AT_FDCWD,
+                os.fsencode(destination),
+                _RENAME_NOREPLACE,
+            )
+        if status != 0:
             _raise_publish_error(destination)
         return
     if os.name == "nt":
@@ -161,6 +193,7 @@ def write_run(
     artifact_fingerprint = hashlib.sha256(
         _canonical_json(
             {
+                "artifact_schema_version": 1,
                 "data_fingerprint": data_fingerprint,
                 "resolved_config": resolved_config,
                 "result": {
@@ -176,6 +209,7 @@ def write_run(
         )
     ).hexdigest()
     summary = {
+        "artifact_schema_version": 1,
         "engine": "exact_gaussian",
         "conditional_on_fixed_hyperparameters": True,
         "data_fingerprint": data_fingerprint,

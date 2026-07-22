@@ -35,11 +35,13 @@ def test_pipeline_persists_resolved_run(tmp_path: Path) -> None:
     resolved = json.loads((output / "resolved_config.json").read_text())
     assert result.mean.shape == (1,)
     assert summary["engine"] == "exact_gaussian"
+    assert summary["artifact_schema_version"] == 1
     assert summary["conditional_on_fixed_hyperparameters"] is True
     assert len(summary["data_fingerprint"]) == 64
     assert resolved["model"]["fixed_prior_precision"] == 1e-6
     assert (output / "posterior.npz").exists()
-    assert (output / "environment.json").exists()
+    environment = json.loads((output / "environment.json").read_text())
+    assert {"PyYAML", "typer"}.issubset(environment["dependencies"])
 
 
 def test_pipeline_rejects_existing_output_directory(tmp_path: Path) -> None:
@@ -286,3 +288,52 @@ def test_windows_publisher_declares_movefileex_signature_and_maps_existing_error
     monkeypatch.setattr(run_artifacts.ctypes, "get_last_error", lambda: 183, raising=False)
     with pytest.raises(FileExistsError):
         run_artifacts._publish_no_replace(source, destination)
+
+
+def test_linux_publisher_prefers_exported_renameat2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RenameAt2:
+        def __init__(self) -> None:
+            self.argtypes: object = None
+            self.restype: object = None
+            self.calls: list[tuple[object, ...]] = []
+
+        def __call__(self, *args: object) -> int:
+            self.calls.append(args)
+            return 0
+
+    class LibC:
+        def __init__(self, rename: RenameAt2) -> None:
+            self.renameat2 = rename
+
+        def syscall(self, *args: object) -> int:
+            raise AssertionError("raw syscall must not be used when renameat2 is exported")
+
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    rename = RenameAt2()
+    monkeypatch.setattr(run_artifacts.sys, "platform", "linux")
+    monkeypatch.setattr(run_artifacts.platform, "machine", lambda: "unknown")
+    monkeypatch.setattr(run_artifacts.ctypes, "CDLL", lambda *args, **kwargs: LibC(rename))
+    monkeypatch.setattr(run_artifacts, "_destination_exists", lambda path: False)
+
+    run_artifacts._publish_no_replace(source, destination)
+
+    assert rename.argtypes == [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    assert rename.restype is ctypes.c_int
+    assert rename.calls == [
+        (
+            run_artifacts._AT_FDCWD,
+            run_artifacts.os.fsencode(source),
+            run_artifacts._AT_FDCWD,
+            run_artifacts.os.fsencode(destination),
+            run_artifacts._RENAME_NOREPLACE,
+        )
+    ]
