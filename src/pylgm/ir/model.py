@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.sparse import csr_matrix
 
+from pylgm.exceptions import ModelValidationError
+
 
 def _readonly_array(value: np.ndarray) -> np.ndarray:
     result = np.array(value, copy=True)
@@ -16,6 +18,35 @@ def _readonly_csr_matrix(value: csr_matrix) -> csr_matrix:
     result.indices.setflags(write=False)
     result.indptr.setflags(write=False)
     return result
+
+
+def _numeric_array(value: np.ndarray, name: str, dimensions: int) -> np.ndarray:
+    result = np.asarray(value)
+    if result.ndim != dimensions:
+        raise ModelValidationError(f"{name} must be {dimensions}-dimensional")
+    if not np.issubdtype(result.dtype, np.number):
+        raise ModelValidationError(f"{name} must have a numeric dtype")
+    if not np.isfinite(result).all():
+        raise ModelValidationError(f"{name} must be finite")
+    return result
+
+
+def _numeric_csr(value: csr_matrix, name: str) -> csr_matrix:
+    if not isinstance(value, csr_matrix):
+        raise ModelValidationError(f"{name} must be a CSR sparse matrix")
+    if not np.issubdtype(value.dtype, np.number):
+        raise ModelValidationError(f"{name} must have a numeric dtype")
+    if not np.isfinite(value.data).all():
+        raise ModelValidationError(f"{name} data must be finite")
+    return value
+
+
+def _validate_symmetric(value: csr_matrix, name: str) -> None:
+    difference = value - value.T
+    if difference.nnz and not np.allclose(
+        difference.data, 0.0, rtol=1e-12, atol=1e-14
+    ):
+        raise ModelValidationError(f"{name} must be symmetric")
 
 
 @dataclass(frozen=True, init=False)
@@ -34,8 +65,30 @@ class LatentBlock:
         precision: csr_matrix,
         constraints: np.ndarray,
     ) -> None:
+        if not isinstance(name, str) or not name:
+            raise ModelValidationError("block name must be a non-empty string")
+        labels = tuple(labels)
+        if any(not isinstance(label, str) for label in labels):
+            raise ModelValidationError("block labels must be strings")
+        if len(labels) != len(set(labels)):
+            raise ModelValidationError("block labels must be unique")
+        design = _numeric_csr(design, "block design")
+        precision = _numeric_csr(precision, "block precision")
+        constraints = _numeric_array(constraints, "block constraints", 2)
+        width = design.shape[1]
+        if len(labels) != width:
+            raise ModelValidationError("block labels must align with the design width")
+        if precision.shape != (width, width):
+            raise ModelValidationError(
+                "block precision must be square and align with the design"
+            )
+        _validate_symmetric(precision, "block precision")
+        if constraints.shape[1] != width:
+            raise ModelValidationError(
+                "block constraints must align with the design width"
+            )
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "labels", tuple(labels))
+        object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "_design", _readonly_csr_matrix(design))
         object.__setattr__(self, "_precision", _readonly_csr_matrix(precision))
         object.__setattr__(self, "_constraints", _readonly_array(constraints))
@@ -77,15 +130,75 @@ class CompiledLGM:
         sigma: float,
         blocks: tuple[LatentBlock, ...],
     ) -> None:
+        y = np.asarray(y)
+        observed = np.asarray(observed)
+        offset = np.asarray(offset)
+        if y.ndim != 1 or not np.issubdtype(y.dtype, np.number):
+            raise ModelValidationError("y must be a one-dimensional numeric array")
+        if observed.ndim != 1 or not np.issubdtype(observed.dtype, np.bool_):
+            raise ModelValidationError(
+                "observed must be a one-dimensional boolean array"
+            )
+        offset = _numeric_array(offset, "offset", 1)
+        design = _numeric_csr(design, "design")
+        precision = _numeric_csr(precision, "precision")
+        constraints = _numeric_array(constraints, "constraints", 2)
+        labels = tuple(labels)
+        blocks = tuple(blocks)
+        rows, width = design.shape
+        if not (y.size == observed.size == offset.size == rows):
+            raise ModelValidationError(
+                "y, observed, offset, and design row counts must match"
+            )
+        if not np.isfinite(y[observed]).all():
+            raise ModelValidationError("observed y values must be finite")
+        if precision.shape != (width, width):
+            raise ModelValidationError(
+                "precision must be square and align with the design width"
+            )
+        _validate_symmetric(precision, "precision")
+        if constraints.shape[1] != width:
+            raise ModelValidationError("constraints must align with the design width")
+        if len(labels) != width:
+            raise ModelValidationError("labels must align with the design width")
+        if any(not isinstance(label, str) for label in labels):
+            raise ModelValidationError("labels must be strings")
+        if len(labels) != len(set(labels)):
+            raise ModelValidationError("labels must be unique")
+        if (
+            isinstance(sigma, (bool, np.bool_))
+            or not np.isfinite(sigma)
+            or sigma <= 0
+        ):
+            raise ModelValidationError("sigma must be finite and positive")
+        block_names = [block.name for block in blocks]
+        if len(block_names) != len(set(block_names)):
+            raise ModelValidationError("block names must be unique")
+        if blocks:
+            if any(block.design.shape[0] != rows for block in blocks):
+                raise ModelValidationError(
+                    "block design row counts must match the model"
+                )
+            if sum(block.design.shape[1] for block in blocks) != width:
+                raise ModelValidationError(
+                    "block widths must align with the model design"
+                )
+            qualified = tuple(
+                f"{block.name}:{label}" for block in blocks for label in block.labels
+            )
+            if labels != qualified:
+                raise ModelValidationError(
+                    "labels must align with block names and labels"
+                )
         object.__setattr__(self, "_y", _readonly_array(y))
         object.__setattr__(self, "_observed", _readonly_array(observed))
         object.__setattr__(self, "_offset", _readonly_array(offset))
         object.__setattr__(self, "_design", _readonly_csr_matrix(design))
         object.__setattr__(self, "_precision", _readonly_csr_matrix(precision))
         object.__setattr__(self, "_constraints", _readonly_array(constraints))
-        object.__setattr__(self, "labels", tuple(labels))
-        object.__setattr__(self, "sigma", sigma)
-        object.__setattr__(self, "blocks", tuple(blocks))
+        object.__setattr__(self, "labels", labels)
+        object.__setattr__(self, "sigma", float(sigma))
+        object.__setattr__(self, "blocks", blocks)
 
     @property
     def y(self) -> np.ndarray:

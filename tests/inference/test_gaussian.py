@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
+from pylgm.exceptions import ModelValidationError
 from pylgm.inference import fit_gaussian
 from pylgm.ir.model import CompiledLGM
 
@@ -117,20 +118,18 @@ def test_result_arrays_are_value_isolated() -> None:
 
 
 def test_non_symmetric_precision_fails_explicitly() -> None:
-    model = CompiledLGM(
-        y=np.empty(0),
-        observed=np.empty(0, dtype=bool),
-        offset=np.empty(0),
-        design=csr_matrix((0, 2)),
-        precision=csr_matrix([[1.0, 5.0], [0.0, 1.0]]),
-        constraints=np.empty((0, 2)),
-        labels=("a", "b"),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="precision must be symmetric"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="precision must be symmetric"):
+        CompiledLGM(
+            y=np.empty(0),
+            observed=np.empty(0, dtype=bool),
+            offset=np.empty(0),
+            design=csr_matrix((0, 2)),
+            precision=csr_matrix([[1.0, 5.0], [0.0, 1.0]]),
+            constraints=np.empty((0, 2)),
+            labels=("a", "b"),
+            sigma=1.0,
+            blocks=(),
+        )
 
 
 def test_singular_reduced_prior_fails_even_when_likelihood_is_informative() -> None:
@@ -193,54 +192,48 @@ def test_redundant_scaled_constraints_preserve_the_same_constrained_posterior() 
 
 
 def test_near_asymmetric_precision_is_rejected() -> None:
-    model = CompiledLGM(
-        y=np.empty(0),
-        observed=np.empty(0, dtype=bool),
-        offset=np.empty(0),
-        design=csr_matrix((0, 2)),
-        precision=csr_matrix([[2.0, 1e-9], [0.0, 2.0]]),
-        constraints=np.empty((0, 2)),
-        labels=("a", "b"),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="precision must be symmetric"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="precision must be symmetric"):
+        CompiledLGM(
+            y=np.empty(0),
+            observed=np.empty(0, dtype=bool),
+            offset=np.empty(0),
+            design=csr_matrix((0, 2)),
+            precision=csr_matrix([[2.0, 1e-9], [0.0, 2.0]]),
+            constraints=np.empty((0, 2)),
+            labels=("a", "b"),
+            sigma=1.0,
+            blocks=(),
+        )
 
 
 def test_integer_observation_mask_is_rejected() -> None:
-    model = CompiledLGM(
-        y=np.array([1.0, 2.0]),
-        observed=np.array([1, 0]),
-        offset=np.zeros(2),
-        design=csr_matrix([[1.0], [1.0]]),
-        precision=csr_matrix([[1.0]]),
-        constraints=np.empty((0, 1)),
-        labels=("x",),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="observed must be a one-dimensional boolean array"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="one-dimensional boolean array"):
+        CompiledLGM(
+            y=np.array([1.0, 2.0]),
+            observed=np.array([1, 0]),
+            offset=np.zeros(2),
+            design=csr_matrix([[1.0], [1.0]]),
+            precision=csr_matrix([[1.0]]),
+            constraints=np.empty((0, 1)),
+            labels=("x",),
+            sigma=1.0,
+            blocks=(),
+        )
 
 
 def test_observation_lengths_must_match_design_rows() -> None:
-    model = CompiledLGM(
-        y=np.array([1.0, 2.0]),
-        observed=np.array([True, False]),
-        offset=np.zeros(2),
-        design=csr_matrix([[1.0]]),
-        precision=csr_matrix([[1.0]]),
-        constraints=np.empty((0, 1)),
-        labels=("x",),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="matching row counts"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="row counts must match"):
+        CompiledLGM(
+            y=np.array([1.0, 2.0]),
+            observed=np.array([True, False]),
+            offset=np.zeros(2),
+            design=csr_matrix([[1.0]]),
+            precision=csr_matrix([[1.0]]),
+            constraints=np.empty((0, 1)),
+            labels=("x",),
+            sigma=1.0,
+            blocks=(),
+        )
 
 
 @pytest.mark.parametrize("sigma", [1e-200, np.finfo(float).max])
@@ -262,53 +255,47 @@ def test_sigma_must_have_a_finite_positive_variance(sigma: float) -> None:
 
 
 def test_observed_nan_response_fails_before_zero_dimensional_inference() -> None:
-    model = CompiledLGM(
-        y=np.array([np.nan]),
-        observed=np.array([True]),
-        offset=np.zeros(1),
-        design=csr_matrix([[1.0]]),
-        precision=csr_matrix([[1.0]]),
-        constraints=np.array([[1.0]]),
-        labels=("x",),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="observed y values must be finite"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="observed y values must be finite"):
+        CompiledLGM(
+            y=np.array([np.nan]),
+            observed=np.array([True]),
+            offset=np.zeros(1),
+            design=csr_matrix([[1.0]]),
+            precision=csr_matrix([[1.0]]),
+            constraints=np.array([[1.0]]),
+            labels=("x",),
+            sigma=1.0,
+            blocks=(),
+        )
 
 
 @pytest.mark.parametrize("bad_offset", [np.nan, np.inf])
 def test_nonfinite_offset_is_rejected_for_predictions(bad_offset: float) -> None:
-    model = CompiledLGM(
-        y=np.array([1.0, np.nan]),
-        observed=np.array([True, False]),
-        offset=np.array([0.0, bad_offset]),
-        design=csr_matrix([[1.0], [1.0]]),
-        precision=csr_matrix([[1.0]]),
-        constraints=np.empty((0, 1)),
-        labels=("x",),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="offset must be finite"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="offset must be finite"):
+        CompiledLGM(
+            y=np.array([1.0, np.nan]),
+            observed=np.array([True, False]),
+            offset=np.array([0.0, bad_offset]),
+            design=csr_matrix([[1.0], [1.0]]),
+            precision=csr_matrix([[1.0]]),
+            constraints=np.empty((0, 1)),
+            labels=("x",),
+            sigma=1.0,
+            blocks=(),
+        )
 
 
 @pytest.mark.parametrize("bad_design_value", [np.nan, np.inf])
 def test_nonfinite_sparse_design_data_is_rejected(bad_design_value: float) -> None:
-    model = CompiledLGM(
-        y=np.array([1.0]),
-        observed=np.array([True]),
-        offset=np.zeros(1),
-        design=csr_matrix([[bad_design_value]]),
-        precision=csr_matrix([[1.0]]),
-        constraints=np.empty((0, 1)),
-        labels=("x",),
-        sigma=1.0,
-        blocks=(),
-    )
-
-    with pytest.raises(ValueError, match="design data must be finite"):
-        fit_gaussian(model)
+    with pytest.raises(ModelValidationError, match="design data must be finite"):
+        CompiledLGM(
+            y=np.array([1.0]),
+            observed=np.array([True]),
+            offset=np.zeros(1),
+            design=csr_matrix([[bad_design_value]]),
+            precision=csr_matrix([[1.0]]),
+            constraints=np.empty((0, 1)),
+            labels=("x",),
+            sigma=1.0,
+            blocks=(),
+        )
