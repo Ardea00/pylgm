@@ -502,7 +502,7 @@ The initial public research-library milestone succeeds when:
 7. failed numerical or diagnostic checks are visible and cannot silently select a final model;
 8. the core contains no CPI-specific assumptions and a synthetic non-economic panel example runs through the same pipeline.
 
-## 20. Normative references
+## 20. Foundational and comparative references
 
 - Rue, H. and Held, L. (2005). *Gaussian Markov Random Fields: Theory and Applications*. Chapman & Hall/CRC.
 - Rue, H., Martino, S., and Chopin, N. (2009). “Approximate Bayesian inference for latent Gaussian models by using integrated nested Laplace approximations.” *JRSS B*, 71(2), 319–392.
@@ -510,5 +510,6 @@ The initial public research-library milestone succeeds when:
 - Simpson, D., Rue, H., Riebler, A., Martins, T. G., and Sørbye, S. H. (2017). “Penalising model component complexity: A principled, practical approach to constructing priors.” *Statistical Science*, 32(1), 1–28.
 - Riebler, A., Sørbye, S. H., Simpson, D., and Rue, H. (2016). “An intuitive Bayesian spatial model for disease mapping that accounts for scaling.” *Statistical Methods in Medical Research*, 25(4), 1145–1165.
 - Ruiz-Cárdenas, R., Krainski, E. T., and Rue, H. (2012). “Direct fitting of dynamic models using integrated nested Laplace approximations—INLA.” *Computational Statistics & Data Analysis*, 56(6), 1808–1828.
+- Weiland, T. (2026). *Latte.jl: Probabilistic programming for latent Gaussian models in Julia*. [Documentation](https://lattejl.org/) and [source repository](https://github.com/timweiland/Latte.jl).
 
-These references are normative for mathematical conventions. Deviations require an explicit rationale in code documentation and validation against the reference formulation.
+The Rue and collaborator references are normative for mathematical conventions. Deviations require an explicit rationale in code documentation and validation against the reference formulation. Latte.jl is the comparative software reference for the one-model/multiple-engines architecture and an external validation oracle; pyLGM remains an independent Python implementation.
