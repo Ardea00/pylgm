@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cmp_to_key
 from types import MappingProxyType
 from typing import Mapping
 
@@ -91,6 +90,30 @@ def _metric_values(row: pd.Series, config: EvaluationConfig) -> tuple[float, flo
     return numeric[0], numeric[1]
 
 
+def _rank_metric_names(
+    names: list[str],
+    values: Mapping[str, tuple[float, float]],
+    rmse_tie_tolerance: float,
+) -> list[str]:
+    """Return a deterministic LPD-first ranking for names with finite metrics."""
+    ranking: list[str] = []
+    log_densities = sorted({values[name][0] for name in names}, reverse=True)
+    for log_density in log_densities:
+        same_score = [name for name in names if values[name][0] == log_density]
+        minimum_rmse = min(values[name][1] for name in same_score)
+        tied = sorted(
+            name
+            for name in same_score
+            if values[name][1] <= minimum_rmse + rmse_tie_tolerance
+        )
+        remaining = sorted(
+            (name for name in same_score if name not in tied),
+            key=lambda name: (values[name][1], name),
+        )
+        ranking.extend((*tied, *remaining))
+    return ranking
+
+
 def select_candidate(
     metrics: pd.DataFrame,
     failures: Mapping[str, object],
@@ -136,18 +159,22 @@ def select_candidate(
         eligible[name] = not candidate_reasons
         reasons[name] = tuple(candidate_reasons)
 
-    def compare(left: str, right: str) -> int:
-        if eligible[left] != eligible[right]:
-            return -1 if eligible[left] else 1
-        left_values = ranking_values.get(left, (-np.inf, np.inf))
-        right_values = ranking_values.get(right, (-np.inf, np.inf))
-        if left_values[0] != right_values[0]:
-            return -1 if left_values[0] > right_values[0] else 1
-        if abs(left_values[1] - right_values[1]) > config.rmse_tie_tolerance:
-            return -1 if left_values[1] < right_values[1] else 1
-        return -1 if left < right else (1 if left > right else 0)
-
-    ranking = tuple(sorted(names, key=cmp_to_key(compare)))
+    eligible_names = [name for name in names if eligible[name]]
+    ineligible_with_metrics = [
+        name for name in names if not eligible[name] and name in ranking_values
+    ]
+    ineligible_without_metrics = sorted(
+        name for name in names if not eligible[name] and name not in ranking_values
+    )
+    ranking = tuple(
+        _rank_metric_names(
+            eligible_names, ranking_values, config.rmse_tie_tolerance
+        )
+        + _rank_metric_names(
+            ineligible_with_metrics, ranking_values, config.rmse_tie_tolerance
+        )
+        + ineligible_without_metrics
+    )
     selected = next((name for name in ranking if eligible[name]), None)
     if selected is None:
         raise SelectionError("no eligible candidates available for selection")

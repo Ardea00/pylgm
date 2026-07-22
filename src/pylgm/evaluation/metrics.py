@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from numbers import Real
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,16 @@ def _interval_suffix(level: float) -> str:
 
 
 def _validated_levels(interval_levels: tuple[float, ...]) -> tuple[float, ...]:
-    levels = tuple(float(level) for level in interval_levels)
+    try:
+        raw_levels = tuple(interval_levels)
+    except TypeError as cause:
+        raise DataContractError("interval levels must be a sequence of real numbers") from cause
+    if any(
+        not isinstance(level, Real) or isinstance(level, (bool, np.bool_))
+        for level in raw_levels
+    ):
+        raise DataContractError("interval levels must be real numbers, not booleans")
+    levels = tuple(float(level) for level in raw_levels)
     if any(not np.isfinite(level) or not 0.0 < level < 1.0 for level in levels):
         raise DataContractError("interval levels must be finite and strictly inside (0, 1)")
     if len(levels) != len(set(levels)):

@@ -58,6 +58,30 @@ def test_selection_uses_rmse_tolerance_then_name_for_equal_log_scores() -> None:
     assert result.ranking == ("alpha", "zeta")
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            {"candidate": "zeta", "rmse": 1.000},
+            {"candidate": "beta", "rmse": 1.008},
+            {"candidate": "alpha", "rmse": 1.016},
+        ],
+        [
+            {"candidate": "alpha", "rmse": 1.016},
+            {"candidate": "zeta", "rmse": 1.000},
+            {"candidate": "beta", "rmse": 1.008},
+        ],
+    ],
+)
+def test_selection_anchors_rmse_tolerance_to_minimum_for_three_candidate_chain(
+    rows: list[dict[str, object]],
+) -> None:
+    result = select_candidate(metrics_table(rows), failures={}, config=selection_config())
+
+    assert result.selected == "beta"
+    assert result.ranking == ("beta", "zeta", "alpha")
+
+
 def test_failures_and_bad_calibration_are_ineligible_with_reasons() -> None:
     metrics = metrics_table(
         [

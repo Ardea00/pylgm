@@ -43,6 +43,23 @@ def test_scoring_rejects_nonpositive_or_nonfinite_variance(variance: float) -> N
         score_predictions(predictions, interval_levels=(0.95,))
 
 
+@pytest.mark.parametrize("level", [None, "0.95", True])
+def test_scoring_rejects_nonreal_or_boolean_interval_levels(level: object) -> None:
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0],
+            "mean": [0.0],
+            "variance": [1.0],
+            "candidate": ["a"],
+            "origin": [1],
+            "horizon": [1],
+        }
+    )
+
+    with pytest.raises(DataContractError, match="interval levels"):
+        score_predictions(predictions, interval_levels=(level,))  # type: ignore[arg-type]
+
+
 def test_scoring_adds_intervals_coverage_and_benchmark_identity() -> None:
     predictions = pd.DataFrame(
         {
