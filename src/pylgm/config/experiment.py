@@ -211,6 +211,17 @@ class ResolvedCandidate:
     model: ModelConfig
     optimize: Mapping[str, ParameterBounds]
 
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-ready, defensive snapshot of this resolved candidate."""
+        return {
+            "name": self.name,
+            "model": self.model.model_dump(mode="json"),
+            "optimize": {
+                parameter: bounds.model_dump(mode="json")
+                for parameter, bounds in sorted(self.optimize.items())
+            },
+        }
+
 
 def _validate_formula_availability(data: ExperimentDataConfig, model: ModelConfig) -> None:
     roles = {data.time, data.response, *data.panel}

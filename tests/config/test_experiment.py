@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import pytest
 
 from pylgm.config import ExperimentConfig, load_experiment_config, resolve_candidates
@@ -282,3 +283,28 @@ def test_candidate_formulaic_errors_become_configuration_errors(tmp_path: Path) 
 
     with pytest.raises(ConfigurationError):
         load_experiment_config(path)
+
+
+def test_resolved_candidate_serializes_to_an_isolated_json_ready_mapping(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    config = load_experiment_config(path)
+    candidate, other = resolve_candidates(config), resolve_candidates(config)
+
+    first = candidate[0].to_dict()
+    second = candidate[0].to_dict()
+
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+    assert first["name"] == "base"
+    assert first["model"]["sigma"] == 1.0  # type: ignore[index]
+    assert first["model"]["effects"][0]["name"] == "trend"  # type: ignore[index]
+    assert first["optimize"]["trend.precision"]["upper"] == 100.0  # type: ignore[index]
+    first["model"]["effects"][0]["name"] = "changed"  # type: ignore[index]
+    first["optimize"]["sigma"]["upper"] = 99.0  # type: ignore[index]
+    assert candidate[0].model.effects[0].name == "trend"
+    assert candidate[0].optimize["sigma"].upper == 5.0
+    assert config.inference.hyperparameters.optimize["sigma"].upper == 5.0
+    assert other[0].model.effects[0].name == "trend"
+    assert other[0].optimize["sigma"].upper == 5.0
