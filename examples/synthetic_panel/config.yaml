@@ -1,0 +1,13 @@
+schema_version: 1
+data:
+  time: month
+  response: y
+  panel: [region]
+model:
+  likelihood: gaussian
+  fixed: "1 + x"
+  fixed_prior_precision: 0.001
+  sigma: 0.4
+  effects:
+    - {name: region, type: iid, index: region, precision: 2.0}
+    - {name: trend, type: rw1, index: month, precision: 4.0}
