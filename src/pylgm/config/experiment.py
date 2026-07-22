@@ -95,6 +95,8 @@ class CandidateConfig(StrictModel):
     def freeze_optimize(
         cls, value: Mapping[str, ParameterBounds] | None
     ) -> Mapping[str, ParameterBounds] | None:
+        if value is not None and not value:
+            raise ValueError("optimize mapping must not be empty")
         return None if value is None else MappingProxyType(dict(value))
 
     @field_serializer("optimize")
@@ -113,6 +115,8 @@ class HyperparameterConfig(StrictModel):
     def freeze_optimize(
         cls, value: Mapping[str, ParameterBounds]
     ) -> Mapping[str, ParameterBounds]:
+        if not value:
+            raise ValueError("optimize mapping must not be empty")
         return MappingProxyType(dict(value))
 
     @field_serializer("optimize")

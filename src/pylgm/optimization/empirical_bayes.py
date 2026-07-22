@@ -11,7 +11,9 @@ from pylgm.ir import CompiledGaussianFamily
 from pylgm.optimization.result import EmpiricalBayesResult, OptimizationDiagnostics
 
 
-_INVALID_OBJECTIVE = 1e100
+_INVALID_OBJECTIVE = float(np.finfo(float).max)
+# Absolute distance in log space used both to snap and report active bounds.
+_LOG_BOUND_ATOL = 1e-8
 
 
 def _ordinary_positive(value: object, name: str) -> float:
@@ -66,7 +68,7 @@ def _validate_problem(
         raise TypeError("bounds must be a mapping")
     names = tuple(bounds)
     if not names:
-        raise ValueError("bounds must contain at least one parameter")
+        raise OptimizationError("bounds must contain at least one parameter")
     if set(names) != set(family.parameter_names):
         raise ValueError(
             "bounds must contain exactly the compiled family parameter names"
@@ -92,10 +94,21 @@ def _validate_problem(
 
 
 def _parameter_values(
-    names: tuple[str, ...], log_parameters: tuple[float, ...]
+    names: tuple[str, ...],
+    log_parameters: tuple[float, ...],
+    lower: np.ndarray,
+    upper: np.ndarray,
+    log_lower: np.ndarray,
+    log_upper: np.ndarray,
 ) -> dict[str, float]:
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         transformed = np.exp(np.asarray(log_parameters, dtype=float))
+    transformed = np.clip(transformed, lower, upper)
+    for index, value in enumerate(log_parameters):
+        if abs(value - log_lower[index]) <= _LOG_BOUND_ATOL:
+            transformed[index] = lower[index]
+        elif abs(value - log_upper[index]) <= _LOG_BOUND_ATOL:
+            transformed[index] = upper[index]
     if not np.isfinite(transformed).all() or np.any(transformed <= 0):
         raise NumericalError("log-transformed parameters must be finite and positive")
     return {
@@ -113,11 +126,14 @@ def optimize_empirical_bayes(
     names, initial_values = _validate_problem(family, bounds, initial)
     lower = np.log([bounds[name].lower for name in names])
     upper = np.log([bounds[name].upper for name in names])
+    natural_lower = np.asarray([bounds[name].lower for name in names])
+    natural_upper = np.asarray([bounds[name].upper for name in names])
     start = np.log([initial_values[name] for name in names])
     scipy_bounds = list(zip(lower, upper, strict=True))
 
     cache: dict[tuple[float, ...], _Evaluation] = {}
     failures: list[str] = []
+    failure_causes: list[InferenceError] = []
     evaluations = 0
     cache_hits = 0
 
@@ -129,13 +145,21 @@ def optimize_empirical_bayes(
             return cache[key].objective
         evaluations += 1
         try:
-            parameters = _parameter_values(names, key)
+            parameters = _parameter_values(
+                names,
+                key,
+                natural_lower,
+                natural_upper,
+                lower,
+                upper,
+            )
             fit = fit_gaussian(family.materialize(parameters))
             objective_value = -float(fit.log_marginal_likelihood)
             if not np.isfinite(objective_value):
                 raise NumericalError("optimization objective must be finite")
             evaluation = _Evaluation(objective_value, fit, parameters)
         except InferenceError as error:
+            failure_causes.append(error)
             failures.append(
                 f"log_parameters={key!r}: {type(error).__name__}: {error}"
             )
@@ -143,18 +167,30 @@ def optimize_empirical_bayes(
         cache[key] = evaluation
         return evaluation.objective
 
+    def fail(message: str) -> None:
+        error = OptimizationError(
+            message,
+            evaluations=evaluations,
+            cache_hits=cache_hits,
+            numerical_failures=tuple(failures),
+        )
+        if failure_causes:
+            raise error from failure_causes[-1]
+        raise error
+
     started = perf_counter()
-    solution = scipy.optimize.minimize(
-        objective,
-        start,
-        method="L-BFGS-B",
-        bounds=scipy_bounds,
-    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        solution = scipy.optimize.minimize(
+            objective,
+            start,
+            method="L-BFGS-B",
+            bounds=scipy_bounds,
+        )
     elapsed_seconds = perf_counter() - started
 
     if not bool(solution.success):
         message = str(getattr(solution, "message", "unknown optimizer failure"))
-        raise OptimizationError(f"empirical-Bayes optimization did not converge: {message}")
+        fail(f"empirical-Bayes optimization did not converge: {message}")
 
     final_vector = np.asarray(solution.x, dtype=float)
     if (
@@ -163,12 +199,12 @@ def optimize_empirical_bayes(
         or np.any(final_vector < lower)
         or np.any(final_vector > upper)
     ):
-        raise OptimizationError("empirical-Bayes optimizer returned an invalid final point")
+        fail("empirical-Bayes optimizer returned an invalid final point")
     objective(final_vector)
     final_key = tuple(float(value) for value in final_vector)
     final_evaluation = cache.get(final_key)
     if final_evaluation is None or final_evaluation.fit is None:
-        raise OptimizationError(
+        fail(
             "empirical-Bayes optimization did not produce a valid final point"
         )
     assert final_evaluation.parameters is not None
@@ -178,8 +214,8 @@ def optimize_empirical_bayes(
         for name, value, low, high in zip(
             names, final_vector, lower, upper, strict=True
         )
-        if np.isclose(value, low, rtol=1e-7, atol=1e-8)
-        or np.isclose(value, high, rtol=1e-7, atol=1e-8)
+        if np.isclose(value, low, rtol=0.0, atol=_LOG_BOUND_ATOL)
+        or np.isclose(value, high, rtol=0.0, atol=_LOG_BOUND_ATOL)
     )
     diagnostics = OptimizationDiagnostics(
         converged=True,

@@ -157,6 +157,25 @@ def test_optimization_bounds_are_finite_and_ordered(
         load_experiment_config(path)
 
 
+@pytest.mark.parametrize("location", ["global", "candidate"])
+def test_v2_optimization_mappings_cannot_be_empty(
+    tmp_path: Path,
+    location: str,
+) -> None:
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    yaml = __import__("yaml")
+    payload = yaml.safe_load(path.read_text())
+    if location == "global":
+        payload["inference"]["hyperparameters"]["optimize"] = {}
+    else:
+        payload["candidates"][0]["optimize"] = {}
+    path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ConfigurationError, match="optimize.*empty|at least one"):
+        load_experiment_config(path)
+
+
 def test_resolved_candidate_validates_optimized_effect_and_replaces_lists(tmp_path: Path) -> None:
     path = tmp_path / "experiment.yaml"
     write_experiment(path)

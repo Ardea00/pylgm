@@ -35,3 +35,43 @@ class DenseReferenceLimitError(InferenceError):
 
 class OptimizationError(PyLGMError):
     """Hyperparameter optimization did not produce a valid optimum."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        evaluations: int = 0,
+        cache_hits: int = 0,
+        numerical_failures: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self._evaluations = int(evaluations)
+        self._cache_hits = int(cache_hits)
+        self._numerical_failures = tuple(numerical_failures)
+
+    @property
+    def evaluations(self) -> int:
+        return self._evaluations
+
+    @property
+    def cache_hits(self) -> int:
+        return self._cache_hits
+
+    @property
+    def numerical_failures(self) -> tuple[str, ...]:
+        return self._numerical_failures
+
+    def to_dict(self) -> dict[str, object]:
+        cause = self.__cause__
+        root_cause = (
+            None
+            if cause is None
+            else {"type": type(cause).__name__, "message": str(cause)}
+        )
+        return {
+            "message": str(self),
+            "evaluations": self.evaluations,
+            "cache_hits": self.cache_hits,
+            "numerical_failures": list(self.numerical_failures),
+            "root_cause": root_cause,
+        }

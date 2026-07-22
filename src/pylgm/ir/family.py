@@ -5,7 +5,7 @@ from typing import Mapping
 import numpy as np
 from scipy.sparse import block_diag, csr_matrix, hstack
 
-from pylgm.exceptions import ModelValidationError
+from pylgm.exceptions import ModelValidationError, NumericalError
 from pylgm.ir.model import CompiledLGM, LatentBlock
 
 
@@ -240,20 +240,30 @@ class CompiledGaussianFamily:
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(values, self.parameter_names)
-        blocks = tuple(
-            LatentBlock(
-                item.block.name,
-                item.block.labels,
-                item.block.design,
-                item.block.precision
-                * (resolved[item.parameter] if item.parameter else item.scale),
-                item.block.constraints,
+        blocks: list[LatentBlock] = []
+        for item in self.blocks:
+            multiplier = (
+                resolved[item.parameter] if item.parameter else item.scale
             )
-            for item in self.blocks
-        )
+            with np.errstate(over="ignore", invalid="ignore"):
+                precision = item.block.precision * multiplier
+            if not np.isfinite(precision.data).all():
+                raise NumericalError(
+                    f"precision scaling for block {item.block.name!r} "
+                    "must remain finite"
+                )
+            blocks.append(
+                LatentBlock(
+                    item.block.name,
+                    item.block.labels,
+                    item.block.design,
+                    precision,
+                    item.block.constraints,
+                )
+            )
         sigma = resolved.get("sigma", self.initial.sigma)
         return _assemble_compiled_model(
-            self._y, self._observed, self._offset, blocks, sigma
+            self._y, self._observed, self._offset, tuple(blocks), sigma
         )
 
     def block_slice(self, name: str) -> slice:

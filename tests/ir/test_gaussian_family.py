@@ -8,7 +8,7 @@ from scipy.sparse import csr_matrix
 from pylgm.compiler import compile_gaussian_family, compile_model
 from pylgm.config.schema import DataConfig, ModelConfig, RunConfig
 from pylgm.data import CanonicalPanel
-from pylgm.exceptions import ModelValidationError
+from pylgm.exceptions import ModelValidationError, NumericalError
 from pylgm.inference import fit_gaussian
 from pylgm.ir import CompiledGaussianFamily, Hyperparameters, LatentBlock, ScalableBlock
 
@@ -328,6 +328,27 @@ def test_family_scales_requested_effects_and_preserves_rw_structure(
     np.testing.assert_allclose(low.design.toarray(), high.design.toarray())
     np.testing.assert_allclose(low.constraints, high.constraints)
     assert low.blocks[-1].constraints.shape == high.blocks[-1].constraints.shape
+
+
+def test_family_reports_parameter_driven_precision_overflow_as_numerical() -> None:
+    block = LatentBlock(
+        "latent",
+        ("x",),
+        csr_matrix([[1.0]]),
+        csr_matrix([[2.0]]),
+        np.empty((0, 1)),
+    )
+    family = CompiledGaussianFamily(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        blocks=(ScalableBlock(block, "latent.precision", 1.0),),
+        parameter_names=("latent.precision",),
+        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+    )
+
+    with pytest.raises(NumericalError, match="precision scaling"):
+        family.materialize({"latent.precision": 1e308})
 
 
 def test_family_isolates_source_values_accessors_and_materializations() -> None:

@@ -44,6 +44,19 @@ class OptimizationDiagnostics:
         object.__setattr__(self, "active_bounds", tuple(active_bounds))
         object.__setattr__(self, "numerical_failures", tuple(numerical_failures))
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "converged": self.converged,
+            "objective": self.objective,
+            "evaluations": self.evaluations,
+            "cache_hits": self.cache_hits,
+            "elapsed_seconds": self.elapsed_seconds,
+            "initial": dict(self.initial),
+            "optimum": dict(self.optimum),
+            "active_bounds": list(self.active_bounds),
+            "numerical_failures": list(self.numerical_failures),
+        }
+
 
 @dataclass(frozen=True, init=False)
 class EmpiricalBayesResult:
@@ -60,3 +73,20 @@ class EmpiricalBayesResult:
         object.__setattr__(self, "parameters", _immutable_float_mapping(parameters))
         object.__setattr__(self, "fit", fit)
         object.__setattr__(self, "diagnostics", diagnostics)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "parameters": dict(self.parameters),
+            "diagnostics": self.diagnostics.to_dict(),
+            "fit": {
+                "log_marginal_likelihood": self.fit.log_marginal_likelihood,
+                "latent_dimension": len(self.fit.labels),
+                "prediction_count": int(self.fit.predictive_mean.size),
+                "arrays_omitted": [
+                    "mean",
+                    "covariance",
+                    "predictive_mean",
+                    "predictive_variance",
+                ],
+            },
+        }

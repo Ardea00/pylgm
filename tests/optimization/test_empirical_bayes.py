@@ -1,13 +1,20 @@
 from collections.abc import Callable
+import json
 
 import numpy as np
 import pytest
 from scipy.optimize import OptimizeResult
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import DenseReferenceLimitError, OptimizationError
-from pylgm.inference import fit_gaussian
-from pylgm.ir import CompiledGaussianFamily, Hyperparameters, LatentBlock, ScalableBlock
+from pylgm.exceptions import DenseReferenceLimitError, NumericalError, OptimizationError
+from pylgm.inference import GaussianResult, fit_gaussian
+from pylgm.ir import (
+    CompiledGaussianFamily,
+    CompiledLGM,
+    Hyperparameters,
+    LatentBlock,
+    ScalableBlock,
+)
 from pylgm.optimization import (
     OptimizationBounds,
     optimize_empirical_bayes,
@@ -41,6 +48,40 @@ def scalar_conjugate_family(y: float) -> CompiledGaussianFamily:
         blocks=(ScalableBlock(block, "latent.precision", 1.0),),
         parameter_names=("latent.precision",),
         initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+    )
+
+
+def scalable_precision_family(base_precision: float = 1.0) -> CompiledGaussianFamily:
+    block = LatentBlock(
+        "latent",
+        ("x",),
+        csr_matrix([[1.0]]),
+        csr_matrix([[base_precision]]),
+        np.empty((0, 1)),
+    )
+    return CompiledGaussianFamily(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        blocks=(ScalableBlock(block, "latent.precision", 1.0),),
+        parameter_names=("latent.precision",),
+        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+    )
+
+
+def constant_fit(
+    model: CompiledLGM,
+    *,
+    log_marginal_likelihood: float = -1.0,
+) -> GaussianResult:
+    latent_size = len(model.labels)
+    return GaussianResult(
+        labels=model.labels,
+        mean=np.zeros(latent_size),
+        covariance=np.zeros((latent_size, latent_size)),
+        log_marginal_likelihood=log_marginal_likelihood,
+        predictive_mean=np.zeros(model.y.size),
+        predictive_variance=np.ones(model.y.size),
     )
 
 
@@ -109,6 +150,85 @@ def test_optimizer_uses_log_coordinates_and_caches_exact_vectors(
     assert captured["method"] == "L-BFGS-B"
     assert result.diagnostics.evaluations == 1
     assert result.diagnostics.cache_hits >= 1
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "endpoint"),
+    [
+        (0.1, 10.0, "lower"),
+        (0.1, 10.0, "upper"),
+        (0.1, 100.0, "upper"),
+        (float(np.nextafter(0.0, 1.0)), float(np.finfo(float).max), "lower"),
+        (float(np.nextafter(0.0, 1.0)), float(np.finfo(float).max), "upper"),
+    ],
+)
+def test_log_bound_endpoints_decode_exactly_and_round_trip_as_warm_starts(
+    lower: float,
+    upper: float,
+    endpoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = lower if endpoint == "lower" else upper
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        *,
+        bounds: list[tuple[float, float]],
+        **_: object,
+    ) -> OptimizeResult:
+        point = np.array([bounds[0][0 if endpoint == "lower" else 1]])
+        value = objective(point)
+        return OptimizeResult(x=point, fun=value, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes, "fit_gaussian", constant_fit)
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+    bounds = {
+        "sigma": OptimizationBounds(initial=1.0, lower=lower, upper=upper)
+    }
+
+    first = optimize_empirical_bayes(zero_latent_family(np.array([1.0])), bounds)
+    second = optimize_empirical_bayes(
+        zero_latent_family(np.array([1.0])),
+        bounds,
+        initial=first.parameters,
+    )
+
+    assert first.parameters["sigma"] == expected
+    assert second.diagnostics.initial["sigma"] == expected
+
+
+def test_invalid_penalty_dominates_every_finite_valid_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def extreme_fit(model: CompiledLGM) -> GaussianResult:
+        if model.sigma == 2.0:
+            raise NumericalError("invalid endpoint")
+        return constant_fit(model, log_marginal_likelihood=-1e200)
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        *,
+        bounds: list[tuple[float, float]],
+        **_: object,
+    ) -> OptimizeResult:
+        valid = objective(start)
+        invalid = objective(np.array([bounds[0][1]]))
+        assert valid > 1e100
+        assert invalid > valid
+        return OptimizeResult(x=start, fun=valid, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes, "fit_gaussian", extreme_fit)
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    result = optimize_empirical_bayes(
+        zero_latent_family(np.array([1.0])),
+        {"sigma": OptimizationBounds(initial=1.0, lower=0.5, upper=2.0)},
+    )
+
+    assert result.diagnostics.objective == 1e200
+    assert "invalid endpoint" in result.diagnostics.numerical_failures[0]
 
 
 def test_repeated_fits_are_deterministic() -> None:
@@ -211,6 +331,40 @@ def test_dense_reference_safety_errors_are_recorded_as_typed_failures(
     assert "dense safety stop" in result.diagnostics.numerical_failures[0]
 
 
+def test_parameter_driven_precision_overflow_is_recorded_as_numerical_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    family = scalable_precision_family(base_precision=2.0)
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        *,
+        bounds: list[tuple[float, float]],
+        **_: object,
+    ) -> OptimizeResult:
+        invalid = objective(np.array([bounds[0][1]]))
+        assert np.isfinite(invalid)
+        valid = objective(start)
+        return OptimizeResult(x=start, fun=valid, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    result = optimize_empirical_bayes(
+        family,
+        {
+            "latent.precision": OptimizationBounds(
+                initial=1.0,
+                lower=0.1,
+                upper=1e308,
+            )
+        },
+    )
+
+    assert len(result.diagnostics.numerical_failures) == 1
+    assert "precision scaling" in result.diagnostics.numerical_failures[0]
+
+
 def test_unsuccessful_scipy_solution_raises_even_with_a_valid_point(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,6 +410,48 @@ def test_invalid_final_point_raises_instead_of_falling_back(
             zero_latent_family(np.array([1.0])),
             {"sigma": OptimizationBounds(initial=1.0, lower=1e-200, upper=10.0)},
         )
+
+
+def test_all_invalid_failure_preserves_counts_history_and_dense_root_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def dense_failure(_: CompiledLGM) -> GaussianResult:
+        raise DenseReferenceLimitError("dense root cause")
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        **_: object,
+    ) -> OptimizeResult:
+        objective(start)
+        objective(start.copy())
+        return OptimizeResult(
+            x=start,
+            fun=np.finfo(float).max,
+            success=False,
+            message="all invalid",
+        )
+
+    monkeypatch.setattr(empirical_bayes, "fit_gaussian", dense_failure)
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    with pytest.raises(OptimizationError, match="all invalid") as captured:
+        optimize_empirical_bayes(
+            zero_latent_family(np.array([1.0])),
+            {"sigma": OptimizationBounds(initial=1.0, lower=0.1, upper=10.0)},
+        )
+
+    error = captured.value
+    assert error.evaluations == 1
+    assert error.cache_hits == 1
+    assert error.numerical_failures == (
+        "log_parameters=(0.0,): DenseReferenceLimitError: dense root cause",
+    )
+    assert isinstance(error.__cause__, DenseReferenceLimitError)
+    snapshot = error.to_dict()
+    assert json.loads(json.dumps(snapshot)) == snapshot
+    snapshot["numerical_failures"].append("changed")
+    assert len(error.numerical_failures) == 1
 
 
 def test_programming_errors_from_inference_propagate(
@@ -333,6 +529,54 @@ def test_bounds_require_a_nonempty_ordered_interval_containing_initial(
         OptimizationBounds(*values)
 
 
+def test_empty_direct_optimization_problem_raises_typed_error() -> None:
+    family = CompiledGaussianFamily(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        blocks=(),
+        parameter_names=(),
+        initial=Hyperparameters(sigma=1.0, precisions={}),
+    )
+
+    with pytest.raises(OptimizationError, match="at least one parameter"):
+        optimize_empirical_bayes(family, {})
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "point", "expected"),
+    [
+        (1.0, 2.0, np.log(1.0) + 5e-9, ("sigma",)),
+        (1.0, 1e200, np.log(1e200) - 1e-5, ()),
+    ],
+)
+def test_active_bound_detection_uses_absolute_log_space_tolerance(
+    lower: float,
+    upper: float,
+    point: float,
+    expected: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        **_: object,
+    ) -> OptimizeResult:
+        final = np.array([point])
+        value = objective(final)
+        return OptimizeResult(x=final, fun=value, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes, "fit_gaussian", constant_fit)
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    result = optimize_empirical_bayes(
+        zero_latent_family(np.array([1.0])),
+        {"sigma": OptimizationBounds(initial=1.0, lower=lower, upper=upper)},
+    )
+
+    assert result.diagnostics.active_bounds == expected
+
+
 def test_returned_mappings_are_immutable_and_value_isolated() -> None:
     warm = {"sigma": 1.5}
     result = optimize_empirical_bayes(
@@ -349,3 +593,35 @@ def test_returned_mappings_are_immutable_and_value_isolated() -> None:
         result.diagnostics.initial["sigma"] = 3.0  # type: ignore[index]
     with pytest.raises(TypeError):
         result.diagnostics.optimum["sigma"] = 3.0  # type: ignore[index]
+
+
+def test_result_and_diagnostics_expose_isolated_json_ready_snapshots() -> None:
+    result = optimize_empirical_bayes(
+        zero_latent_family(np.array([1.0])),
+        {"sigma": OptimizationBounds(initial=1.0, lower=0.1, upper=10.0)},
+    )
+
+    diagnostics = result.diagnostics.to_dict()
+    snapshot = result.to_dict()
+
+    assert json.loads(json.dumps(diagnostics)) == diagnostics
+    assert json.loads(json.dumps(snapshot)) == snapshot
+    assert snapshot["parameters"] == dict(result.parameters)
+    assert snapshot["diagnostics"] == diagnostics
+    assert snapshot["fit"] == {
+        "log_marginal_likelihood": result.fit.log_marginal_likelihood,
+        "latent_dimension": 0,
+        "prediction_count": 1,
+        "arrays_omitted": [
+            "mean",
+            "covariance",
+            "predictive_mean",
+            "predictive_variance",
+        ],
+    }
+    snapshot["parameters"]["sigma"] = 99.0
+    snapshot["diagnostics"]["initial"]["sigma"] = 99.0
+    snapshot["fit"]["arrays_omitted"].append("changed")
+    assert result.parameters["sigma"] != 99.0
+    assert result.diagnostics.initial["sigma"] != 99.0
+    assert len(result.to_dict()["fit"]["arrays_omitted"]) == 4
