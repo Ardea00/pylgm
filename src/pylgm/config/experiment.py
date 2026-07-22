@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal, Mapping
+from types import MappingProxyType
+from typing import Annotated, Literal, Mapping
 
 from formulaic import Formula
-from pydantic import Field, field_validator, model_validator
+from pydantic import BeforeValidator, Field, field_serializer, field_validator, model_validator
 
 from pylgm.config.schema import (
     DataConfig,
@@ -14,14 +15,53 @@ from pylgm.config.schema import (
 )
 
 
+def _require_exact_integer(value: object) -> object:
+    if type(value) is not int:
+        raise ValueError("value must be an integer")
+    return value
+
+
+def _require_ordinary_real(value: object) -> object:
+    if type(value) not in (int, float):
+        raise ValueError("value must be an ordinary int or float number")
+    return value
+
+
+StrictPositiveInt = Annotated[
+    int, BeforeValidator(_require_exact_integer), Field(gt=0)
+]
+StrictRollingLength = Annotated[
+    int, BeforeValidator(_require_exact_integer), Field(ge=2)
+]
+StrictUnitFloat = Annotated[
+    float, BeforeValidator(_require_ordinary_real), Field(ge=0, le=1, allow_inf_nan=False)
+]
+StrictNonnegativeFloat = Annotated[
+    float, BeforeValidator(_require_ordinary_real), Field(ge=0, allow_inf_nan=False)
+]
+
+
 class CovariateConfig(StrictModel):
     availability: Literal["known_future", "observed_with_lag", "unavailable_future"]
-    lag: int | None = Field(default=None, ge=1)
+    lag: StrictPositiveInt | None = None
 
 
 class ExperimentDataConfig(DataConfig):
     vintage: str | None = None
-    covariates: dict[str, CovariateConfig] = Field(default_factory=dict)
+    covariates: Mapping[str, CovariateConfig] = Field(default_factory=dict)
+
+    @field_validator("covariates")
+    @classmethod
+    def freeze_covariates(
+        cls, value: Mapping[str, CovariateConfig]
+    ) -> Mapping[str, CovariateConfig]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("covariates")
+    def serialize_covariates(
+        self, value: Mapping[str, CovariateConfig]
+    ) -> dict[str, CovariateConfig]:
+        return dict(value)
 
 
 class ParameterBounds(StrictModel):
@@ -46,12 +86,38 @@ class ModelOverride(StrictModel):
 class CandidateConfig(StrictModel):
     name: str
     overrides: ModelOverride = Field(default_factory=ModelOverride)
-    optimize: dict[str, ParameterBounds] | None = None
+    optimize: Mapping[str, ParameterBounds] | None = None
+
+    @field_validator("optimize")
+    @classmethod
+    def freeze_optimize(
+        cls, value: Mapping[str, ParameterBounds] | None
+    ) -> Mapping[str, ParameterBounds] | None:
+        return None if value is None else MappingProxyType(dict(value))
+
+    @field_serializer("optimize")
+    def serialize_optimize(
+        self, value: Mapping[str, ParameterBounds] | None
+    ) -> dict[str, ParameterBounds] | None:
+        return None if value is None else dict(value)
 
 
 class HyperparameterConfig(StrictModel):
     strategy: Literal["empirical_bayes"]
-    optimize: dict[str, ParameterBounds]
+    optimize: Mapping[str, ParameterBounds]
+
+    @field_validator("optimize")
+    @classmethod
+    def freeze_optimize(
+        cls, value: Mapping[str, ParameterBounds]
+    ) -> Mapping[str, ParameterBounds]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("optimize")
+    def serialize_optimize(
+        self, value: Mapping[str, ParameterBounds]
+    ) -> dict[str, ParameterBounds]:
+        return dict(value)
 
 
 class InferenceConfig(StrictModel):
@@ -60,8 +126,17 @@ class InferenceConfig(StrictModel):
 
 
 class OriginConfig(StrictModel):
-    last: int | None = Field(default=None, ge=1)
+    last: StrictPositiveInt | None = None
     values: tuple[str | int | date | datetime, ...] | None = None
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def require_exact_numeric_origins(cls, value: object) -> object:
+        if value is not None:
+            for origin in value:  # type: ignore[union-attr]
+                if isinstance(origin, (bool, float)):
+                    raise ValueError("numeric origins must be integers")
+        return value
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> "OriginConfig":
@@ -72,7 +147,7 @@ class OriginConfig(StrictModel):
 
 class WindowConfig(StrictModel):
     type: Literal["expanding", "rolling"] = "expanding"
-    length: int | None = Field(default=None, ge=2)
+    length: StrictRollingLength | None = None
 
     @model_validator(mode="after")
     def rolling_length(self) -> "WindowConfig":
@@ -85,12 +160,12 @@ class WindowConfig(StrictModel):
 
 class EvaluationConfig(StrictModel):
     mode: Literal["latest", "vintage"] = "latest"
-    horizons: tuple[int, ...]
+    horizons: tuple[StrictPositiveInt, ...]
     origins: OriginConfig
     window: WindowConfig = WindowConfig()
-    interval_levels: tuple[float, ...] = (0.5, 0.8, 0.95)
-    max_abs_coverage_error: float = Field(default=0.15, ge=0, le=1)
-    rmse_tie_tolerance: float = Field(default=1e-9, ge=0)
+    interval_levels: tuple[StrictUnitFloat, ...] = (0.5, 0.8, 0.95)
+    max_abs_coverage_error: StrictUnitFloat = 0.15
+    rmse_tie_tolerance: StrictNonnegativeFloat = 1e-9
 
     @model_validator(mode="after")
     def valid_horizons_and_levels(self) -> "EvaluationConfig":
@@ -168,5 +243,7 @@ def resolve_candidates(config: ExperimentConfig) -> tuple[ResolvedCandidate, ...
         optimize = candidate.optimize if candidate.optimize is not None else inherited
         _validate_formula_availability(config.data, model)
         _validate_optimized_parameters(optimize, model)
-        resolved.append(ResolvedCandidate(candidate.name, model, optimize))
+        resolved.append(
+            ResolvedCandidate(candidate.name, model, MappingProxyType(dict(optimize)))
+        )
     return tuple(resolved)

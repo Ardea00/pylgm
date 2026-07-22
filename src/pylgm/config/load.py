@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import yaml
+from formulaic.errors import FormulaicError
 from pydantic import ValidationError
 from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode
@@ -45,5 +46,12 @@ def load_experiment_config(path: Path) -> ExperimentConfig:
         config = ExperimentConfig.model_validate(payload)
         resolve_candidates(config)
         return config
-    except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        yaml.YAMLError,
+        ValidationError,
+        TypeError,
+        ValueError,
+        FormulaicError,
+    ) as exc:
         raise ConfigurationError(str(exc)) from exc
