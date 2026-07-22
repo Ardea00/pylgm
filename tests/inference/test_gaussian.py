@@ -150,3 +150,112 @@ def test_singular_reduced_prior_fails_even_when_likelihood_is_informative() -> N
         np.linalg.LinAlgError, match="reduced prior precision must be positive definite"
     ):
         fit_gaussian(model)
+
+
+def test_tiny_nonzero_constraint_row_is_not_discarded() -> None:
+    model = CompiledLGM(
+        y=np.empty(0),
+        observed=np.empty(0, dtype=bool),
+        offset=np.empty(0),
+        design=csr_matrix((0, 2)),
+        precision=csr_matrix(np.eye(2)),
+        constraints=np.diag([1.0, 1e-20]),
+        labels=("a", "b"),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    result = fit_gaussian(model)
+
+    np.testing.assert_allclose(result.mean, [0.0, 0.0])
+    np.testing.assert_allclose(result.covariance, np.zeros((2, 2)))
+    np.testing.assert_allclose(model.constraints @ result.mean, [0.0, 0.0])
+
+
+def test_redundant_scaled_constraints_preserve_the_same_constrained_posterior() -> None:
+    constraints = np.array([[1.0, 1.0], [1e-20, 1e-20]])
+    model = CompiledLGM(
+        y=np.array([2.0, -1.0]),
+        observed=np.array([True, True]),
+        offset=np.zeros(2),
+        design=csr_matrix(np.eye(2)),
+        precision=csr_matrix([[1.0, -1.0], [-1.0, 1.0]]),
+        constraints=constraints,
+        labels=("a", "b"),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    result = fit_gaussian(model)
+
+    np.testing.assert_allclose(constraints @ result.mean, [0.0, 0.0], atol=1e-12)
+    np.testing.assert_allclose(result.mean, [0.5, -0.5])
+
+
+def test_near_asymmetric_precision_is_rejected() -> None:
+    model = CompiledLGM(
+        y=np.empty(0),
+        observed=np.empty(0, dtype=bool),
+        offset=np.empty(0),
+        design=csr_matrix((0, 2)),
+        precision=csr_matrix([[2.0, 1e-9], [0.0, 2.0]]),
+        constraints=np.empty((0, 2)),
+        labels=("a", "b"),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="precision must be symmetric"):
+        fit_gaussian(model)
+
+
+def test_integer_observation_mask_is_rejected() -> None:
+    model = CompiledLGM(
+        y=np.array([1.0, 2.0]),
+        observed=np.array([1, 0]),
+        offset=np.zeros(2),
+        design=csr_matrix([[1.0], [1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="observed must be a one-dimensional boolean array"):
+        fit_gaussian(model)
+
+
+def test_observation_lengths_must_match_design_rows() -> None:
+    model = CompiledLGM(
+        y=np.array([1.0, 2.0]),
+        observed=np.array([True, False]),
+        offset=np.zeros(2),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="matching row counts"):
+        fit_gaussian(model)
+
+
+@pytest.mark.parametrize("sigma", [1e-200, np.finfo(float).max])
+def test_sigma_must_have_a_finite_positive_variance(sigma: float) -> None:
+    model = CompiledLGM(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        sigma=sigma,
+        blocks=(),
+    )
+
+    with pytest.raises(ValueError, match="sigma squared must be finite and positive"):
+        fit_gaussian(model)
