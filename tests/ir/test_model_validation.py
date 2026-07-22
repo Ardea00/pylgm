@@ -120,3 +120,53 @@ def test_compiled_lgm_rejects_block_with_mismatched_design_rows() -> None:
             sigma=1.0,
             blocks=(_block(rows=1),),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("design", csr_matrix(np.zeros((2, 1))), "design must match"),
+        ("precision", csr_matrix([[2.0]]), "precision must match"),
+    ],
+)
+def test_compiled_lgm_requires_global_matrices_to_match_blocks(
+    field: str, value: object, message: str
+) -> None:
+    arguments: dict[str, object] = {
+        "y": np.array([1.0, 2.0]),
+        "observed": np.array([True, True]),
+        "offset": np.zeros(2),
+        "design": csr_matrix(np.ones((2, 1))),
+        "precision": csr_matrix([[1.0]]),
+        "constraints": np.empty((0, 1)),
+        "labels": ("effect:level",),
+        "sigma": 1.0,
+        "blocks": (_block(),),
+    }
+    arguments[field] = value
+
+    with pytest.raises(ModelValidationError, match=message):
+        CompiledLGM(**arguments)  # type: ignore[arg-type]
+
+
+def test_compiled_lgm_requires_global_constraints_to_match_blocks() -> None:
+    block = LatentBlock(
+        "effect",
+        ("level",),
+        csr_matrix(np.ones((2, 1))),
+        csr_matrix([[1.0]]),
+        np.array([[1.0]]),
+    )
+
+    with pytest.raises(ModelValidationError, match="constraints must match"):
+        CompiledLGM(
+            y=np.array([1.0, 2.0]),
+            observed=np.array([True, True]),
+            offset=np.zeros(2),
+            design=csr_matrix(np.ones((2, 1))),
+            precision=csr_matrix([[1.0]]),
+            constraints=np.array([[2.0]]),
+            labels=("effect:level",),
+            sigma=1.0,
+            blocks=(block,),
+        )

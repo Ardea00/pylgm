@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import block_diag, csr_matrix, hstack
 
 from pylgm.exceptions import ModelValidationError
 
@@ -47,6 +47,26 @@ def _validate_symmetric(value: csr_matrix, name: str) -> None:
         difference.data, 0.0, rtol=1e-12, atol=1e-14
     ):
         raise ModelValidationError(f"{name} must be symmetric")
+
+
+def _sparse_matches(left: csr_matrix, right: csr_matrix) -> bool:
+    difference = left - right
+    return not difference.nnz or np.allclose(
+        difference.data, 0.0, rtol=1e-12, atol=1e-14
+    )
+
+
+def _block_constraints(blocks: tuple["LatentBlock", ...], width: int) -> np.ndarray:
+    rows: list[np.ndarray] = []
+    start = 0
+    for block in blocks:
+        block_width = block.design.shape[1]
+        for local in block.constraints:
+            row = np.zeros(width)
+            row[start : start + block_width] = local
+            rows.append(row)
+        start += block_width
+    return np.vstack(rows) if rows else np.empty((0, width))
 
 
 @dataclass(frozen=True, init=False)
@@ -190,6 +210,21 @@ class CompiledLGM:
                 raise ModelValidationError(
                     "labels must align with block names and labels"
                 )
+            expected_design = hstack(
+                [block.design for block in blocks], format="csr"
+            )
+            if not _sparse_matches(design, expected_design):
+                raise ModelValidationError("design must match the latent blocks")
+            expected_precision = block_diag(
+                [block.precision for block in blocks], format="csr"
+            )
+            if not _sparse_matches(precision, expected_precision):
+                raise ModelValidationError("precision must match the latent blocks")
+            expected_constraints = _block_constraints(blocks, width)
+            if constraints.shape != expected_constraints.shape or not np.allclose(
+                constraints, expected_constraints, rtol=1e-12, atol=1e-14
+            ):
+                raise ModelValidationError("constraints must match the latent blocks")
         object.__setattr__(self, "_y", _readonly_array(y))
         object.__setattr__(self, "_observed", _readonly_array(observed))
         object.__setattr__(self, "_offset", _readonly_array(offset))
