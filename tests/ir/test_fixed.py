@@ -32,6 +32,26 @@ def test_latent_block_rejects_dense_and_sparse_payload_mutation() -> None:
         block.design.data[0] = 4.0
 
 
+def test_latent_block_sparse_access_is_structurally_isolated() -> None:
+    block = LatentBlock(
+        name="block",
+        labels=("coefficient",),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[2.0]]),
+        constraints=np.empty((0, 1)),
+    )
+
+    design = block.design
+    precision = block.precision
+    design.resize((2, 2))
+    precision.resize((2, 2))
+
+    assert block.design.shape == (1, 1)
+    assert block.precision.shape == (1, 1)
+    np.testing.assert_allclose(block.design.toarray(), [[1.0]])
+    np.testing.assert_allclose(block.precision.toarray(), [[2.0]])
+
+
 def test_compiled_lgm_rejects_dense_payload_mutation() -> None:
     model = CompiledLGM(
         y=np.array([1.0]),
@@ -47,3 +67,27 @@ def test_compiled_lgm_rejects_dense_payload_mutation() -> None:
 
     with pytest.raises(ValueError):
         model.y[0] = 2.0
+
+
+def test_compiled_lgm_sparse_access_is_structurally_isolated() -> None:
+    model = CompiledLGM(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.array([0.0]),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[2.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("coefficient",),
+        sigma=1.0,
+        blocks=(),
+    )
+
+    design = model.design
+    precision = model.precision
+    design.resize((2, 2))
+    precision.resize((2, 2))
+
+    assert model.design.shape == (1, 1)
+    assert model.precision.shape == (1, 1)
+    np.testing.assert_allclose(model.design.toarray(), [[1.0]])
+    np.testing.assert_allclose(model.precision.toarray(), [[2.0]])
