@@ -24,8 +24,7 @@ def _validated_levels(interval_levels: tuple[float, ...]) -> tuple[float, ...]:
     except TypeError as cause:
         raise DataContractError("interval levels must be a sequence of real numbers") from cause
     if any(
-        not isinstance(level, Real) or isinstance(level, (bool, np.bool_))
-        for level in raw_levels
+        not isinstance(level, Real) or isinstance(level, (bool, np.bool_)) for level in raw_levels
     ):
         raise DataContractError("interval levels must be real numbers, not booleans")
     levels = tuple(float(level) for level in raw_levels)
@@ -77,9 +76,7 @@ def score_predictions(
     result = predictions.copy(deep=True)
     result["is_benchmark"] = _benchmark_identity(predictions)
     residual = actual - mean
-    result["log_predictive_density"] = norm.logpdf(
-        actual, loc=mean, scale=standard_deviation
-    )
+    result["log_predictive_density"] = norm.logpdf(actual, loc=mean, scale=standard_deviation)
     result["squared_error"] = residual**2
     result["absolute_error"] = np.abs(residual)
     for level in levels:
@@ -95,9 +92,7 @@ def score_predictions(
 
 def _interval_suffixes(frame: pd.DataFrame) -> tuple[str, ...]:
     suffixes = tuple(
-        column.removeprefix("covered_")
-        for column in frame.columns
-        if column.startswith("covered_")
+        column.removeprefix("covered_") for column in frame.columns if column.startswith("covered_")
     )
     missing_bounds = [
         suffix
@@ -110,7 +105,12 @@ def _interval_suffixes(frame: pd.DataFrame) -> tuple[str, ...]:
 
 
 def _aggregate_group(
-    group: pd.DataFrame, *, candidate: object, benchmark: bool, horizon: object
+    group: pd.DataFrame,
+    *,
+    candidate: object,
+    benchmark: bool,
+    origin: object,
+    horizon: object,
 ) -> dict[str, object]:
     count = len(group)
     residual = group["actual"].to_numpy(dtype=float) - group["mean"].to_numpy(dtype=float)
@@ -120,6 +120,7 @@ def _aggregate_group(
     log_density_sum = float(group["log_predictive_density"].sum())
     result: dict[str, object] = {
         "candidate": candidate,
+        "origin": origin,
         "horizon": horizon,
         "is_benchmark": benchmark,
         "prediction_count": count,
@@ -134,9 +135,7 @@ def _aggregate_group(
     }
     for suffix in _interval_suffixes(group):
         coverage_count = int(group[f"covered_{suffix}"].sum())
-        width_sum = float(
-            (group[f"upper_{suffix}"] - group[f"lower_{suffix}"]).sum()
-        )
+        width_sum = float((group[f"upper_{suffix}"] - group[f"lower_{suffix}"]).sum())
         result[f"coverage_count_{suffix}"] = coverage_count
         result[f"interval_width_sum_{suffix}"] = width_sum
         result[f"coverage_{suffix}"] = coverage_count / count
@@ -145,12 +144,19 @@ def _aggregate_group(
 
 
 def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate scored rows by candidate/horizon and candidate overall.
+    """Aggregate scored rows by fold, horizon, and candidate overall.
 
     Metrics are derived only after summing row-level losses, so folds with more
     predictions carry their natural weight.
     """
-    required = (*_REQUIRED_PREDICTION_COLUMNS, "is_benchmark", "log_predictive_density", "squared_error", "absolute_error")
+    required = (
+        *_REQUIRED_PREDICTION_COLUMNS,
+        "origin",
+        "is_benchmark",
+        "log_predictive_density",
+        "squared_error",
+        "absolute_error",
+    )
     _require_columns(scored_predictions, required)
     if scored_predictions.empty:
         raise DataContractError("cannot aggregate empty scored prediction rows")
@@ -159,22 +165,41 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
     benchmark = _benchmark_identity(scored_predictions)
     working = scored_predictions.copy(deep=True)
     working["is_benchmark"] = benchmark
-    if working["candidate"].isna().any() or working["horizon"].isna().any():
-        raise DataContractError("scored prediction rows require candidate and horizon")
+    if working[["candidate", "origin", "horizon"]].isna().any(axis=None):
+        raise DataContractError("scored prediction rows require candidate, origin, and horizon")
 
     records: list[dict[str, object]] = []
+    fold_groups = working.groupby(["candidate", "is_benchmark", "origin", "horizon"], sort=True)
+    for (candidate, is_benchmark, origin, horizon), group in fold_groups:
+        records.append(
+            _aggregate_group(
+                group,
+                candidate=candidate,
+                benchmark=bool(is_benchmark),
+                origin=origin,
+                horizon=horizon,
+            )
+        )
     groups = working.groupby(["candidate", "is_benchmark", "horizon"], sort=True)
     for (candidate, is_benchmark, horizon), group in groups:
         records.append(
             _aggregate_group(
-                group, candidate=candidate, benchmark=bool(is_benchmark), horizon=horizon
+                group,
+                candidate=candidate,
+                benchmark=bool(is_benchmark),
+                origin=None,
+                horizon=horizon,
             )
         )
     overall_groups = working.groupby(["candidate", "is_benchmark"], sort=True)
     for (candidate, is_benchmark), group in overall_groups:
         records.append(
             _aggregate_group(
-                group, candidate=candidate, benchmark=bool(is_benchmark), horizon=None
+                group,
+                candidate=candidate,
+                benchmark=bool(is_benchmark),
+                origin=None,
+                horizon=None,
             )
         )
     return pd.DataFrame.from_records(records)

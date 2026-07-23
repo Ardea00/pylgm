@@ -5,7 +5,7 @@ import pytest
 
 from pylgm.config.experiment import EvaluationConfig, OriginConfig
 from pylgm.evaluation import CandidateDecision, select_candidate
-from pylgm.exceptions import SelectionError
+from pylgm.exceptions import DataContractError, SelectionError
 
 
 def selection_config(**updates: object) -> EvaluationConfig:
@@ -21,6 +21,7 @@ def selection_config(**updates: object) -> EvaluationConfig:
 
 def metrics_table(rows: list[dict[str, object]]) -> pd.DataFrame:
     defaults = {
+        "origin": None,
         "horizon": None,
         "is_benchmark": False,
         "mean_log_predictive_density": -1.0,
@@ -121,10 +122,39 @@ def test_benchmark_is_ranked_and_reported_but_never_selected() -> None:
     assert result.ranking == ("model", "persistence")
 
 
-def test_nonfinite_metrics_are_ineligible_and_all_ineligible_raises() -> None:
+def test_selection_uses_only_the_unique_overall_metric_row() -> None:
     metrics = metrics_table(
-        [{"candidate": "bad", "mean_log_predictive_density": float("nan")}]
+        [
+            {"candidate": "a", "mean_log_predictive_density": -1.0},
+            {
+                "candidate": "a",
+                "origin": 4,
+                "horizon": 1,
+                "mean_log_predictive_density": 100.0,
+            },
+            {
+                "candidate": "a",
+                "horizon": 1,
+                "mean_log_predictive_density": 100.0,
+            },
+            {"candidate": "b", "mean_log_predictive_density": -2.0},
+        ]
     )
+
+    result = select_candidate(metrics, failures={}, config=selection_config())
+
+    assert result.selected == "a"
+
+
+def test_selection_requires_metric_origin_column() -> None:
+    metrics = metrics_table([{"candidate": "a"}]).drop(columns="origin")
+
+    with pytest.raises(DataContractError, match="origin"):
+        select_candidate(metrics, failures={}, config=selection_config())
+
+
+def test_nonfinite_metrics_are_ineligible_and_all_ineligible_raises() -> None:
+    metrics = metrics_table([{"candidate": "bad", "mean_log_predictive_density": float("nan")}])
 
     with pytest.raises(SelectionError, match="no eligible"):
         select_candidate(metrics, failures={}, config=selection_config())

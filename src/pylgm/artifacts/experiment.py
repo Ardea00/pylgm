@@ -182,16 +182,7 @@ def write_experiment(
             path.name: _sha256(path)
             for path in sorted(temporary.iterdir(), key=lambda item: item.name)
         }
-        artifact_fingerprint = hashlib.sha256(
-            _canonical_json(
-                {
-                    "artifact_schema_version": 2,
-                    "experiment_fingerprint": experiment_fingerprint,
-                    "payload_sha256": payload_sha256,
-                }
-            )
-        ).hexdigest()
-        summary = {
+        summary_core = {
             "artifact_schema_version": 2,
             "engine": "exact_gaussian",
             "selected": result.selected,
@@ -200,9 +191,10 @@ def write_experiment(
             "resolved_candidates": resolved_candidates,
             "data_fingerprint": data_fingerprint,
             "experiment_fingerprint": experiment_fingerprint,
-            "artifact_fingerprint": artifact_fingerprint,
             "payload_sha256": payload_sha256,
         }
+        artifact_fingerprint = hashlib.sha256(_canonical_json(summary_core)).hexdigest()
+        summary = {**summary_core, "artifact_fingerprint": artifact_fingerprint}
         _write_json(temporary / "summary.json", summary)
 
     write_transactionally(output, writer)

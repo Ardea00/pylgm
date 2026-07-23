@@ -58,6 +58,11 @@ def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
+def _summary_fingerprint(summary: dict[str, object]) -> str:
+    core = {name: value for name, value in summary.items() if name != "artifact_fingerprint"}
+    return hashlib.sha256(_canonical(core)).hexdigest()
+
+
 def test_artifact_json_normalization_is_deep_and_noncoercive() -> None:
     payload = MappingProxyType(
         {"nested": (np.int64(2), np.longdouble("1.234567890123456789"), b"\x00\xff")}
@@ -95,6 +100,7 @@ def test_experiment_artifact_is_complete_versioned_and_hashed(tmp_path: Path) ->
     assert len(summary["data_fingerprint"]) == 64
     assert len(summary["experiment_fingerprint"]) == 64
     assert len(summary["artifact_fingerprint"]) == 64
+    assert summary["artifact_fingerprint"] == _summary_fingerprint(summary)
     for name, digest in summary["payload_sha256"].items():
         assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
     assert json.loads((output / "resolved_candidates.json").read_text()) == [
@@ -105,7 +111,10 @@ def test_experiment_artifact_is_complete_versioned_and_hashed(tmp_path: Path) ->
     pd.testing.assert_frame_equal(
         pd.read_parquet(output / "predictions.parquet"), result.predictions
     )
-    pd.testing.assert_frame_equal(pd.read_parquet(output / "metrics.parquet"), result.metrics)
+    persisted_metrics = pd.read_parquet(output / "metrics.parquet")
+    pd.testing.assert_frame_equal(persisted_metrics, result.metrics)
+    levels = set(zip(persisted_metrics["origin"].notna(), persisted_metrics["horizon"].notna()))
+    assert levels == {(True, True), (False, True), (False, False)}
     diagnostics = pd.read_parquet(output / "optimization.parquet")
     diagnostics["numerical_failures"] = diagnostics["numerical_failures"].map(tuple)
     pd.testing.assert_frame_equal(diagnostics, result.diagnostics)
@@ -117,6 +126,30 @@ def test_experiment_artifact_is_complete_versioned_and_hashed(tmp_path: Path) ->
         value = json.loads((output / name).read_text())
         assert (output / name).read_bytes() == _canonical(value)
     assert (output / "summary.json").read_bytes() == _canonical(summary)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("engine", "tampered"),
+        ("selected", "tampered"),
+        ("candidates", ["tampered"]),
+        ("decision", {"selected": "tampered"}),
+        ("data_fingerprint", "0" * 64),
+        ("resolved_candidates", []),
+    ],
+)
+def test_artifact_fingerprint_rejects_manifest_tampering(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    output = tmp_path / "comparison"
+    Experiment.from_yaml(_config(tmp_path / "experiment.yaml")).compare(_panel(), output)
+    summary = json.loads((output / "summary.json").read_text())
+    stored = summary["artifact_fingerprint"]
+
+    summary[field] = replacement
+
+    assert _summary_fingerprint(summary) != stored
 
 
 def test_experiment_environment_records_all_direct_dependencies(tmp_path: Path) -> None:

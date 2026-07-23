@@ -32,9 +32,7 @@ class CandidateDecision:
         object.__setattr__(
             self,
             "reasons",
-            MappingProxyType(
-                {name: tuple(reason) for name, reason in self.reasons.items()}
-            ),
+            MappingProxyType({name: tuple(reason) for name, reason in self.reasons.items()}),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -63,15 +61,20 @@ def _failure_reasons(value: object) -> tuple[str, ...]:
 
 
 def _overall_rows(metrics: pd.DataFrame) -> pd.DataFrame:
-    required = {"candidate", "horizon", "is_benchmark", "mean_log_predictive_density", "rmse"}
+    required = {
+        "candidate",
+        "origin",
+        "horizon",
+        "is_benchmark",
+        "mean_log_predictive_density",
+        "rmse",
+    }
     missing = sorted(required.difference(metrics.columns))
     if missing:
         raise DataContractError(f"metric rows lack required columns: {missing}")
-    if not metrics["is_benchmark"].map(
-        lambda value: isinstance(value, (bool, np.bool_))
-    ).all():
+    if not metrics["is_benchmark"].map(lambda value: isinstance(value, (bool, np.bool_))).all():
         raise DataContractError("metric is_benchmark values must be booleans")
-    return metrics.loc[metrics["horizon"].isna()].copy(deep=True)
+    return metrics.loc[metrics["origin"].isna() & metrics["horizon"].isna()].copy(deep=True)
 
 
 def _metric_values(row: pd.Series, config: EvaluationConfig) -> tuple[float, float]:
@@ -102,9 +105,7 @@ def _rank_metric_names(
         same_score = [name for name in names if values[name][0] == log_density]
         minimum_rmse = min(values[name][1] for name in same_score)
         tied = sorted(
-            name
-            for name in same_score
-            if values[name][1] <= minimum_rmse + rmse_tie_tolerance
+            name for name in same_score if values[name][1] <= minimum_rmse + rmse_tie_tolerance
         )
         remaining = sorted(
             (name for name in same_score if name not in tied),
@@ -125,9 +126,7 @@ def select_candidate(
     if not names:
         raise SelectionError("no candidates available for selection")
 
-    rows_by_name = {
-        name: overall.loc[overall["candidate"].astype(str).eq(name)] for name in names
-    }
+    rows_by_name = {name: overall.loc[overall["candidate"].astype(str).eq(name)] for name in names}
     eligible: dict[str, bool] = {}
     reasons: dict[str, tuple[str, ...]] = {}
     ranking_values: dict[str, tuple[float, float]] = {}
@@ -153,9 +152,7 @@ def select_candidate(
                 for level in config.interval_levels:
                     coverage = float(row[_coverage_column(level)])
                     if abs(coverage - level) > config.max_abs_coverage_error:
-                        candidate_reasons.append(
-                            f"{_coverage_column(level)} exceeds tolerance"
-                        )
+                        candidate_reasons.append(f"{_coverage_column(level)} exceeds tolerance")
         eligible[name] = not candidate_reasons
         reasons[name] = tuple(candidate_reasons)
 
@@ -167,12 +164,8 @@ def select_candidate(
         name for name in names if not eligible[name] and name not in ranking_values
     )
     ranking = tuple(
-        _rank_metric_names(
-            eligible_names, ranking_values, config.rmse_tie_tolerance
-        )
-        + _rank_metric_names(
-            ineligible_with_metrics, ranking_values, config.rmse_tie_tolerance
-        )
+        _rank_metric_names(eligible_names, ranking_values, config.rmse_tie_tolerance)
+        + _rank_metric_names(ineligible_with_metrics, ranking_values, config.rmse_tie_tolerance)
         + ineligible_without_metrics
     )
     selected = next((name for name in ranking if eligible[name]), None)

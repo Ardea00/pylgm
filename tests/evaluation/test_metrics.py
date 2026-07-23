@@ -84,39 +84,45 @@ def test_scoring_adds_intervals_coverage_and_benchmark_identity() -> None:
 def test_aggregation_sums_prediction_rows_before_deriving_metrics() -> None:
     predictions = pd.DataFrame(
         {
-            "actual": [1.0, 3.0, 10.0],
-            "mean": [0.0, 1.0, 8.0],
-            "variance": [1.0, 1.0, 4.0],
-            "candidate": ["a", "a", "a"],
-            "origin": [1, 1, 2],
-            "horizon": [1, 1, 2],
+            "actual": [1.0, 3.0, 10.0, 6.0],
+            "mean": [0.0, 1.0, 8.0, 2.0],
+            "variance": [1.0, 1.0, 4.0, 1.0],
+            "candidate": ["a", "a", "a", "a"],
+            "origin": [1, 1, 2, 2],
+            "horizon": [1, 1, 2, 1],
         }
     )
 
     metrics = aggregate_metrics(score_predictions(predictions, interval_levels=(0.5,)))
-    horizon_one = metrics.loc[metrics["horizon"].eq(1)].iloc[0]
-    overall = metrics.loc[metrics["horizon"].isna()].iloc[0]
+    fold_one = metrics.loc[metrics["origin"].eq(1) & metrics["horizon"].eq(1)].iloc[0]
+    horizon_one = metrics.loc[metrics["origin"].isna() & metrics["horizon"].eq(1)].iloc[0]
+    overall = metrics.loc[metrics["origin"].isna() & metrics["horizon"].isna()].iloc[0]
 
-    assert horizon_one["prediction_count"] == 2
-    assert horizon_one["rmse"] == pytest.approx(np.sqrt(2.5))
-    assert horizon_one["mae"] == pytest.approx(1.5)
-    assert horizon_one["bias"] == pytest.approx(1.5)
-    assert overall["prediction_count"] == 3
-    assert overall["rmse"] == pytest.approx(np.sqrt(3.0))
-    assert overall["mae"] == pytest.approx(5.0 / 3.0)
+    assert fold_one["prediction_count"] == 2
+    assert horizon_one["prediction_count"] == 3
+    assert horizon_one["rmse"] == pytest.approx(np.sqrt(7.0))
+    assert horizon_one["mae"] == pytest.approx(7.0 / 3.0)
+    assert horizon_one["bias"] == pytest.approx(7.0 / 3.0)
+    assert overall["prediction_count"] == 4
+    assert overall["rmse"] == pytest.approx(2.5)
+    assert overall["mae"] == pytest.approx(2.25)
     assert overall["mean_log_predictive_density"] == pytest.approx(
         np.mean(
             [
                 norm.logpdf(1.0, 0.0, 1.0),
                 norm.logpdf(3.0, 1.0, 1.0),
                 norm.logpdf(10.0, 8.0, 2.0),
+                norm.logpdf(6.0, 2.0, 1.0),
             ]
         )
     )
     assert overall["coverage_0_5"] == pytest.approx(0.0)
-    assert overall["average_width_0_5"] == pytest.approx(
-        (2 * norm.ppf(0.75) + 2 * norm.ppf(0.75) + 4 * norm.ppf(0.75)) / 3
-    )
+    assert overall["average_width_0_5"] == pytest.approx(2.5 * norm.ppf(0.75))
+    assert set(zip(metrics["origin"].notna(), metrics["horizon"].notna())) == {
+        (True, True),
+        (False, True),
+        (False, False),
+    }
 
 
 def test_aggregation_reports_benchmark_rows_at_every_level() -> None:
@@ -135,4 +141,21 @@ def test_aggregation_reports_benchmark_rows_at_every_level() -> None:
     metrics = aggregate_metrics(score_predictions(predictions, interval_levels=()))
 
     assert metrics.loc[metrics["candidate"].eq("persistence"), "is_benchmark"].all()
-    assert len(metrics.loc[metrics["candidate"].eq("persistence")]) == 2
+    assert len(metrics.loc[metrics["candidate"].eq("persistence")]) == 3
+
+
+def test_aggregation_requires_nonnull_origins() -> None:
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0],
+            "mean": [1.0],
+            "variance": [1.0],
+            "candidate": ["a"],
+            "horizon": [1],
+        }
+    )
+
+    scored = score_predictions(predictions, interval_levels=())
+
+    with pytest.raises(DataContractError, match="origin"):
+        aggregate_metrics(scored)
