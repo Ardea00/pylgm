@@ -9,6 +9,7 @@ import platform
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from importlib.metadata import version
 from pathlib import Path
@@ -181,6 +182,23 @@ def _publish_no_replace(source: Path, destination: Path) -> None:
     raise OSError(errno.ENOTSUP, "atomic no-replace publication is unsupported")
 
 
+def write_transactionally(output: Path, writer: Callable[[Path], None]) -> None:
+    """Write in a sibling temporary directory and atomically publish it once."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    with _OutputLock(output.parent / f".{output.name}.lock"):
+        try:
+            if _destination_exists(output):
+                raise FileExistsError(errno.EEXIST, "File exists", output)
+            temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
+            writer(temporary)
+            _publish_no_replace(temporary, output)
+            temporary = None
+        finally:
+            if temporary is not None:
+                shutil.rmtree(temporary, ignore_errors=True)
+
+
 def write_run(
     output: Path,
     config: RunConfig,
@@ -218,19 +236,12 @@ def write_run(
         "labels": list(result.labels),
     }
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    with _OutputLock(output.parent / f".{output.name}.lock"):
-        try:
-            if _destination_exists(output):
-                raise FileExistsError(errno.EEXIST, "File exists", output)
-            temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
-            (temporary / "resolved_config.json").write_bytes(_canonical_json(resolved_config))
-            np.savez_compressed(temporary / "posterior.npz", mean=result.mean, covariance=result.covariance)
-            (temporary / "summary.json").write_bytes(_canonical_json(summary))
-            (temporary / "environment.json").write_bytes(_canonical_json(environment))
-            _publish_no_replace(temporary, output)
-            temporary = None
-        finally:
-            if temporary is not None:
-                shutil.rmtree(temporary, ignore_errors=True)
+    def writer(temporary: Path) -> None:
+        (temporary / "resolved_config.json").write_bytes(_canonical_json(resolved_config))
+        np.savez_compressed(
+            temporary / "posterior.npz", mean=result.mean, covariance=result.covariance
+        )
+        (temporary / "summary.json").write_bytes(_canonical_json(summary))
+        (temporary / "environment.json").write_bytes(_canonical_json(environment))
+
+    write_transactionally(output, writer)

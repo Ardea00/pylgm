@@ -12,8 +12,8 @@ from pylgm import Pipeline
 from pylgm.artifacts import run as run_artifacts
 from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
+from pylgm.data.fingerprint import panel_fingerprint
 from pylgm.exceptions import DataContractError
-from pylgm.pipeline import _panel_fingerprint
 
 
 def _write_config(path: Path) -> None:
@@ -73,7 +73,13 @@ def test_pipeline_fingerprint_is_stable_for_equivalent_input_order(tmp_path: Pat
 
 def _fingerprint(frame: pd.DataFrame) -> str:
     panel = CanonicalPanel.from_frame(frame, DataConfig(time="month", response="y"))
-    return _panel_fingerprint(panel)
+    return panel_fingerprint(panel)
+
+
+def test_legacy_panel_fingerprint_digest_is_stable() -> None:
+    frame = pd.DataFrame({"month": [2, 1], "y": [2.0, 1.0]})
+
+    assert _fingerprint(frame) == "ce57a6f79e9e60cb6be739cd37b6b11e4cfe7bd12a8fffd45f628d72fdc17cd6"
 
 
 def test_panel_fingerprint_is_stable_for_equivalent_categorical_frames() -> None:

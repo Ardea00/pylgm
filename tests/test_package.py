@@ -1,13 +1,18 @@
 from importlib.metadata import entry_points
+from pathlib import Path
 import shutil
 import subprocess
+import tomllib
 
 import pylgm
 from pylgm.cli import app
 
 
 def test_package_exports_version() -> None:
-    assert pylgm.__version__ == "0.1.0"
+    metadata = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+
+    assert pylgm.__version__ == "0.2.0"
+    assert metadata["project"]["version"] == pylgm.__version__
 
 
 def test_installed_console_entrypoint_loads_and_reports_help() -> None:
@@ -25,3 +30,4 @@ def test_installed_console_entrypoint_loads_and_reports_help() -> None:
     )
     assert completed.returncode == 0
     assert "fit" in completed.stdout
+    assert "compare" in completed.stdout

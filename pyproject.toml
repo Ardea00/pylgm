@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pylgm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Configuration-driven latent Gaussian models for panel data"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ dependencies = [
   "numpy>=2.0",
   "pandas>=2.2",
   "pydantic>=2.8",
+  "pyarrow>=17",
   "pyyaml>=6.0",
   "scipy>=1.14",
   "typer>=0.15",

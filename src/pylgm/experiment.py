@@ -11,10 +11,13 @@ from types import MappingProxyType
 import pandas as pd
 from pandas.api.types import is_object_dtype
 
+from pylgm.artifacts import write_experiment
 from pylgm.compiler import compile_gaussian_family
 from pylgm.config import ExperimentConfig, load_experiment_config, resolve_candidates
 from pylgm.config.experiment import ResolvedCandidate
+from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
+from pylgm.data.fingerprint import panel_fingerprint
 from pylgm.evaluation import (
     CandidateDecision,
     FoldData,
@@ -211,6 +214,18 @@ def _run_persistence(config: ExperimentConfig, folds: tuple[FoldData, ...]) -> p
     return pd.concat(predictions, ignore_index=True)
 
 
+def _data_fingerprint(frame: pd.DataFrame, config: ExperimentConfig) -> str:
+    data = config.data
+    fingerprint_config: DataConfig = data
+    if data.vintage is not None:
+        fingerprint_config = DataConfig(
+            time=data.time,
+            response=data.response,
+            panel=(*data.panel, data.vintage),
+        )
+    return panel_fingerprint(CanonicalPanel.from_frame(frame, fingerprint_config))
+
+
 @dataclass(frozen=True)
 class Experiment:
     """A configured predictive candidate comparison."""
@@ -222,10 +237,6 @@ class Experiment:
         return cls(load_experiment_config(Path(path)))
 
     def compare(self, frame: pd.DataFrame, output: str | Path | None = None) -> ComparisonResult:
-        if output is not None:
-            raise PyLGMError(
-                "experiment artifact output is not available in this release; use output=None"
-            )
         definitions = build_fold_definitions(frame, self.config.data, self.config.evaluation)
         folds = tuple(
             materialize_fold(frame, self.config.data, self.config.evaluation, definition)
@@ -242,7 +253,7 @@ class Experiment:
         scored = score_predictions(predictions, self.config.evaluation.interval_levels)
         metrics = aggregate_metrics(scored)
         decision = select_candidate(metrics, failures, self.config.evaluation)
-        return ComparisonResult(
+        result = ComparisonResult(
             tuple(candidate.name for candidate in candidates),
             scored,
             metrics,
@@ -250,3 +261,13 @@ class Experiment:
             failures,
             decision,
         )
+        if output is not None:
+            write_experiment(
+                Path(output),
+                self.config,
+                candidates,
+                definitions,
+                result,
+                _data_fingerprint(frame, self.config),
+            )
+        return result

@@ -10,7 +10,6 @@ from pylgm.exceptions import (
     ConfigurationError,
     DenseReferenceLimitError,
     OptimizationError,
-    PyLGMError,
     SelectionError,
 )
 
@@ -214,10 +213,3 @@ def test_comparison_is_deterministic_and_tables_are_defensive(
     assert first.predictions.loc[0, "mean"] != -999.0
     with pytest.raises(TypeError):
         first.failures["new"] = ("failure",)  # type: ignore[index]
-
-
-def test_output_is_explicitly_unsupported_until_artifact_wiring(tmp_path: Path) -> None:
-    experiment = Experiment.from_yaml(_write_config(tmp_path / "experiment.yaml"))
-
-    with pytest.raises(PyLGMError, match="output=None"):
-        experiment.compare(_panel(), output=tmp_path / "result")
