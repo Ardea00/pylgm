@@ -7,6 +7,7 @@ import pytest
 import pylgm.experiment as experiment_module
 from pylgm import Experiment
 from pylgm.exceptions import (
+    ConfigurationError,
     DenseReferenceLimitError,
     OptimizationError,
     PyLGMError,
@@ -64,18 +65,46 @@ def test_experiment_compares_candidates_and_persistence(tmp_path: Path) -> None:
     experiment = Experiment.from_yaml(_write_config(tmp_path / "experiment.yaml"))
 
     result = experiment.compare(_panel(), output=None)
+    predictions = result.predictions
+    benchmark = predictions["candidate"].eq("persistence")
 
     assert set(result.candidates) == {"base", "trend"}
-    assert set(result.predictions["candidate"]) == {"base", "trend", "persistence"}
+    assert set(predictions["candidate"]) == {"base", "trend", "persistence"}
     assert result.selected in {"base", "trend"}
-    assert result.predictions["origin"].notna().all()
-    assert result.predictions["target_time"].notna().all()
-    assert result.predictions.loc[
-        result.predictions["candidate"].eq("persistence"), "is_benchmark"
-    ].all()
-    assert not result.predictions.loc[
-        ~result.predictions["candidate"].eq("persistence"), "is_benchmark"
-    ].any()
+    assert predictions["origin"].notna().all()
+    assert predictions["target_time"].notna().all()
+    assert predictions.loc[benchmark, "engine"].eq("persistence").all()
+    assert predictions.loc[~benchmark, "engine"].eq("exact_gaussian").all()
+    assert predictions.loc[benchmark, "is_benchmark"].all()
+    assert not predictions.loc[~benchmark, "is_benchmark"].any()
+
+
+def test_reversed_explicit_origins_optimize_chronologically_and_warm_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[int, dict[str, float] | None]] = []
+    optimize = experiment_module.optimize_empirical_bayes
+
+    def recording_optimizer(family, bounds, *, initial=None):
+        calls.append((family.y.size, None if initial is None else dict(initial)))
+        return optimize(family, bounds, initial=initial)
+
+    monkeypatch.setattr(experiment_module, "optimize_empirical_bayes", recording_optimizer)
+    path = _write_config(tmp_path / "experiment.yaml", "  - {name: base}")
+    path.write_text(path.read_text().replace("origins: {last: 2}", "origins: {values: [7, 6]}"))
+
+    Experiment.from_yaml(path).compare(_panel())
+
+    assert [row_count for row_count, _ in calls] == [14, 16]
+    assert calls[0][1] is None
+    assert calls[1][1] is not None
+
+
+def test_persistence_is_reserved_for_the_benchmark(tmp_path: Path) -> None:
+    path = _write_config(tmp_path / "experiment.yaml", "  - {name: persistence}")
+
+    with pytest.raises(ConfigurationError, match="persistence.*reserved|reserved.*persistence"):
+        Experiment.from_yaml(path)
 
 
 def test_optimizer_runs_once_per_candidate_origin_and_warm_starts(

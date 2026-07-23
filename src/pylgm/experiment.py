@@ -114,6 +114,7 @@ def _prediction_rows(
     result["origin"] = fold.definition.origin
     result["horizon"] = fold.definition.horizon
     result["candidate"] = candidate.name
+    result["engine"] = "exact_gaussian"
     result["is_benchmark"] = False
     return result
 
@@ -204,6 +205,7 @@ def _run_persistence(config: ExperimentConfig, folds: tuple[FoldData, ...]) -> p
         result["origin"] = fold.definition.origin
         result["horizon"] = fold.definition.horizon
         result["candidate"] = "persistence"
+        result["engine"] = "persistence"
         result["is_benchmark"] = True
         predictions.append(result)
     return pd.concat(predictions, ignore_index=True)

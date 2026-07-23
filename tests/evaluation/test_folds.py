@@ -152,6 +152,28 @@ def test_ordered_categorical_time_uses_declared_order_for_horizon_and_materializ
     assert fold.target_frame["y"].tolist() == [2.0]
 
 
+def test_explicit_origins_follow_ordered_categorical_time_order() -> None:
+    frame = pd.DataFrame(
+        {
+            "region": ["A"] * 4,
+            "month": pd.Categorical(
+                ["Mar", "Jan", "Apr", "Feb"],
+                categories=["Jan", "Feb", "Mar", "Apr"],
+                ordered=True,
+            ),
+            "y": [3.0, 1.0, 4.0, 2.0],
+        }
+    )
+    config = evaluation(origins=OriginConfig(values=("Feb", "Jan")))
+
+    definitions = build_fold_definitions(frame, data_config(), config)
+
+    assert definitions == (
+        FoldDefinition(origin="Jan", target="Feb", horizon=1),
+        FoldDefinition(origin="Feb", target="Mar", horizon=1),
+    )
+
+
 def test_unordered_categorical_time_fails_with_a_typed_order_error() -> None:
     frame = pd.DataFrame(
         {

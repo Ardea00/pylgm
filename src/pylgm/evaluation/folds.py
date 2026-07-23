@@ -135,6 +135,7 @@ def build_fold_definitions(
     if len(levels) <= maximum_horizon:
         raise FoldConstructionError("insufficient future time levels for configured horizons")
     eligible = levels[:-maximum_horizon]
+    positions = {value: index for index, value in enumerate(levels)}
     if evaluation.origins.last is not None:
         count = evaluation.origins.last
         if count > len(eligible):
@@ -150,7 +151,7 @@ def build_fold_definitions(
             raise FoldConstructionError(
                 f"configured origin has insufficient future levels: {ineligible}"
             )
-    positions = {value: index for index, value in enumerate(levels)}
+        origins = tuple(sorted(origins, key=positions.__getitem__))
     return tuple(
         FoldDefinition(origin, levels[positions[origin] + horizon], horizon)
         for origin in origins

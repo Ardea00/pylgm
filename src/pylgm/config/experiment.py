@@ -206,6 +206,8 @@ class ExperimentConfig(StrictModel):
             raise ValueError("candidates must not be empty")
         if len(names) != len(set(names)):
             raise ValueError("candidate names must be unique")
+        if "persistence" in names:
+            raise ValueError("candidate name 'persistence' is reserved for the benchmark")
         if (self.evaluation.mode == "vintage") != (self.data.vintage is not None):
             raise ValueError("a vintage column is required exactly when mode is vintage")
         return self
