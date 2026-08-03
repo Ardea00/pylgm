@@ -209,6 +209,21 @@ def test_experiment_fingerprint_changes_with_data(tmp_path: Path) -> None:
     assert first["experiment_fingerprint"] != second["experiment_fingerprint"]
 
 
+def test_experiment_metrics_preserve_large_integer_origins(tmp_path: Path) -> None:
+    base = 2**60 + 1
+    panel = _panel()
+    panel["month"] = panel["month"].astype("int64") + base
+    output = tmp_path / "comparison"
+
+    Experiment.from_yaml(_config(tmp_path / "experiment.yaml", trend="1")).compare(panel, output)
+
+    metrics = pd.read_parquet(output / "metrics.parquet")
+    folds = metrics.loc[metrics["origin"].notna()]
+    assert str(metrics["origin"].dtype) == "Int64"
+    assert str(metrics["horizon"].dtype) == "Int64"
+    assert set(folds["origin"].astype("int64")) == {base + 6, base + 7}
+
+
 def test_experiment_artifact_failure_is_atomic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

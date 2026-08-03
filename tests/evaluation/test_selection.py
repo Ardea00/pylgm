@@ -153,6 +153,16 @@ def test_selection_requires_metric_origin_column() -> None:
         select_candidate(metrics, failures={}, config=selection_config())
 
 
+def test_selection_accepts_nullable_integer_aggregate_markers() -> None:
+    metrics = metrics_table([{"candidate": "a"}])
+    metrics["origin"] = pd.array(metrics["origin"], dtype="Int64")
+    metrics["horizon"] = pd.array(metrics["horizon"], dtype="Int64")
+
+    result = select_candidate(metrics, failures={}, config=selection_config())
+
+    assert result.selected == "a"
+
+
 def test_nonfinite_metrics_are_ineligible_and_all_ineligible_raises() -> None:
     metrics = metrics_table([{"candidate": "bad", "mean_log_predictive_density": float("nan")}])
 

@@ -1,3 +1,6 @@
+from datetime import date
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -159,3 +162,87 @@ def test_aggregation_requires_nonnull_origins() -> None:
 
     with pytest.raises(DataContractError, match="origin"):
         aggregate_metrics(scored)
+
+
+def test_aggregation_requires_exact_integer_horizons() -> None:
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0],
+            "mean": [1.0],
+            "variance": [1.0],
+            "candidate": ["a"],
+            "origin": [1],
+            "horizon": [1.0],
+        }
+    )
+
+    with pytest.raises(DataContractError, match="horizon.*integer"):
+        aggregate_metrics(score_predictions(predictions, interval_levels=()))
+
+
+def test_metric_coordinates_preserve_large_integers_through_parquet(tmp_path: Path) -> None:
+    origin = 2**60 + 1
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0],
+            "mean": [1.0],
+            "variance": [1.0],
+            "candidate": ["a"],
+            "origin": [origin],
+            "horizon": [1],
+        }
+    )
+
+    metrics = aggregate_metrics(score_predictions(predictions, interval_levels=()))
+    fold = metrics.loc[metrics["origin"].notna() & metrics["horizon"].notna()].iloc[0]
+
+    assert fold["origin"] == origin
+    assert fold["horizon"] == 1
+    assert str(metrics["origin"].dtype) == "Int64"
+    assert str(metrics["horizon"].dtype) == "Int64"
+    path = tmp_path / "metrics.parquet"
+    metrics.to_parquet(path, index=False)
+    persisted = pd.read_parquet(path)
+    persisted_fold = persisted.loc[persisted["origin"].notna() & persisted["horizon"].notna()].iloc[
+        0
+    ]
+    assert persisted_fold["origin"] == origin
+    assert persisted_fold["horizon"] == 1
+    assert str(persisted["origin"].dtype) == "Int64"
+    assert str(persisted["horizon"].dtype) == "Int64"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [date(2025, 1, 1), pd.Timestamp("2025-01-01T00:00:00+01:00"), "late"],
+)
+def test_metric_origins_preserve_supported_scalars_through_parquet(
+    tmp_path: Path, origin: object
+) -> None:
+    origins = (
+        pd.Categorical([origin], categories=["early", "late"], ordered=True)
+        if origin == "late"
+        else [origin]
+    )
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0],
+            "mean": [1.0],
+            "variance": [1.0],
+            "candidate": ["a"],
+            "origin": origins,
+            "horizon": [1],
+        }
+    )
+
+    metrics = aggregate_metrics(score_predictions(predictions, interval_levels=()))
+    fold = metrics.loc[metrics["origin"].notna() & metrics["horizon"].notna()].iloc[0]
+    path = tmp_path / "metrics.parquet"
+    metrics.to_parquet(path, index=False)
+    persisted = pd.read_parquet(path)
+    persisted_fold = persisted.loc[persisted["origin"].notna() & persisted["horizon"].notna()].iloc[
+        0
+    ]
+
+    assert fold["origin"] == origin
+    assert persisted_fold["origin"] == origin

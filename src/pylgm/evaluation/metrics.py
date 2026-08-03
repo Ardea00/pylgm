@@ -12,6 +12,8 @@ from scipy.stats import norm
 from pylgm.exceptions import DataContractError
 
 _REQUIRED_PREDICTION_COLUMNS = ("actual", "mean", "variance", "candidate", "horizon")
+_SIGNED_INTEGER = np.iinfo(np.int64)
+_UNSIGNED_INTEGER = np.iinfo(np.uint64)
 
 
 def _interval_suffix(level: float) -> str:
@@ -58,6 +60,22 @@ def _benchmark_identity(frame: pd.DataFrame) -> pd.Series:
     if not values.map(lambda value: isinstance(value, (bool, np.bool_))).all():
         raise DataContractError("is_benchmark must contain booleans")
     return values.astype(bool, copy=True)
+
+
+def _is_exact_integer(value: object) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+
+def _origin_array(records: list[dict[str, object]]) -> pd.api.extensions.ExtensionArray:
+    values = [record["origin"] for record in records]
+    integers = [int(value) for value in values if value is not None and _is_exact_integer(value)]
+    nonnull_count = sum(value is not None for value in values)
+    if integers and len(integers) == nonnull_count:
+        if _SIGNED_INTEGER.min <= min(integers) and max(integers) <= _SIGNED_INTEGER.max:
+            return pd.array(values, dtype="Int64")
+        if min(integers) >= 0 and max(integers) <= _UNSIGNED_INTEGER.max:
+            return pd.array(values, dtype="UInt64")
+    return pd.array(values, dtype=object)
 
 
 def score_predictions(
@@ -167,9 +185,13 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
     working["is_benchmark"] = benchmark
     if working[["candidate", "origin", "horizon"]].isna().any(axis=None):
         raise DataContractError("scored prediction rows require candidate, origin, and horizon")
+    if not working["horizon"].map(_is_exact_integer).all():
+        raise DataContractError("scored prediction horizons must be exact integers")
 
     records: list[dict[str, object]] = []
-    fold_groups = working.groupby(["candidate", "is_benchmark", "origin", "horizon"], sort=True)
+    fold_groups = working.groupby(
+        ["candidate", "is_benchmark", "origin", "horizon"], sort=True, observed=True
+    )
     for (candidate, is_benchmark, origin, horizon), group in fold_groups:
         records.append(
             _aggregate_group(
@@ -180,7 +202,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
                 horizon=horizon,
             )
         )
-    groups = working.groupby(["candidate", "is_benchmark", "horizon"], sort=True)
+    groups = working.groupby(["candidate", "is_benchmark", "horizon"], sort=True, observed=True)
     for (candidate, is_benchmark, horizon), group in groups:
         records.append(
             _aggregate_group(
@@ -191,7 +213,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
                 horizon=horizon,
             )
         )
-    overall_groups = working.groupby(["candidate", "is_benchmark"], sort=True)
+    overall_groups = working.groupby(["candidate", "is_benchmark"], sort=True, observed=True)
     for (candidate, is_benchmark), group in overall_groups:
         records.append(
             _aggregate_group(
@@ -202,4 +224,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
                 horizon=None,
             )
         )
-    return pd.DataFrame.from_records(records)
+    result = pd.DataFrame.from_records(records)
+    result["origin"] = _origin_array(records)
+    result["horizon"] = pd.array([record["horizon"] for record in records], dtype="Int64")
+    return result
