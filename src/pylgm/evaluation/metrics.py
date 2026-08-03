@@ -12,7 +12,14 @@ from scipy.stats import norm
 
 from pylgm.exceptions import DataContractError
 
-_REQUIRED_PREDICTION_COLUMNS = ("actual", "mean", "variance", "candidate", "horizon")
+_REQUIRED_PREDICTION_COLUMNS = (
+    "actual",
+    "mean",
+    "variance",
+    "candidate",
+    "horizon",
+    "evaluation_mode",
+)
 _SIGNED_INTEGER = np.iinfo(np.int64)
 _UNSIGNED_INTEGER = np.iinfo(np.uint64)
 
@@ -61,6 +68,16 @@ def _benchmark_identity(frame: pd.DataFrame) -> pd.Series:
     if not values.map(lambda value: isinstance(value, (bool, np.bool_))).all():
         raise DataContractError("is_benchmark must contain booleans")
     return values.astype(bool, copy=True)
+
+
+def _evaluation_modes(frame: pd.DataFrame) -> tuple[str, ...]:
+    values = frame["evaluation_mode"]
+    if (
+        values.isna().any()
+        or not values.map(lambda value: type(value) is str and value in {"latest", "vintage"}).all()
+    ):
+        raise DataContractError("evaluation mode must be 'latest' or 'vintage'")
+    return tuple(dict.fromkeys(values.tolist()))
 
 
 def _is_exact_integer(value: object) -> bool:
@@ -122,6 +139,7 @@ def score_predictions(
 ) -> pd.DataFrame:
     """Return independent, coordinate-preserving Gaussian forecast score rows."""
     _require_columns(predictions, _REQUIRED_PREDICTION_COLUMNS)
+    _evaluation_modes(predictions)
     levels = _validated_levels(interval_levels)
     actual = _numeric_column(predictions, "actual")
     mean = _numeric_column(predictions, "mean")
@@ -168,6 +186,7 @@ def _aggregate_group(
     benchmark: bool,
     origin: object,
     horizon: object,
+    evaluation_mode: str,
 ) -> dict[str, object]:
     count = len(group)
     residual = group["actual"].to_numpy(dtype=float) - group["mean"].to_numpy(dtype=float)
@@ -181,6 +200,7 @@ def _aggregate_group(
         "origin": origin,
         "horizon": horizon,
         "is_benchmark": benchmark,
+        "evaluation_mode": evaluation_mode,
         "prediction_count": count,
         "squared_error_sum": squared_error_sum,
         "absolute_error_sum": absolute_error_sum,
@@ -229,6 +249,10 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
     benchmark = _benchmark_identity(scored_predictions)
     working = scored_predictions.copy(deep=True)
     working["is_benchmark"] = benchmark
+    modes = _evaluation_modes(working)
+    if len(modes) != 1:
+        raise DataContractError("aggregation requires a single consistent evaluation mode")
+    evaluation_mode = modes[0]
     if working[["candidate", "origin", "horizon"]].isna().any(axis=None):
         raise DataContractError("scored prediction rows require candidate, origin, and horizon")
     if not working["horizon"].map(_is_exact_integer).all():
@@ -247,6 +271,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
                 benchmark=bool(is_benchmark),
                 origin=origin,
                 horizon=horizon,
+                evaluation_mode=evaluation_mode,
             )
         )
     groups = working.groupby(["candidate", "is_benchmark", "horizon"], sort=True, observed=True)
@@ -258,6 +283,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
                 benchmark=bool(is_benchmark),
                 origin=None,
                 horizon=horizon,
+                evaluation_mode=evaluation_mode,
             )
         )
     overall_groups = working.groupby(["candidate", "is_benchmark"], sort=True, observed=True)
@@ -269,6 +295,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
                 benchmark=bool(is_benchmark),
                 origin=None,
                 horizon=None,
+                evaluation_mode=evaluation_mode,
             )
         )
     result = pd.DataFrame.from_records(records)

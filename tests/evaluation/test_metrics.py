@@ -19,6 +19,7 @@ def test_gaussian_log_score_matches_scipy() -> None:
             "candidate": ["a"],
             "origin": [1],
             "horizon": [1],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -39,6 +40,7 @@ def test_scoring_rejects_nonpositive_or_nonfinite_variance(variance: float) -> N
             "candidate": ["a"],
             "origin": [1],
             "horizon": [1],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -56,6 +58,7 @@ def test_scoring_rejects_nonreal_or_boolean_interval_levels(level: object) -> No
             "candidate": ["a"],
             "origin": [1],
             "horizon": [1],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -72,6 +75,7 @@ def test_scoring_adds_intervals_coverage_and_benchmark_identity() -> None:
             "candidate": ["a"],
             "origin": [1],
             "horizon": [1],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -93,6 +97,7 @@ def test_aggregation_sums_prediction_rows_before_deriving_metrics() -> None:
             "candidate": ["a", "a", "a", "a"],
             "origin": [1, 1, 2, 2],
             "horizon": [1, 1, 2, 1],
+            "evaluation_mode": ["latest"] * 4,
         }
     )
 
@@ -129,6 +134,7 @@ def test_aggregation_sums_prediction_rows_before_deriving_metrics() -> None:
         (False, True),
         (False, False),
     }
+    assert metrics["evaluation_mode"].eq("latest").all()
 
 
 def test_aggregation_reports_benchmark_rows_at_every_level() -> None:
@@ -141,6 +147,7 @@ def test_aggregation_reports_benchmark_rows_at_every_level() -> None:
             "origin": [1, 1],
             "horizon": [1, 1],
             "is_benchmark": [False, True],
+            "evaluation_mode": ["latest", "latest"],
         }
     )
 
@@ -158,6 +165,7 @@ def test_aggregation_requires_nonnull_origins() -> None:
             "variance": [1.0],
             "candidate": ["a"],
             "horizon": [1],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -179,6 +187,7 @@ def test_aggregation_rejects_incomparable_mixed_origin_scalars() -> None:
                 dtype=object,
             ),
             "horizon": [1, 1],
+            "evaluation_mode": ["latest", "latest"],
         }
     )
 
@@ -196,6 +205,7 @@ def test_aggregation_rejects_ordered_categorical_mixed_origin_scalars() -> None:
             "candidate": ["a", "a"],
             "origin": pd.Categorical(origins, categories=origins, ordered=True),
             "horizon": [1, 1],
+            "evaluation_mode": ["latest", "latest"],
         }
     )
 
@@ -212,6 +222,7 @@ def test_aggregation_requires_exact_integer_horizons() -> None:
             "candidate": ["a"],
             "origin": [1],
             "horizon": [1.0],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -229,6 +240,7 @@ def test_metric_coordinates_preserve_large_integers_through_parquet(tmp_path: Pa
             "candidate": ["a"],
             "origin": [origin],
             "horizon": [1],
+            "evaluation_mode": ["latest"],
         }
     )
 
@@ -271,6 +283,7 @@ def test_metric_origins_preserve_supported_scalars_through_parquet(
             "candidate": ["a"],
             "origin": origins,
             "horizon": [1],
+            "evaluation_mode": ["vintage"],
         }
     )
 
@@ -285,3 +298,21 @@ def test_metric_origins_preserve_supported_scalars_through_parquet(
 
     assert fold["origin"] == origin
     assert persisted_fold["origin"] == origin
+    assert persisted_fold["evaluation_mode"] == "vintage"
+
+
+def test_aggregation_rejects_mixed_evaluation_modes() -> None:
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0, 1.0],
+            "mean": [1.0, 1.0],
+            "variance": [1.0, 1.0],
+            "candidate": ["a", "a"],
+            "origin": [1, 2],
+            "horizon": [1, 1],
+            "evaluation_mode": ["latest", "vintage"],
+        }
+    )
+
+    with pytest.raises(DataContractError, match="single.*evaluation mode|evaluation mode"):
+        aggregate_metrics(score_predictions(predictions, interval_levels=()))

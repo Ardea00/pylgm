@@ -115,9 +115,7 @@ def test_invalid_or_insufficient_origins_raise_typed_errors(
     frame = pd.DataFrame({"region": ["A"] * 5, "month": range(5), "y": range(5)})
 
     with pytest.raises(FoldConstructionError, match=match):
-        build_fold_definitions(
-            frame, data_config(), evaluation(horizons=(2,), origins=origins)
-        )
+        build_fold_definitions(frame, data_config(), evaluation(horizons=(2,), origins=origins))
 
 
 def test_incomparable_time_levels_raise_a_typed_error() -> None:
@@ -214,9 +212,7 @@ def test_expanding_and_rolling_windows_keep_the_correct_training_levels(
 ) -> None:
     definition = FoldDefinition(origin=4, target=6, horizon=2)
 
-    expanding = materialize_fold(
-        panel_frame, data_config(), evaluation(horizons=(2,)), definition
-    )
+    expanding = materialize_fold(panel_frame, data_config(), evaluation(horizons=(2,)), definition)
     rolling = materialize_fold(
         panel_frame,
         data_config(),
@@ -240,9 +236,7 @@ def test_materialize_requires_an_exact_positional_target(panel_frame: pd.DataFra
 
 
 def test_latest_mode_rejects_duplicate_panel_time_keys() -> None:
-    frame = pd.DataFrame(
-        {"region": ["A", "A"], "month": [1, 1], "y": [1.0, 2.0]}
-    )
+    frame = pd.DataFrame({"region": ["A", "A"], "month": [1, 1], "y": [1.0, 2.0]})
 
     with pytest.raises(FoldConstructionError, match="duplicate"):
         materialize_fold(
@@ -270,13 +264,9 @@ def test_vintage_fold_uses_latest_release_available_at_origin() -> None:
         vintage="release",
         covariates={"x": CovariateConfig(availability="known_future")},
     )
-    config = evaluation(
-        mode="vintage", horizons=(1,), origins=OriginConfig(values=(2,))
-    )
+    config = evaluation(mode="vintage", horizons=(1,), origins=OriginConfig(values=(2,)))
 
-    fold = materialize_fold(
-        frame, data, config, FoldDefinition(origin=2, target=3, horizon=1)
-    )
+    fold = materialize_fold(frame, data, config, FoldDefinition(origin=2, target=3, horizon=1))
 
     assert fold.training_frame.loc[fold.training_frame.month.eq(2), "y"].item() == 2.1
     assert 2.9 not in fold.training_frame["y"].tolist()
@@ -321,9 +311,7 @@ def test_every_truth_target_coordinate_must_exist_in_origin_snapshot() -> None:
             "y": [1.0, 2.0],
         }
     )
-    data = ExperimentDataConfig(
-        time="month", response="y", panel=("region",), vintage="release"
-    )
+    data = ExperimentDataConfig(time="month", response="y", panel=("region",), vintage="release")
 
     with pytest.raises(FoldConstructionError, match="coordinate"):
         materialize_fold(
@@ -343,9 +331,7 @@ def test_duplicate_vintage_release_for_a_coordinate_is_rejected() -> None:
             "y": [1.0, 1.1, 2.0],
         }
     )
-    data = ExperimentDataConfig(
-        time="month", response="y", panel=("region",), vintage="release"
-    )
+    data = ExperimentDataConfig(time="month", response="y", panel=("region",), vintage="release")
 
     with pytest.raises(FoldConstructionError, match="duplicate"):
         materialize_fold(
@@ -391,9 +377,7 @@ def test_target_covariate_availability_is_enforced(
 
 @pytest.mark.parametrize("case", ["missing_column", "missing_target_value"])
 def test_missing_target_covariates_raise_typed_errors(case: str) -> None:
-    frame = pd.DataFrame(
-        {"region": ["A"] * 3, "month": [0, 1, 2], "y": [0.0, 1.0, 2.0]}
-    )
+    frame = pd.DataFrame({"region": ["A"] * 3, "month": [0, 1, 2], "y": [0.0, 1.0, 2.0]})
     if case == "missing_target_value":
         frame["x"] = [1.0, 2.0, None]
 
@@ -421,9 +405,38 @@ def test_materialization_does_not_mutate_source_or_expose_retained_frames(
     exposed = fold.model_frame
     exposed.loc[:, "y"] = -2.0
 
-    pd.testing.assert_frame_equal(original, pd.DataFrame({
-        "region": ["A"] * 7,
-        "month": list(range(7)),
-        "y": [0.0, 1.0, 2.0, 3.0, 40.0, 50.0, 60.0],
-    }))
+    pd.testing.assert_frame_equal(
+        original,
+        pd.DataFrame(
+            {
+                "region": ["A"] * 7,
+                "month": list(range(7)),
+                "y": [0.0, 1.0, 2.0, 3.0, 40.0, 50.0, 60.0],
+            }
+        ),
+    )
     assert fold.model_frame.loc[fold.model_frame.month.le(2), "y"].tolist() == [0.0, 1.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        EvaluationConfig.model_construct(
+            horizons=(1,),
+            origins=OriginConfig.model_construct(last=None, values=()),
+        ),
+        EvaluationConfig.model_construct(
+            horizons=(1,),
+            origins=OriginConfig.model_construct(last=None, values=(1, 1)),
+        ),
+        EvaluationConfig.model_construct(
+            horizons=(1, 1),
+            origins=OriginConfig.model_construct(last=None, values=(1,)),
+        ),
+    ],
+)
+def test_fold_builder_defensively_rejects_zero_or_duplicate_definitions(
+    panel_frame: pd.DataFrame, config: EvaluationConfig
+) -> None:
+    with pytest.raises(FoldConstructionError, match="empty|unique|duplicate"):
+        build_fold_definitions(panel_frame, data_config(), config)

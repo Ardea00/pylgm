@@ -64,10 +64,7 @@ def persistence_predictions(fold: FoldData) -> pd.DataFrame:
     observed = observed.sort_values([*fold._panel, "__time_position"], kind="stable")
     if fold._panel:
         last = observed.drop_duplicates(list(fold._panel), keep="last")
-        means = {
-            _panel_key(row, fold._panel): row[fold._response]
-            for _, row in last.iterrows()
-        }
+        means = {_panel_key(row, fold._panel): row[fold._response] for _, row in last.iterrows()}
     else:
         means = {(): observed.iloc[-1][fold._response]}
     target = _copy_frame(fold._target_frame)
@@ -80,9 +77,7 @@ def persistence_predictions(fold: FoldData) -> pd.DataFrame:
     try:
         predictive_means = [float(means[key]) for key in target_keys]
     except (TypeError, ValueError) as cause:
-        raise FoldConstructionError(
-            "persistence history must contain numeric responses"
-        ) from cause
+        raise FoldConstructionError("persistence history must contain numeric responses") from cause
     if not np.isfinite(predictive_means).all():
         raise FoldConstructionError("persistence means must be finite")
     result = target.loc[:, [*fold._panel, fold._time, fold._response]].rename(
@@ -90,4 +85,5 @@ def persistence_predictions(fold: FoldData) -> pd.DataFrame:
     )
     result["mean"] = predictive_means
     result["variance"] = _persistence_variance(fold)
+    result["evaluation_mode"] = fold._evaluation_mode
     return result.reset_index(drop=True)

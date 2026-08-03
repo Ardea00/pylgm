@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, diags
 
+from pylgm.data.scalars import ordered_observed_levels
 from pylgm.ir.model import LatentBlock
 
 
@@ -14,15 +15,13 @@ def build_random_walk(
     precision: float,
     order: Literal[1, 2],
 ) -> LatentBlock:
-    levels = tuple(sorted(frame[index].drop_duplicates().tolist()))
+    levels = ordered_observed_levels(frame[index])
     if len(levels) <= order:
         raise ValueError(f"{name} requires more than {order} ordered levels")
     positions = {level: column for column, level in enumerate(levels)}
     rows = np.arange(len(frame))
     columns = np.array([positions[value] for value in frame[index]])
-    design = csr_matrix(
-        (np.ones(len(frame)), (rows, columns)), shape=(len(frame), len(levels))
-    )
+    design = csr_matrix((np.ones(len(frame)), (rows, columns)), shape=(len(frame), len(levels)))
     level_count = len(levels)
     if order == 1:
         difference = diags(

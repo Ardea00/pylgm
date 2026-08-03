@@ -85,7 +85,7 @@ Also test: schema version must be integer `2`; duplicate candidate names; empty 
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
-Run: `python -m pytest tests/config/test_experiment.py -v`  
+Run: `python -m pytest tests/config/test_experiment.py -v`
 Expected: collection fails because `load_experiment_config` does not exist.
 
 - [ ] **Step 3: Implement the focused v2 schema**
@@ -134,6 +134,7 @@ class HyperparameterConfig(StrictModel):
 
 class InferenceConfig(StrictModel):
     engine: Literal["exact_gaussian"]
+    allow_large_dense: StrictBoolean = False
     hyperparameters: HyperparameterConfig
 
 
@@ -198,7 +199,7 @@ vintage column exactly when `mode: vintage` is selected.
 
 - [ ] **Step 4: Run focused and existing config tests**
 
-Run: `python -m pytest tests/config/test_experiment.py tests/config/test_load.py -q && ruff check src/pylgm/config tests/config`  
+Run: `python -m pytest tests/config/test_experiment.py tests/config/test_load.py -q && ruff check src/pylgm/config tests/config`
 Expected: all tests pass and Ruff reports no errors.
 
 - [ ] **Step 5: Commit**
@@ -244,7 +245,7 @@ Also test sigma-only and multiple-effect materialization; unknown/missing/non-fi
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
-Run: `python -m pytest tests/ir/test_gaussian_family.py -v`  
+Run: `python -m pytest tests/ir/test_gaussian_family.py -v`
 Expected: collection fails because `CompiledGaussianFamily` is absent.
 
 - [ ] **Step 3: Implement family types and compiler refactor**
@@ -321,7 +322,7 @@ Refactor `compile_model(config, panel)` to call the family compiler with no opti
 
 - [ ] **Step 4: Run IR/compiler and full regression tests**
 
-Run: `python -m pytest tests/ir/test_gaussian_family.py tests/test_compiler.py tests/inference/test_gaussian.py -q && python -m pytest -q && ruff check .`  
+Run: `python -m pytest tests/ir/test_gaussian_family.py tests/test_compiler.py tests/inference/test_gaussian.py -q && python -m pytest -q && ruff check .`
 Expected: all tests pass; existing exact results are unchanged.
 
 - [ ] **Step 5: Commit**
@@ -364,7 +365,7 @@ Also test log transformation; a precision optimum on a scalar conjugate model; d
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
-Run: `python -m pytest tests/optimization/test_empirical_bayes.py -v`  
+Run: `python -m pytest tests/optimization/test_empirical_bayes.py -v`
 Expected: collection fails because `pylgm.optimization` does not exist.
 
 - [ ] **Step 3: Implement the numerical optimizer**
@@ -424,7 +425,7 @@ Add `OptimizationError(PyLGMError)`.
 
 - [ ] **Step 4: Run focused and full quality gates**
 
-Run: `python -m pytest tests/optimization/test_empirical_bayes.py -q && python -m pytest -q && ruff check .`  
+Run: `python -m pytest tests/optimization/test_empirical_bayes.py -q && python -m pytest -q && ruff check .`
 Expected: all tests pass and Ruff is clean.
 
 - [ ] **Step 5: Commit**
@@ -471,7 +472,7 @@ Also test arbitrary horizons, explicit and last-n origins, insufficient future l
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
-Run: `python -m pytest tests/evaluation/test_folds.py tests/evaluation/test_persistence.py -v`  
+Run: `python -m pytest tests/evaluation/test_folds.py tests/evaluation/test_persistence.py -v`
 Expected: collection fails because evaluation modules are absent.
 
 - [ ] **Step 3: Implement compact fold materialization**
@@ -539,7 +540,7 @@ Add `FoldConstructionError` and `CovariateAvailabilityError`.
 
 - [ ] **Step 4: Run evaluation and full tests**
 
-Run: `python -m pytest tests/evaluation -q && python -m pytest -q && ruff check .`  
+Run: `python -m pytest tests/evaluation -q && python -m pytest -q && ruff check .`
 Expected: all tests pass and Ruff is clean.
 
 - [ ] **Step 5: Commit**
@@ -588,7 +589,7 @@ Also test positive finite variance enforcement; RMSE/MAE/bias; interval bounds a
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
-Run: `python -m pytest tests/evaluation/test_metrics.py tests/evaluation/test_selection.py -v`  
+Run: `python -m pytest tests/evaluation/test_metrics.py tests/evaluation/test_selection.py -v`
 Expected: collection fails because metrics/selection functions are absent.
 
 - [ ] **Step 3: Implement vectorized scoring and explicit decisions**
@@ -625,7 +626,7 @@ Aggregate sums/counts first, then derive mean log density, RMSE, MAE, bias, cove
 
 - [ ] **Step 4: Run focused and full tests**
 
-Run: `python -m pytest tests/evaluation/test_metrics.py tests/evaluation/test_selection.py -q && python -m pytest -q && ruff check .`  
+Run: `python -m pytest tests/evaluation/test_metrics.py tests/evaluation/test_selection.py -q && python -m pytest -q && ruff check .`
 Expected: all tests pass.
 
 - [ ] **Step 5: Commit**
@@ -665,7 +666,7 @@ Also test: optimizer runs once per candidate/origin rather than per horizon; pre
 
 - [ ] **Step 2: Run focused test and verify RED**
 
-Run: `python -m pytest tests/test_experiment.py -v`  
+Run: `python -m pytest tests/test_experiment.py -v`
 Expected: collection fails because `Experiment` is absent.
 
 - [ ] **Step 3: Implement the minimal orchestrator**
@@ -712,9 +713,15 @@ training frame, passes that optimum to `_predict_horizon` for every horizon, and
 catches only typed pyLGM errors into the candidate failure table. `_run_persistence`
 uses the same definitions and target rows.
 
+Before `_run_candidates`, compile and preflight every candidate training and
+prediction family. Persist typed preflight/optimization/prediction failures as
+structured immutable records. Forward the strict `allow_large_dense` value to every
+preflight, optimizer evaluation, and prediction fit. Label every prediction and
+fold/horizon/overall metric row with the single configured `evaluation_mode`.
+
 - [ ] **Step 4: Run experiment and full tests**
 
-Run: `python -m pytest tests/test_experiment.py -q && python -m pytest -q && ruff check .`  
+Run: `python -m pytest tests/test_experiment.py -q && python -m pytest -q && ruff check .`
 Expected: all tests pass and public v1 `Pipeline` tests remain green.
 
 - [ ] **Step 5: Commit**
@@ -765,7 +772,7 @@ Also test fingerprints change with fold/candidate configuration; output is atomi
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
-Run: `python -m pytest tests/artifacts/test_experiment_artifacts.py tests/test_cli.py -v`  
+Run: `python -m pytest tests/artifacts/test_experiment_artifacts.py tests/test_cli.py -v`
 Expected: comparison artifact/CLI tests fail because they are absent.
 
 - [ ] **Step 3: Reuse one transactional publication primitive**
@@ -804,7 +811,7 @@ def compare(config: Path, data: Path, output: Path = typer.Option(...)) -> None:
 
 - [ ] **Step 4: Run artifact, CLI, and full tests**
 
-Run: `python -m pytest tests/artifacts/test_experiment_artifacts.py tests/test_cli.py -q && python -m pytest -q && ruff check .`  
+Run: `python -m pytest tests/artifacts/test_experiment_artifacts.py tests/test_cli.py -q && python -m pytest -q && ruff check .`
 Expected: all tests pass; transactional failure leaves no final directory.
 
 - [ ] **Step 5: Commit**
@@ -856,7 +863,7 @@ def test_nic_shaped_backtest_has_no_leakage_and_beats_global_mean() -> None:
 
 - [ ] **Step 2: Run tests and verify fixtures are absent**
 
-Run: `python -m pytest tests/integration/test_predictive_selection.py tests/integration/test_nic_shaped_backtest.py -v`  
+Run: `python -m pytest tests/integration/test_predictive_selection.py tests/integration/test_nic_shaped_backtest.py -v`
 Expected: failure because example configs/data do not exist.
 
 - [ ] **Step 3: Add concise examples and limitations**

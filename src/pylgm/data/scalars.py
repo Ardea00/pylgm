@@ -45,3 +45,25 @@ def is_supported_object_value(value: Any) -> bool:
     if isinstance(value, pd.Interval):
         return is_supported_object_value(value.left) and is_supported_object_value(value.right)
     return False
+
+
+def ordered_observed_levels(values: pd.Series) -> tuple[object, ...]:
+    """Return observed levels in their declared or natural total order.
+
+    Ordered categoricals retain the declared relative category order while unused
+    categories are omitted. An unordered categorical is not a valid ordered index.
+    """
+    if values.isna().any():
+        raise ValueError("ordered index levels must not contain null values")
+    if isinstance(values.dtype, pd.CategoricalDtype):
+        if not values.cat.ordered:
+            raise ValueError("categorical index levels must be ordered")
+        levels = tuple(values.cat.remove_unused_categories().cat.categories.tolist())
+    else:
+        try:
+            levels = tuple(sorted(values.drop_duplicates().tolist()))
+        except (TypeError, ValueError) as error:
+            raise ValueError("index levels must have a total order") from error
+    if not levels:
+        raise ValueError("ordered index contains no observed levels")
+    return levels

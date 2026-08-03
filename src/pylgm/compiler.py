@@ -1,10 +1,11 @@
 import numpy as np
+from formulaic.errors import FormulaicError
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import build_fixed, build_iid, build_random_walk
-from pylgm.exceptions import CompilationError, DataContractError
+from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
 from pylgm.ir import CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
 from pylgm.ir.model import LatentBlock
 
@@ -31,38 +32,28 @@ def _structured_blocks(
                     precision,
                     order,
                 )
-        except Exception as error:
-            raise CompilationError(
-                f"failed to compile effect {effect.name!r}: {error}"
-            ) from error
+        except (DataContractError, ModelValidationError, TypeError, ValueError) as error:
+            raise CompilationError(f"failed to compile effect {effect.name!r}: {error}") from error
         blocks.append(block)
     return blocks
 
 
 def _qualified_labels(blocks: list[LatentBlock]) -> tuple[str, ...]:
-    labels = tuple(
-        f"{block.name}:{label}" for block in blocks for label in block.labels
-    )
+    labels = tuple(f"{block.name}:{label}" for block in blocks for label in block.labels)
     if len(labels) != len(set(labels)):
         raise CompilationError("duplicate latent labels after qualification")
     return labels
 
 
-def _validate_required_columns(
-    data: DataConfig, model: ModelConfig, frame_columns: object
-) -> None:
+def _validate_required_columns(data: DataConfig, model: ModelConfig, frame_columns: object) -> None:
     columns = set(frame_columns)
     required_data = {*data.panel, data.time, data.response}
     missing_data = sorted(required_data.difference(columns))
     if missing_data:
         raise DataContractError(f"missing configured data columns: {missing_data}")
-    missing_indexes = sorted(
-        {effect.index for effect in model.effects}.difference(columns)
-    )
+    missing_indexes = sorted({effect.index for effect in model.effects}.difference(columns))
     if missing_indexes:
-        raise DataContractError(
-            f"missing configured effect index columns: {missing_indexes}"
-        )
+        raise DataContractError(f"missing configured effect index columns: {missing_indexes}")
 
 
 def _validate_optimized_names(model: ModelConfig, optimized: tuple[str, ...]) -> None:
@@ -103,11 +94,15 @@ def compile_gaussian_family(
             model.fixed,
             model.fixed_prior_precision,
         )
-    except Exception as error:
+    except (
+        DataContractError,
+        FormulaicError,
+        ModelValidationError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise CompilationError(f"failed to compile fixed formula: {error}") from error
-    structured_optimized = tuple(
-        name for name in optimized if name.endswith(".precision")
-    )
+    structured_optimized = tuple(name for name in optimized if name.endswith(".precision"))
     blocks = [fixed]
     if structured_optimized:
         blocks.extend(_structured_blocks(model, panel, optimized))
@@ -124,9 +119,7 @@ def compile_gaussian_family(
         scalable_blocks = tuple(
             ScalableBlock(
                 block,
-                f"{block.name}.precision"
-                if f"{block.name}.precision" in optimized
-                else None,
+                f"{block.name}.precision" if f"{block.name}.precision" in optimized else None,
                 1.0,
             )
             for block in blocks
@@ -139,9 +132,7 @@ def compile_gaussian_family(
             parameter_names=optimized,
             initial=Hyperparameters(
                 sigma=float(model.sigma),
-                precisions={
-                    effect.name: float(effect.precision) for effect in model.effects
-                },
+                precisions={effect.name: float(effect.precision) for effect in model.effects},
             ),
         )
     except (TypeError, ValueError) as error:
@@ -149,6 +140,4 @@ def compile_gaussian_family(
 
 
 def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
-    return compile_gaussian_family(
-        config.data, config.model, panel, optimized=()
-    ).materialize({})
+    return compile_gaussian_family(config.data, config.model, panel, optimized=()).materialize({})

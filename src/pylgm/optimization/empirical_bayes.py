@@ -27,9 +27,7 @@ def _ordinary_positive(value: object, name: str) -> float:
     try:
         result = float(value)
     except (OverflowError, ValueError) as error:
-        raise ValueError(
-            f"{name} must be an ordinary finite positive number"
-        ) from error
+        raise ValueError(f"{name} must be an ordinary finite positive number") from error
     if not np.isfinite(result) or result <= 0:
         raise ValueError(f"{name} must be an ordinary finite positive number")
     return result
@@ -47,8 +45,7 @@ class OptimizationBounds:
         upper = _ordinary_positive(self.upper, "upper")
         if lower >= upper or not lower <= initial <= upper:
             raise ValueError(
-                "parameter bounds must satisfy lower <= initial <= upper "
-                "with lower < upper"
+                "parameter bounds must satisfy lower <= initial <= upper with lower < upper"
             )
         object.__setattr__(self, "initial", initial)
         object.__setattr__(self, "lower", lower)
@@ -76,9 +73,7 @@ def _validate_problem(
     if not names:
         raise OptimizationError("bounds must contain at least one parameter")
     if set(names) != set(family.parameter_names):
-        raise ValueError(
-            "bounds must contain exactly the compiled family parameter names"
-        )
+        raise ValueError("bounds must contain exactly the compiled family parameter names")
     for name in names:
         if not isinstance(bounds[name], OptimizationBounds):
             raise TypeError(f"bounds for {name!r} must be OptimizationBounds")
@@ -128,10 +123,7 @@ def _parameter_values(
             transformed[index] = upper[index]
     if not np.isfinite(transformed).all() or np.any(transformed <= 0):
         raise NumericalError("log-transformed parameters must be finite and positive")
-    return {
-        name: float(value)
-        for name, value in zip(names, transformed, strict=True)
-    }
+    return {name: float(value) for name, value in zip(names, transformed, strict=True)}
 
 
 def _log_bound_tolerance(lower: float, upper: float) -> float:
@@ -144,14 +136,15 @@ def optimize_empirical_bayes(
     bounds: Mapping[str, OptimizationBounds],
     *,
     initial: Mapping[str, float] | None = None,
+    allow_large_dense: bool = False,
 ) -> EmpiricalBayesResult:
+    if type(allow_large_dense) is not bool:
+        raise TypeError("allow_large_dense must be a boolean")
     names, initial_values = _validate_problem(family, bounds, initial)
     lower = np.log([bounds[name].lower for name in names])
     upper = np.log([bounds[name].upper for name in names])
     collapsed = tuple(
-        name
-        for name, low, high in zip(names, lower, upper, strict=True)
-        if not low < high
+        name for name, low, high in zip(names, lower, upper, strict=True) if not low < high
     )
     if collapsed:
         raise OptimizationError(
@@ -184,7 +177,12 @@ def optimize_empirical_bayes(
                 lower,
                 upper,
             )
-            fit = fit_gaussian(family.materialize(parameters))
+            model = family.materialize(parameters)
+            fit = (
+                fit_gaussian(model, allow_large_dense=True)
+                if allow_large_dense
+                else fit_gaussian(model)
+            )
             raw_objective = -float(fit.log_marginal_likelihood)
             if not np.isfinite(raw_objective):
                 raise NumericalError("optimization objective must be finite")
@@ -196,9 +194,7 @@ def optimize_empirical_bayes(
             )
         except InferenceError as error:
             latest_failure = error
-            failures.append(
-                f"log_parameters={key!r}: {type(error).__name__}: {error}"
-            )
+            failures.append(f"log_parameters={key!r}: {type(error).__name__}: {error}")
             evaluation = _Evaluation(_INVALID_OBJECTIVE, None, None, None)
         cache[key] = evaluation
         return evaluation.objective
@@ -241,19 +237,14 @@ def optimize_empirical_bayes(
     final_key = tuple(float(value) for value in final_vector)
     final_evaluation = cache.get(final_key)
     if final_evaluation is None or final_evaluation.fit is None:
-        fail(
-            "empirical-Bayes optimization did not produce a valid final point"
-        )
+        fail("empirical-Bayes optimization did not produce a valid final point")
     assert final_evaluation.parameters is not None
     assert final_evaluation.raw_objective is not None
 
     active_bounds = tuple(
         name
-        for name, value, low, high in zip(
-            names, final_vector, lower, upper, strict=True
-        )
-        if min(abs(value - low), abs(value - high))
-        <= _log_bound_tolerance(low, high)
+        for name, value, low, high in zip(names, final_vector, lower, upper, strict=True)
+        if min(abs(value - low), abs(value - high)) <= _log_bound_tolerance(low, high)
     )
     diagnostics = OptimizationDiagnostics(
         converged=True,

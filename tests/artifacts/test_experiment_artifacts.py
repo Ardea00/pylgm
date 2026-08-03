@@ -7,8 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import pylgm.experiment as experiment_module
 from pylgm import Experiment
 from pylgm.artifacts import experiment as experiment_artifacts
+from pylgm.exceptions import DenseReferenceLimitError, OptimizationError
 
 
 def _panel(offset: float = 0.0) -> pd.DataFrame:
@@ -108,11 +110,12 @@ def test_experiment_artifact_is_complete_versioned_and_hashed(tmp_path: Path) ->
     ]
     assert json.loads((output / "decision.json").read_text()) == result.decision.to_dict()
     assert json.loads((output / "failures.json").read_text()) == {}
-    pd.testing.assert_frame_equal(
-        pd.read_parquet(output / "predictions.parquet"), result.predictions
-    )
+    persisted_predictions = pd.read_parquet(output / "predictions.parquet")
+    pd.testing.assert_frame_equal(persisted_predictions, result.predictions)
+    assert persisted_predictions["evaluation_mode"].eq("latest").all()
     persisted_metrics = pd.read_parquet(output / "metrics.parquet")
     pd.testing.assert_frame_equal(persisted_metrics, result.metrics)
+    assert persisted_metrics["evaluation_mode"].eq("latest").all()
     levels = set(zip(persisted_metrics["origin"].notna(), persisted_metrics["horizon"].notna()))
     assert levels == {(True, True), (False, True), (False, False)}
     diagnostics = pd.read_parquet(output / "optimization.parquet")
@@ -126,6 +129,10 @@ def test_experiment_artifact_is_complete_versioned_and_hashed(tmp_path: Path) ->
         value = json.loads((output / name).read_text())
         assert (output / name).read_bytes() == _canonical(value)
     assert (output / "summary.json").read_bytes() == _canonical(summary)
+    assert (
+        json.loads((output / "resolved_config.json").read_text())["inference"]["allow_large_dense"]
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -252,3 +259,59 @@ def test_experiment_artifact_does_not_replace_existing_output(tmp_path: Path) ->
 
     assert marker.read_text() == "existing"
     assert not list(tmp_path.glob(".comparison.tmp-*"))
+
+
+def test_failed_optimizer_diagnostics_are_structured_and_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "comparison"
+    real_optimizer = experiment_module.optimize_empirical_bayes
+
+    def selectively_failing_optimizer(family, bounds, *, initial=None, allow_large_dense=False):
+        if family.blocks[0].block.labels == ("Intercept",):
+            cause = DenseReferenceLimitError("dense root cause")
+            error = OptimizationError(
+                "no valid optimum",
+                evaluations=7,
+                cache_hits=2,
+                numerical_failures=(
+                    "log_parameters=(0.0,): DenseReferenceLimitError: dense root cause",
+                ),
+            )
+            raise error from cause
+        return real_optimizer(
+            family,
+            bounds,
+            initial=initial,
+            allow_large_dense=allow_large_dense,
+        )
+
+    monkeypatch.setattr(
+        experiment_module,
+        "optimize_empirical_bayes",
+        selectively_failing_optimizer,
+    )
+
+    result = Experiment.from_yaml(_config(tmp_path / "experiment.yaml")).compare(_panel(), output)
+    failure = result.failures["base"][0]
+    persisted = json.loads((output / "failures.json").read_text())
+
+    assert failure.evaluations == 7
+    assert failure.cache_hits == 2
+    assert failure.numerical_failures == (
+        "log_parameters=(0.0,): DenseReferenceLimitError: dense root cause",
+    )
+    assert failure.root_cause is not None
+    assert failure.root_cause.type == "DenseReferenceLimitError"
+    assert failure.root_cause.message == "dense root cause"
+    assert persisted == {"base": [failure.to_dict()]}
+    assert persisted["base"][0]["candidate"] == "base"
+    assert persisted["base"][0]["type"] == "OptimizationError"
+    assert persisted["base"][0]["origin"] == 6
+    assert persisted["base"][0]["root_cause"] == {
+        "type": "DenseReferenceLimitError",
+        "message": "dense root cause",
+    }
+    snapshot = failure.to_dict()
+    snapshot["numerical_failures"].append("mutated")
+    assert len(failure.numerical_failures) == 1

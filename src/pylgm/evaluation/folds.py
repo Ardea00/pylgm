@@ -8,6 +8,7 @@ import pandas as pd
 from pandas.api.types import is_object_dtype
 
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig
+from pylgm.data.scalars import ordered_observed_levels
 from pylgm.evaluation.availability import validate_future_covariates
 from pylgm.exceptions import FoldConstructionError
 
@@ -39,6 +40,7 @@ class FoldData:
     _time: str = field(repr=False)
     _response: str = field(repr=False)
     _levels: tuple[object, ...] = field(repr=False)
+    _evaluation_mode: str = field(repr=False)
 
     def __init__(
         self,
@@ -52,6 +54,7 @@ class FoldData:
         time: str = "",
         response: str = "",
         levels: tuple[object, ...] = (),
+        evaluation_mode: str = "latest",
     ) -> None:
         object.__setattr__(self, "definition", definition)
         object.__setattr__(self, "_training_frame", _copy_frame(training_frame))
@@ -63,6 +66,7 @@ class FoldData:
         object.__setattr__(self, "_time", time)
         object.__setattr__(self, "_response", response)
         object.__setattr__(self, "_levels", tuple(levels))
+        object.__setattr__(self, "_evaluation_mode", evaluation_mode)
 
     @property
     def training_frame(self) -> pd.DataFrame:
@@ -109,19 +113,10 @@ def _validate_source(
 
 
 def _ordered_levels(frame: pd.DataFrame, time: str) -> tuple[object, ...]:
-    values = frame[time]
-    if isinstance(values.dtype, pd.CategoricalDtype):
-        if not values.cat.ordered:
-            raise FoldConstructionError("categorical time levels must be ordered")
-        levels = tuple(values.cat.remove_unused_categories().cat.categories.tolist())
-    else:
-        try:
-            levels = tuple(sorted(values.drop_duplicates().tolist()))
-        except (TypeError, ValueError) as error:
-            raise FoldConstructionError("time levels must have a total order") from error
-    if not levels:
-        raise FoldConstructionError("evaluation frame contains no time levels")
-    return levels
+    try:
+        return ordered_observed_levels(frame[time])
+    except ValueError as error:
+        raise FoldConstructionError(f"invalid ordered time levels: {error}") from error
 
 
 def build_fold_definitions(
@@ -143,6 +138,10 @@ def build_fold_definitions(
         origins = eligible[-count:]
     else:
         origins = tuple(evaluation.origins.values or ())
+        if not origins:
+            raise FoldConstructionError("explicit origins must not be empty")
+        if len(origins) != len(set(origins)):
+            raise FoldConstructionError("explicit origins must be unique")
         missing = [origin for origin in origins if origin not in levels]
         if missing:
             raise FoldConstructionError(f"configured origin is not a time level: {missing}")
@@ -152,11 +151,16 @@ def build_fold_definitions(
                 f"configured origin has insufficient future levels: {ineligible}"
             )
         origins = tuple(sorted(origins, key=positions.__getitem__))
-    return tuple(
+    definitions = tuple(
         FoldDefinition(origin, levels[positions[origin] + horizon], horizon)
         for origin in origins
         for horizon in evaluation.horizons
     )
+    if not definitions:
+        raise FoldConstructionError("fold definitions must not be empty")
+    if len(definitions) != len(set(definitions)):
+        raise FoldConstructionError("fold definitions must be unique")
+    return definitions
 
 
 def _latest_available_vintage(
@@ -170,11 +174,11 @@ def _latest_available_vintage(
     assert data.vintage is not None
     try:
         available = frame.loc[frame[data.vintage].le(origin)].copy()
-        available = available.sort_values(
-            [*data.panel, data.time, data.vintage], kind="stable"
-        )
+        available = available.sort_values([*data.panel, data.time, data.vintage], kind="stable")
     except (TypeError, ValueError) as error:
-        raise FoldConstructionError("vintage releases must be comparable with the origin") from error
+        raise FoldConstructionError(
+            "vintage releases must be comparable with the origin"
+        ) from error
     keys = [*data.panel, data.time]
     return available.drop_duplicates(keys, keep="last").reset_index(drop=True)
 
@@ -188,18 +192,14 @@ def _latest_vintage(
         return _copy_frame(frame)
     assert data.vintage is not None
     try:
-        ordered = frame.sort_values(
-            [*data.panel, data.time, data.vintage], kind="stable"
-        )
+        ordered = frame.sort_values([*data.panel, data.time, data.vintage], kind="stable")
     except (TypeError, ValueError) as error:
         raise FoldConstructionError("vintage releases must have a total order") from error
     keys = [*data.panel, data.time]
     return ordered.drop_duplicates(keys, keep="last").reset_index(drop=True)
 
 
-def _validate_definition(
-    definition: FoldDefinition, levels: tuple[object, ...]
-) -> tuple[int, int]:
+def _validate_definition(definition: FoldDefinition, levels: tuple[object, ...]) -> tuple[int, int]:
     if type(definition.horizon) is not int or definition.horizon <= 0:
         raise FoldConstructionError("fold horizon must be a positive integer")
     try:
@@ -236,12 +236,8 @@ def _apply_training_window(
         raise FoldConstructionError("panel/time coordinates must be orderable") from error
 
 
-def _target_rows(
-    truth: pd.DataFrame, data: ExperimentDataConfig, target: object
-) -> pd.DataFrame:
-    result = truth.loc[
-        truth[data.time].eq(target) & truth[data.response].notna()
-    ].copy()
+def _target_rows(truth: pd.DataFrame, data: ExperimentDataConfig, target: object) -> pd.DataFrame:
+    result = truth.loc[truth[data.time].eq(target) & truth[data.response].notna()].copy()
     if result.empty:
         raise FoldConstructionError("fold has no observed scoring targets")
     return result.sort_values([*data.panel, data.time], kind="stable").reset_index(drop=True)
@@ -297,4 +293,5 @@ def materialize_fold(
         time=data.time,
         response=data.response,
         levels=levels,
+        evaluation_mode=evaluation.mode,
     )

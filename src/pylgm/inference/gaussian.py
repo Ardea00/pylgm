@@ -21,9 +21,10 @@ def _estimated_dense_bytes(observation_count: int, latent_size: int) -> int:
     return np.dtype(np.float64).itemsize * float_count
 
 
-def _preflight_dense_reference(
-    model: CompiledLGM, *, allow_large_dense: bool
-) -> None:
+def preflight_dense_reference(model: CompiledLGM, *, allow_large_dense: bool) -> None:
+    """Reject unsafe dense-reference work unless an exact boolean override is set."""
+    if type(allow_large_dense) is not bool:
+        raise TypeError("allow_large_dense must be a boolean")
     if allow_large_dense:
         return
     latent_size = model.precision.shape[0]
@@ -93,13 +94,9 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     reduced_design = np.asarray(observed_design @ basis)
     reduced_precision = basis.T @ precision @ basis
     residual = y[observed] - offset[observed]
-    posterior_precision = (
-        reduced_precision + reduced_design.T @ reduced_design / variance
-    )
+    posterior_precision = reduced_precision + reduced_design.T @ reduced_design / variance
 
-    _, logdet_prior = _factor_positive_definite(
-        reduced_precision, "reduced prior precision"
-    )
+    _, logdet_prior = _factor_positive_definite(reduced_precision, "reduced prior precision")
     factor, logdet_posterior = _factor_positive_definite(
         posterior_precision, "reduced posterior precision"
     )
@@ -122,16 +119,12 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     )
     n_observed = int(np.count_nonzero(observed))
     log_marginal_likelihood = -0.5 * (
-        n_observed * np.log(2 * np.pi * variance)
-        - logdet_prior
-        + logdet_posterior
-        + quadratic
+        n_observed * np.log(2 * np.pi * variance) - logdet_prior + logdet_posterior + quadratic
     )
     predictive_mean = np.asarray(offset + design @ mean).reshape(-1)
     design_dense = design.toarray()
     predictive_variance = (
-        np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense)
-        + variance
+        np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense) + variance
     )
 
     _require_finite("posterior mean", mean)
@@ -149,15 +142,13 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     )
 
 
-def fit_gaussian(
-    model: CompiledLGM, *, allow_large_dense: bool = False
-) -> GaussianResult:
+def fit_gaussian(model: CompiledLGM, *, allow_large_dense: bool = False) -> GaussianResult:
     """Fit the small/medium exact Gaussian dense reference engine.
 
     The explicit override disables conservative memory and dimension guards. It does
     not change the algorithm's O(p^2) covariance storage or O(p^3) dense solve cost.
     """
-    _preflight_dense_reference(model, allow_large_dense=allow_large_dense)
+    preflight_dense_reference(model, allow_large_dense=allow_large_dense)
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
             return _fit_dense(model)

@@ -27,18 +27,21 @@ def _require_ordinary_real(value: object) -> object:
     return value
 
 
-StrictPositiveInt = Annotated[
-    int, BeforeValidator(_require_exact_integer), Field(gt=0)
-]
-StrictRollingLength = Annotated[
-    int, BeforeValidator(_require_exact_integer), Field(ge=2)
-]
+def _require_exact_boolean(value: object) -> object:
+    if type(value) is not bool:
+        raise ValueError("value must be a boolean")
+    return value
+
+
+StrictPositiveInt = Annotated[int, BeforeValidator(_require_exact_integer), Field(gt=0)]
+StrictRollingLength = Annotated[int, BeforeValidator(_require_exact_integer), Field(ge=2)]
 StrictUnitFloat = Annotated[
     float, BeforeValidator(_require_ordinary_real), Field(ge=0, le=1, allow_inf_nan=False)
 ]
 StrictNonnegativeFloat = Annotated[
     float, BeforeValidator(_require_ordinary_real), Field(ge=0, allow_inf_nan=False)
 ]
+StrictBoolean = Annotated[bool, BeforeValidator(_require_exact_boolean)]
 
 
 class CovariateConfig(StrictModel):
@@ -48,9 +51,7 @@ class CovariateConfig(StrictModel):
 
 class ExperimentDataConfig(DataConfig):
     vintage: str | None = None
-    covariates: Mapping[str, CovariateConfig] = Field(
-        default_factory=dict, validate_default=True
-    )
+    covariates: Mapping[str, CovariateConfig] = Field(default_factory=dict, validate_default=True)
 
     @field_validator("covariates")
     @classmethod
@@ -112,9 +113,7 @@ class HyperparameterConfig(StrictModel):
 
     @field_validator("optimize")
     @classmethod
-    def freeze_optimize(
-        cls, value: Mapping[str, ParameterBounds]
-    ) -> Mapping[str, ParameterBounds]:
+    def freeze_optimize(cls, value: Mapping[str, ParameterBounds]) -> Mapping[str, ParameterBounds]:
         if not value:
             raise ValueError("optimize mapping must not be empty")
         return MappingProxyType(dict(value))
@@ -128,6 +127,7 @@ class HyperparameterConfig(StrictModel):
 
 class InferenceConfig(StrictModel):
     engine: Literal["exact_gaussian"]
+    allow_large_dense: StrictBoolean = False
     hyperparameters: HyperparameterConfig
 
 
@@ -148,6 +148,11 @@ class OriginConfig(StrictModel):
     def exactly_one_source(self) -> "OriginConfig":
         if (self.last is None) == (self.values is None):
             raise ValueError("origins require exactly one of last or values")
+        if self.values is not None:
+            if not self.values:
+                raise ValueError("explicit origin values must not be empty")
+            if len(self.values) != len(set(self.values)):
+                raise ValueError("explicit origin values must be unique")
         return self
 
 
@@ -262,7 +267,5 @@ def resolve_candidates(config: ExperimentConfig) -> tuple[ResolvedCandidate, ...
         optimize = candidate.optimize if candidate.optimize is not None else inherited
         _validate_formula_availability(config.data, model)
         _validate_optimized_parameters(optimize, model)
-        resolved.append(
-            ResolvedCandidate(candidate.name, model, MappingProxyType(dict(optimize)))
-        )
+        resolved.append(ResolvedCandidate(candidate.name, model, MappingProxyType(dict(optimize))))
     return tuple(resolved)

@@ -5,8 +5,10 @@ from scipy.sparse import csr_matrix
 from typing import cast
 
 from pylgm.compiler import compile_gaussian_family, compile_model
+from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
 from pylgm.config.schema import RunConfig
 from pylgm.data import CanonicalPanel
+from pylgm.evaluation import build_fold_definitions, materialize_fold
 from pylgm.exceptions import CompilationError, DataContractError
 from pylgm.ir import LatentBlock
 
@@ -32,7 +34,7 @@ def test_compiler_assembles_named_blocks() -> None:
                         "type": "rw2",
                         "index": "month",
                         "precision": 2.0,
-                    }
+                    },
                 ],
             },
         }
@@ -152,9 +154,7 @@ def test_compiler_wraps_fixed_formula_failures(formula: str) -> None:
             "model": {"fixed": formula, "sigma": 1.0},
         }
     )
-    panel = CanonicalPanel.from_frame(
-        pd.DataFrame({"month": [1], "y": [1.0]}), config.data
-    )
+    panel = CanonicalPanel.from_frame(pd.DataFrame({"month": [1], "y": [1.0]}), config.data)
 
     with pytest.raises(CompilationError, match="fixed formula"):
         compile_model(config, panel)
@@ -187,9 +187,7 @@ def test_compiler_rejects_block_with_wrong_panel_row_count(
             "model": {"fixed": "1", "sigma": 1.0},
         }
     )
-    panel = CanonicalPanel.from_frame(
-        pd.DataFrame({"month": [1, 2], "y": [1.0, 2.0]}), config.data
-    )
+    panel = CanonicalPanel.from_frame(pd.DataFrame({"month": [1, 2], "y": [1.0, 2.0]}), config.data)
     bad_block = LatentBlock(
         "bad",
         ("level",),
@@ -257,9 +255,7 @@ def test_qualified_label_collision_is_a_compilation_error() -> None:
         }
     )
     panel = CanonicalPanel.from_frame(
-        pd.DataFrame(
-            {"time": [1], "y": [1.0], "first": ["c"], "second": ["b:c"]}
-        ),
+        pd.DataFrame({"time": [1], "y": [1.0], "first": ["c"], "second": ["b:c"]}),
         config.data,
     )
 
@@ -279,5 +275,118 @@ def test_gaussian_family_compiler_rejects_invalid_optimized_names(
 
     with pytest.raises(CompilationError, match="optimized parameter names|unknown"):
         compile_gaussian_family(
-            config.data, config.model, panel, optimized=optimized  # type: ignore[arg-type]
+            config.data,
+            config.model,
+            panel,
+            optimized=optimized,  # type: ignore[arg-type]
         )
+
+
+def test_nonlexical_categorical_order_aligns_folds_labels_and_rw2_precision() -> None:
+    data = ExperimentDataConfig(time="phase", response="y")
+    evaluation = EvaluationConfig(horizons=(2,), origins=OriginConfig(values=("middle",)))
+    frame = pd.DataFrame(
+        {
+            "phase": pd.Categorical(
+                ["early", "middle", "late"],
+                categories=["middle", "late", "unused", "early"],
+                ordered=True,
+            ),
+            "y": [3.0, 1.0, 2.0],
+        }
+    )
+    definition = build_fold_definitions(frame, data, evaluation)[0]
+    fold = materialize_fold(frame, data, evaluation, definition)
+    model = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "phase", "response": "y"},
+            "model": {
+                "fixed": "1",
+                "sigma": 1.0,
+                "effects": [{"name": "trend", "type": "rw2", "index": "phase", "precision": 2.0}],
+            },
+        }
+    )
+
+    compiled = compile_model(model, CanonicalPanel.from_frame(fold.model_frame, model.data))
+    trend = compiled.blocks[1]
+
+    assert definition.origin == "middle"
+    assert definition.target == "early"
+    assert trend.labels == ("middle", "late", "early")
+    np.testing.assert_allclose(
+        trend.precision.toarray(),
+        [[2, -4, 2], [-4, 8, -4], [2, -4, 2]],
+    )
+
+
+def test_compiler_translates_unordered_rw_categorical_index_to_typed_error() -> None:
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "phase", "response": "y"},
+            "model": {
+                "sigma": 1.0,
+                "effects": [{"name": "trend", "type": "rw1", "index": "phase"}],
+            },
+        }
+    )
+    frame = pd.DataFrame(
+        {
+            "phase": pd.Categorical(
+                ["middle", "late"], categories=["middle", "late"], ordered=False
+            ),
+            "y": [1.0, 2.0],
+        }
+    )
+
+    with pytest.raises(CompilationError, match="categorical.*ordered"):
+        compile_model(config, CanonicalPanel.from_frame(frame, config.data))
+
+
+@pytest.mark.parametrize("error", [RuntimeError("fixed bug"), MemoryError("fixed oom")])
+def test_unexpected_fixed_builder_failures_propagate(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "month", "response": "y"},
+            "model": {"sigma": 1.0},
+        }
+    )
+    panel = CanonicalPanel.from_frame(pd.DataFrame({"month": [1], "y": [1.0]}), config.data)
+
+    def broken_fixed(*args: object, **kwargs: object) -> LatentBlock:
+        raise error
+
+    monkeypatch.setattr("pylgm.compiler.build_fixed", broken_fixed)
+    with pytest.raises(type(error), match="fixed"):
+        compile_model(config, panel)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("effect bug"), MemoryError("effect oom")])
+def test_unexpected_effect_builder_failures_propagate(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": {"time": "month", "response": "y"},
+            "model": {
+                "sigma": 1.0,
+                "effects": [{"name": "group", "type": "iid", "index": "group"}],
+            },
+        }
+    )
+    panel = CanonicalPanel.from_frame(
+        pd.DataFrame({"month": [1], "group": ["A"], "y": [1.0]}), config.data
+    )
+
+    def broken_effect(*args: object, **kwargs: object) -> LatentBlock:
+        raise error
+
+    monkeypatch.setattr("pylgm.compiler.build_iid", broken_effect)
+    with pytest.raises(type(error), match="effect"):
+        compile_model(config, panel)

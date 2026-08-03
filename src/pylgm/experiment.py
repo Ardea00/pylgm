@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import is_object_dtype
 
@@ -28,8 +30,8 @@ from pylgm.evaluation import (
     score_predictions,
     select_candidate,
 )
-from pylgm.exceptions import PyLGMError
-from pylgm.inference import fit_gaussian
+from pylgm.exceptions import OptimizationError, PyLGMError
+from pylgm.inference import fit_gaussian, preflight_dense_reference
 from pylgm.optimization import OptimizationBounds, optimize_empirical_bayes
 from pylgm.optimization.result import OptimizationDiagnostics
 
@@ -43,6 +45,96 @@ def _copy_table(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _json_ready_coordinate(value: object) -> object:
+    if isinstance(value, np.generic):
+        return _json_ready_coordinate(value.item())
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return {"type": type(value).__name__, "value": str(value)}
+
+
+@dataclass(frozen=True)
+class FailureCause:
+    """Immutable root cause retained for a structured candidate failure."""
+
+    type: str
+    message: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"type": self.type, "message": self.message}
+
+
+@dataclass(frozen=True)
+class CandidateFailure:
+    """Immutable, JSON-ready details for one failed candidate stage or fold."""
+
+    candidate: str
+    origin: object
+    horizon: int | None
+    stage: str
+    type: str
+    message: str
+    evaluations: int = 0
+    cache_hits: int = 0
+    numerical_failures: tuple[str, ...] = ()
+    root_cause: FailureCause | None = None
+
+    @classmethod
+    def from_error(
+        cls,
+        candidate: str,
+        origin: object,
+        error: PyLGMError,
+        *,
+        stage: str,
+        horizon: int | None = None,
+    ) -> CandidateFailure:
+        cause = error.__cause__
+        root_cause = None if cause is None else FailureCause(type(cause).__name__, str(cause))
+        if isinstance(error, OptimizationError):
+            evaluations = error.evaluations
+            cache_hits = error.cache_hits
+            numerical_failures = error.numerical_failures
+        else:
+            evaluations = 0
+            cache_hits = 0
+            numerical_failures = ()
+        return cls(
+            candidate=candidate,
+            origin=origin,
+            horizon=horizon,
+            stage=stage,
+            type=type(error).__name__,
+            message=str(error),
+            evaluations=evaluations,
+            cache_hits=cache_hits,
+            numerical_failures=tuple(numerical_failures),
+            root_cause=root_cause,
+        )
+
+    def __str__(self) -> str:
+        location = f"origin={self.origin!r}"
+        if self.horizon is not None:
+            location += f" horizon={self.horizon}"
+        return f"{self.stage} {location}: {self.type}: {self.message}"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "candidate": self.candidate,
+            "origin": _json_ready_coordinate(self.origin),
+            "horizon": self.horizon,
+            "stage": self.stage,
+            "type": self.type,
+            "message": self.message,
+            "evaluations": self.evaluations,
+            "cache_hits": self.cache_hits,
+            "numerical_failures": list(self.numerical_failures),
+            "root_cause": (None if self.root_cause is None else self.root_cause.to_dict()),
+        }
+
+
 @dataclass(frozen=True, init=False)
 class ComparisonResult:
     """Immutable comparison metadata with defensive tabular views."""
@@ -52,7 +144,7 @@ class ComparisonResult:
     _predictions: pd.DataFrame = field(repr=False)
     _metrics: pd.DataFrame = field(repr=False)
     _diagnostics: pd.DataFrame = field(repr=False)
-    failures: Mapping[str, tuple[str, ...]]
+    failures: Mapping[str, tuple[CandidateFailure, ...]]
     decision: CandidateDecision
 
     def __init__(
@@ -61,7 +153,7 @@ class ComparisonResult:
         predictions: pd.DataFrame,
         metrics: pd.DataFrame,
         diagnostics: pd.DataFrame,
-        failures: Mapping[str, tuple[str, ...]],
+        failures: Mapping[str, tuple[CandidateFailure, ...]],
         decision: CandidateDecision,
     ) -> None:
         object.__setattr__(self, "candidates", tuple(candidates))
@@ -104,7 +196,10 @@ def _prediction_rows(
 ) -> pd.DataFrame:
     panel = CanonicalPanel.from_frame(fold.model_frame, config.data)
     family = compile_gaussian_family(config.data, candidate.model, panel, tuple(candidate.optimize))
-    fit = fit_gaussian(family.materialize(parameters))
+    fit = fit_gaussian(
+        family.materialize(parameters),
+        allow_large_dense=config.inference.allow_large_dense,
+    )
     keys = [*config.data.panel, config.data.time]
     predicted = panel.frame.loc[:, keys]
     predicted["mean"] = fit.predictive_mean
@@ -119,6 +214,7 @@ def _prediction_rows(
     result["candidate"] = candidate.name
     result["engine"] = "exact_gaussian"
     result["is_benchmark"] = False
+    result["evaluation_mode"] = config.evaluation.mode
     return result
 
 
@@ -158,16 +254,82 @@ def _folds_by_origin(
     return tuple((origin, tuple(values)) for origin, values in grouped.items())
 
 
+def _initial_parameters(candidate: ResolvedCandidate) -> dict[str, float]:
+    return {name: float(bounds.initial) for name, bounds in candidate.optimize.items()}
+
+
+def _preflight_family(
+    config: ExperimentConfig,
+    candidate: ResolvedCandidate,
+    frame: pd.DataFrame,
+) -> None:
+    panel = CanonicalPanel.from_frame(frame, config.data)
+    family = compile_gaussian_family(
+        config.data,
+        candidate.model,
+        panel,
+        tuple(candidate.optimize),
+    )
+    preflight_dense_reference(
+        family.materialize(_initial_parameters(candidate)),
+        allow_large_dense=config.inference.allow_large_dense,
+    )
+
+
+def _preflight_candidates(
+    config: ExperimentConfig,
+    candidates: tuple[ResolvedCandidate, ...],
+    folds: tuple[FoldData, ...],
+) -> dict[str, tuple[CandidateFailure, ...]]:
+    """Preflight every candidate training/prediction family before optimization."""
+    failures: dict[str, list[CandidateFailure]] = {}
+    grouped_folds = _folds_by_origin(folds)
+    for candidate in candidates:
+        for origin, origin_folds in grouped_folds:
+            try:
+                _preflight_family(config, candidate, origin_folds[0].training_frame)
+            except PyLGMError as error:
+                failures.setdefault(candidate.name, []).append(
+                    CandidateFailure.from_error(
+                        candidate.name,
+                        origin,
+                        error,
+                        stage="preflight_training",
+                    )
+                )
+            for fold in origin_folds:
+                try:
+                    _preflight_family(config, candidate, fold.model_frame)
+                except PyLGMError as error:
+                    failures.setdefault(candidate.name, []).append(
+                        CandidateFailure.from_error(
+                            candidate.name,
+                            origin,
+                            error,
+                            stage="preflight_prediction",
+                            horizon=fold.definition.horizon,
+                        )
+                    )
+    return {name: tuple(values) for name, values in failures.items()}
+
+
 def _run_candidates(
     config: ExperimentConfig,
     candidates: tuple[ResolvedCandidate, ...],
     folds: tuple[FoldData, ...],
-) -> tuple[list[pd.DataFrame], pd.DataFrame, dict[str, tuple[str, ...]]]:
+    preflight_failures: Mapping[str, tuple[CandidateFailure, ...]],
+) -> tuple[
+    list[pd.DataFrame],
+    pd.DataFrame,
+    dict[str, tuple[CandidateFailure, ...]],
+]:
     predictions: list[pd.DataFrame] = []
     diagnostic_records: list[dict[str, object]] = []
-    failures: dict[str, tuple[str, ...]] = {}
+    failures = dict(preflight_failures)
     grouped_folds = _folds_by_origin(folds)
     for candidate in candidates:
+        if candidate.name in failures:
+            continue
         candidate_predictions: list[pd.DataFrame] = []
         candidate_diagnostics: list[dict[str, object]] = []
         warm_start: Mapping[str, float] | None = None
@@ -183,18 +345,54 @@ def _run_candidates(
                     tuple(candidate.optimize),
                 )
                 bounds = _bounds(candidate)
-                optimized = optimize_empirical_bayes(family, bounds, initial=warm_start)
+            except PyLGMError as error:
+                failures[candidate.name] = (
+                    CandidateFailure.from_error(
+                        candidate.name,
+                        origin,
+                        error,
+                        stage="training_compile",
+                    ),
+                )
+                break
+            try:
+                optimized = optimize_empirical_bayes(
+                    family,
+                    bounds,
+                    initial=warm_start,
+                    allow_large_dense=config.inference.allow_large_dense,
+                )
                 candidate_diagnostics.extend(
                     _diagnostic_rows(candidate.name, origin, bounds, optimized.diagnostics)
                 )
-                candidate_predictions.extend(
-                    _prediction_rows(config, candidate, fold, optimized.parameters)
-                    for fold in origin_folds
-                )
-                warm_start = optimized.parameters
             except PyLGMError as error:
-                failures[candidate.name] = (f"origin={origin!r}: {type(error).__name__}: {error}",)
+                failures[candidate.name] = (
+                    CandidateFailure.from_error(
+                        candidate.name,
+                        origin,
+                        error,
+                        stage="optimization",
+                    ),
+                )
                 break
+            for fold in origin_folds:
+                try:
+                    prediction = _prediction_rows(config, candidate, fold, optimized.parameters)
+                except PyLGMError as error:
+                    failures[candidate.name] = (
+                        CandidateFailure.from_error(
+                            candidate.name,
+                            origin,
+                            error,
+                            stage="prediction",
+                            horizon=fold.definition.horizon,
+                        ),
+                    )
+                    break
+                candidate_predictions.append(prediction)
+            if candidate.name in failures:
+                break
+            warm_start = optimized.parameters
         else:
             predictions.extend(candidate_predictions)
         diagnostic_records.extend(candidate_diagnostics)
@@ -243,8 +441,12 @@ class Experiment:
             for definition in definitions
         )
         candidates = resolve_candidates(self.config)
+        preflight_failures = _preflight_candidates(self.config, candidates, folds)
         candidate_predictions, diagnostics, failures = _run_candidates(
-            self.config, candidates, folds
+            self.config,
+            candidates,
+            folds,
+            preflight_failures,
         )
         predictions = pd.concat(
             [*candidate_predictions, _run_persistence(self.config, folds)],

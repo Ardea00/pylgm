@@ -146,7 +146,10 @@ def write_experiment(
     resolved_candidates = [candidate.to_dict() for candidate in candidates]
     fold_definitions = _fold_payload(folds)
     decision = result.decision.to_dict()
-    failures = {name: list(messages) for name, messages in sorted(result.failures.items())}
+    failures = {
+        name: [failure.to_dict() for failure in candidate_failures]
+        for name, candidate_failures in sorted(result.failures.items())
+    }
     environment = _environment()
     experiment_fingerprint = hashlib.sha256(
         _canonical_json(

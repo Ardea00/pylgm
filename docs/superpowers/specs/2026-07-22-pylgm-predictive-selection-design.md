@@ -1,6 +1,6 @@
 # pyLGM Predictive Selection Design
 
-**Date:** 2026-07-22  
+**Date:** 2026-07-22
 **Status:** approved design, pending implementation plan
 
 ## 1. Goal
@@ -94,6 +94,11 @@ Configuration schema version 2 adds `candidates`, `inference.hyperparameters`, a
 `evaluation`. Version 1 remains supported explicitly for the existing single-fit
 pipeline.
 
+Schema version 2 also exposes the strict Boolean
+`inference.allow_large_dense: false`. Its resolved value is persisted and, when
+explicitly enabled, is forwarded to every dense preflight, optimizer evaluation,
+and prediction fit. Schema-version-1 pipeline behavior remains unchanged.
+
 Candidates inherit the base model and may override schema-approved model fields.
 List overrides replace the complete list. Before execution, every candidate is
 expanded into and persisted as a complete resolved model.
@@ -183,6 +188,10 @@ The existing transactional artifact writer is extended with versioned outputs fo
 
 Tabular outputs use Parquet; small manifests and summaries use JSON. Publication
 remains atomic and no partial experiment is presented as complete.
+Every prediction and fold/horizon/overall metric row carries one stable
+`evaluation_mode` label, `latest` or `vintage`. Candidate failures are structured
+immutable records containing candidate/fold coordinates, exception type and
+message, optimization counts, numerical failure history, and root-cause details.
 
 ## 11. Errors and limits
 
@@ -193,6 +202,8 @@ result, not an exception that aborts other candidates.
 Existing dense exact-Gaussian limits apply to every optimizer evaluation. The
 experiment estimates maximum candidate/fold work before execution and rejects
 unsafe runs unless the existing explicit dense override is supplied.
+All candidate training and prediction families are preflighted before the first
+optimizer call, so a later oversized fold cannot consume earlier optimization work.
 
 ## 12. Verification
 

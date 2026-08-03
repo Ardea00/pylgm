@@ -102,9 +102,7 @@ def test_schema_version_must_be_integer_two(tmp_path: Path, version: object) -> 
         ("evaluation:\n  horizons: [0]\n  origins: {last: 8}", "greater than 0"),
     ],
 )
-def test_candidate_and_horizon_constraints(
-    tmp_path: Path, replacement: str, message: str
-) -> None:
+def test_candidate_and_horizon_constraints(tmp_path: Path, replacement: str, message: str) -> None:
     path = tmp_path / "experiment.yaml"
     write_experiment(path)
     text = path.read_text()
@@ -179,14 +177,19 @@ def test_v2_optimization_mappings_cannot_be_empty(
 def test_resolved_candidate_validates_optimized_effect_and_replaces_lists(tmp_path: Path) -> None:
     path = tmp_path / "experiment.yaml"
     write_experiment(path)
-    path.write_text(path.read_text().replace("""candidates:
-  - {name: base}""", """candidates:
+    path.write_text(
+        path.read_text().replace(
+            """candidates:
+  - {name: base}""",
+            """candidates:
   - name: bad
     overrides:
       effects: [{name: region, type: iid, index: region}]
     optimize:
       trend.precision: {initial: 1, lower: 0.1, upper: 2}
-"""))
+""",
+        )
+    )
 
     with pytest.raises(ConfigurationError, match="unknown optimized effect"):
         load_experiment_config(path)
@@ -195,11 +198,16 @@ def test_resolved_candidate_validates_optimized_effect_and_replaces_lists(tmp_pa
 def test_all_resolved_formulas_require_covariate_availability(tmp_path: Path) -> None:
     path = tmp_path / "experiment.yaml"
     write_experiment(path)
-    path.write_text(path.read_text().replace("""candidates:
-  - {name: base}""", """candidates:
+    path.write_text(
+        path.read_text().replace(
+            """candidates:
+  - {name: base}""",
+            """candidates:
   - name: missing_availability
     overrides: {fixed: "1 + undeclared"}
-"""))
+""",
+        )
+    )
 
     with pytest.raises(ConfigurationError, match="availability"):
         load_experiment_config(path)
@@ -277,7 +285,9 @@ def test_mapping_surfaces_are_isolated_immutable_and_serializable(tmp_path: Path
     with pytest.raises(TypeError):
         config.data.covariates["other"] = config.data.covariates["lag1"]  # type: ignore[index]
     with pytest.raises(TypeError):
-        config.inference.hyperparameters.optimize["other"] = next(iter(candidates[0].optimize.values()))  # type: ignore[index]
+        config.inference.hyperparameters.optimize["other"] = next(
+            iter(candidates[0].optimize.values())
+        )  # type: ignore[index]
     with pytest.raises(TypeError):
         config.candidates[1].optimize["other"] = next(iter(candidates[1].optimize.values()))  # type: ignore[index,union-attr]
     with pytest.raises(TypeError):
@@ -299,7 +309,9 @@ def test_formulaic_errors_become_configuration_errors(tmp_path: Path, formula: s
 def test_candidate_formulaic_errors_become_configuration_errors(tmp_path: Path) -> None:
     path = tmp_path / "experiment.yaml"
     write_experiment(path)
-    path.write_text(path.read_text().replace("- {name: base}", "- name: base\n    overrides: {fixed: '1 + ('}"))
+    path.write_text(
+        path.read_text().replace("- {name: base}", "- name: base\n    overrides: {fixed: '1 + ('}")
+    )
 
     with pytest.raises(ConfigurationError):
         load_experiment_config(path)
@@ -339,3 +351,45 @@ def test_omitted_covariates_default_is_immutable_isolated_and_serializable() -> 
     assert first.model_dump_json() == second.model_dump_json()
     with pytest.raises(TypeError):
         first.covariates["lag1"] = object()  # type: ignore[index]
+
+
+@pytest.mark.parametrize("origins", ["[]", "[1, 1]"])
+def test_explicit_origin_values_must_be_nonempty_and_unique(tmp_path: Path, origins: str) -> None:
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    path.write_text(
+        path.read_text().replace("origins: {last: 8}", f"origins: {{values: {origins}}}")
+    )
+
+    with pytest.raises(ConfigurationError, match="origins|origin values|unique|empty"):
+        load_experiment_config(path)
+
+
+@pytest.mark.parametrize("value", ["false", "true"])
+def test_dense_override_is_a_strict_boolean_and_persisted(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    path.write_text(
+        path.read_text().replace(
+            "engine: exact_gaussian", f"engine: exact_gaussian\n  allow_large_dense: {value}"
+        )
+    )
+
+    config = load_experiment_config(path)
+
+    assert config.inference.allow_large_dense is (value == "true")
+    assert config.model_dump(mode="json")["inference"]["allow_large_dense"] is (value == "true")
+
+
+@pytest.mark.parametrize("value", ["1", "0", "'true'", "1.0"])
+def test_dense_override_rejects_non_boolean_coercion(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    path.write_text(
+        path.read_text().replace(
+            "engine: exact_gaussian", f"engine: exact_gaussian\n  allow_large_dense: {value}"
+        )
+    )
+
+    with pytest.raises(ConfigurationError, match="allow_large_dense|boolean"):
+        load_experiment_config(path)
