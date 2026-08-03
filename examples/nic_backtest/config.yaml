@@ -1,0 +1,38 @@
+schema_version: 2
+data:
+  time: date
+  response: yoy_pct
+  panel: [region_code, coicop]
+model:
+  likelihood: gaussian
+  fixed: "1"
+  fixed_prior_precision: 0.001
+  sigma: 1.0
+  effects:
+    - {name: region, type: iid, index: region_code, precision: 1.0}
+    - {name: coicop, type: iid, index: coicop, precision: 1.0}
+    - {name: time, type: rw1, index: date, precision: 1.0}
+candidates:
+  - name: region_time
+    overrides:
+      effects:
+        - {name: region, type: iid, index: region_code, precision: 1.0}
+        - {name: time, type: rw1, index: date, precision: 1.0}
+  - name: coicop_time
+    overrides:
+      effects:
+        - {name: coicop, type: iid, index: coicop, precision: 1.0}
+        - {name: time, type: rw1, index: date, precision: 1.0}
+  - {name: region_coicop_time}
+inference:
+  engine: exact_gaussian
+  hyperparameters:
+    strategy: empirical_bayes
+    optimize:
+      sigma: {initial: 1.0, lower: 0.1, upper: 10.0}
+evaluation:
+  horizons: [1, 2]
+  origins: {last: 1}
+  window: {type: rolling, length: 36}
+  interval_levels: [0.8, 0.95]
+  max_abs_coverage_error: 1.0

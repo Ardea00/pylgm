@@ -15,6 +15,27 @@ python -m pip install -e ".[dev]"
 
 See the [approved design](docs/superpowers/specs/2026-07-22-pylgm-design.md).
 
+## Predictive model selection
+
+Use the local `compare` command to evaluate configured candidates over
+rolling-origin, leakage-safe forecast folds. Candidates are selected from
+predictive metrics; `persistence` is always reported as an autoregressive
+benchmark but is never selectable.
+
+```bash
+pylgm compare examples/predictive_selection/config.yaml \
+  examples/predictive_selection/data.csv \
+  --output comparison
+```
+
+The [general example](examples/predictive_selection/README.md) is committed and
+domain-neutral. The [NIC-shaped configuration](examples/nic_backtest/README.md)
+runs against a local Parquet source but does not redistribute any source data.
+Version 0.2 supports empirical-Bayes hyperparameter fitting only; it does not
+integrate hyperparameter uncertainty. The exact Gaussian engine remains a
+small/medium latent-dimension reference implementation subject to conservative
+dense-memory and dimension guards.
+
 ## Gaussian foundation example
 
 ```bash

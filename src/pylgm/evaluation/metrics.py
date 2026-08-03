@@ -189,6 +189,7 @@ def _aggregate_group(
         "mae": absolute_error_sum / count,
         "bias": bias_sum / count,
         "mean_log_predictive_density": log_density_sum / count,
+        "log_predictive_density": log_density_sum / count,
     }
     for suffix in _interval_suffixes(group):
         coverage_count = int(group[f"covered_{suffix}"].sum())

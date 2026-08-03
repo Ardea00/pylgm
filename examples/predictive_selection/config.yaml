@@ -1,0 +1,36 @@
+schema_version: 2
+data:
+  time: month
+  response: y
+  panel: [region]
+model:
+  likelihood: gaussian
+  fixed: "1"
+  fixed_prior_precision: 0.001
+  sigma: 0.5
+  effects:
+    - {name: region, type: iid, index: region, precision: 1.0}
+candidates:
+  - {name: region_only}
+  - name: region_and_trend
+    overrides:
+      effects:
+        - {name: region, type: iid, index: region, precision: 1.0}
+        - {name: trend, type: rw1, index: month, precision: 1.0}
+    optimize:
+      sigma: {initial: 0.5, lower: 0.1, upper: 3.0}
+      region.precision: {initial: 1.0, lower: 0.05, upper: 20.0}
+      trend.precision: {initial: 1.0, lower: 0.05, upper: 20.0}
+inference:
+  engine: exact_gaussian
+  hyperparameters:
+    strategy: empirical_bayes
+    optimize:
+      sigma: {initial: 0.5, lower: 0.1, upper: 3.0}
+      region.precision: {initial: 1.0, lower: 0.05, upper: 20.0}
+evaluation:
+  horizons: [1, 2]
+  origins: {last: 2}
+  window: {type: expanding}
+  interval_levels: [0.8]
+  max_abs_coverage_error: 1.0
