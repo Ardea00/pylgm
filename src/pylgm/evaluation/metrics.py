@@ -91,8 +91,7 @@ def _validate_origin_order(origins: pd.Series) -> None:
     if isinstance(origins.dtype, pd.CategoricalDtype):
         if not origins.cat.ordered:
             raise DataContractError("scored prediction origins must have a coherent total order")
-        return
-    values = origins.tolist()
+    values = origins.dropna().tolist()
     families = {_origin_family(value) for value in values}
     if len(families) != 1:
         raise DataContractError("scored prediction origins must have a coherent total order")

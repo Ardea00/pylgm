@@ -183,6 +183,23 @@ def test_aggregation_rejects_incomparable_mixed_origin_scalars() -> None:
         aggregate_metrics(score_predictions(predictions, interval_levels=()))
 
 
+def test_aggregation_rejects_ordered_categorical_mixed_origin_scalars() -> None:
+    origins = [date(2025, 1, 1), pd.Timestamp("2025-01-02T00:00:00+01:00")]
+    predictions = pd.DataFrame(
+        {
+            "actual": [1.0, 1.0],
+            "mean": [1.0, 1.0],
+            "variance": [1.0, 1.0],
+            "candidate": ["a", "a"],
+            "origin": pd.Categorical(origins, categories=origins, ordered=True),
+            "horizon": [1, 1],
+        }
+    )
+
+    with pytest.raises(DataContractError, match="origins.*coherent total order"):
+        aggregate_metrics(score_predictions(predictions, interval_levels=()))
+
+
 def test_aggregation_requires_exact_integer_horizons() -> None:
     predictions = pd.DataFrame(
         {
