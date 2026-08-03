@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import date, datetime
 from numbers import Real
 
 import numpy as np
@@ -64,6 +65,45 @@ def _benchmark_identity(frame: pd.DataFrame) -> pd.Series:
 
 def _is_exact_integer(value: object) -> bool:
     return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+
+def _timezone_key(timezone: object) -> str | None:
+    if timezone is None:
+        return None
+    return str(getattr(timezone, "key", None) or getattr(timezone, "zone", None) or timezone)
+
+
+def _origin_family(value: object) -> object:
+    if _is_exact_integer(value):
+        return "integer"
+    if isinstance(value, pd.Timestamp):
+        return ("timestamp", _timezone_key(value.tz))
+    if isinstance(value, datetime):
+        return ("datetime", _timezone_key(value.tzinfo))
+    if isinstance(value, np.datetime64):
+        return ("numpy_datetime", value.dtype.str)
+    if isinstance(value, date):
+        return "date"
+    return type(value)
+
+
+def _validate_origin_order(origins: pd.Series) -> None:
+    if isinstance(origins.dtype, pd.CategoricalDtype):
+        if not origins.cat.ordered:
+            raise DataContractError("scored prediction origins must have a coherent total order")
+        return
+    values = origins.tolist()
+    families = {_origin_family(value) for value in values}
+    if len(families) != 1:
+        raise DataContractError("scored prediction origins must have a coherent total order")
+    try:
+        for value in values:
+            hash(value)
+        sorted(values)
+    except (TypeError, ValueError) as cause:
+        raise DataContractError(
+            "scored prediction origins must have a coherent total order"
+        ) from cause
 
 
 def _origin_array(records: list[dict[str, object]]) -> pd.api.extensions.ExtensionArray:
@@ -187,6 +227,7 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
         raise DataContractError("scored prediction rows require candidate, origin, and horizon")
     if not working["horizon"].map(_is_exact_integer).all():
         raise DataContractError("scored prediction horizons must be exact integers")
+    _validate_origin_order(working["origin"])
 
     records: list[dict[str, object]] = []
     fold_groups = working.groupby(
