@@ -59,3 +59,23 @@ def test_nic_shaped_backtest_has_no_leakage_and_beats_global_mean() -> None:
     ).pow(2).mean()
 
     assert model_mse.lt(global_mse).any()
+
+
+def test_nic_shaped_backtest_predictions_do_not_use_post_origin_responses() -> None:
+    source = synthetic_nic_frame()
+    experiment = Experiment.from_yaml(Path("examples/nic_backtest/config.yaml"))
+    baseline = experiment.compare(source, output=None)
+    origin = baseline.predictions["origin"].iloc[0]
+    perturbed = source.copy()
+    post_origin = perturbed["date"].gt(origin)
+    perturbed.loc[post_origin, "yoy_pct"] += 10_000.0
+    changed_truth = experiment.compare(perturbed, output=None)
+    keys = ["candidate", "origin", "target_time", "region_code", "coicop", "horizon"]
+    columns = [*keys, "mean", "variance"]
+    baseline_predictions = baseline.predictions.loc[:, columns].sort_values(keys).reset_index(drop=True)
+    changed_predictions = (
+        changed_truth.predictions.loc[:, columns].sort_values(keys).reset_index(drop=True)
+    )
+
+    pd.testing.assert_frame_equal(baseline_predictions, changed_predictions)
+    assert baseline.predictions["actual"].ne(changed_truth.predictions["actual"]).any()

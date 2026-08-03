@@ -119,6 +119,9 @@ def test_aggregation_sums_prediction_rows_before_deriving_metrics() -> None:
             ]
         )
     )
+    assert overall["log_predictive_density"] == pytest.approx(
+        overall["mean_log_predictive_density"]
+    )
     assert overall["coverage_0_5"] == pytest.approx(0.0)
     assert overall["average_width_0_5"] == pytest.approx(2.5 * norm.ppf(0.75))
     assert set(zip(metrics["origin"].notna(), metrics["horizon"].notna())) == {

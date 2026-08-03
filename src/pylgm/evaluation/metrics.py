@@ -175,6 +175,7 @@ def _aggregate_group(
     absolute_error_sum = float(group["absolute_error"].sum())
     bias_sum = float(residual.sum())
     log_density_sum = float(group["log_predictive_density"].sum())
+    mean_log_predictive_density = log_density_sum / count
     result: dict[str, object] = {
         "candidate": candidate,
         "origin": origin,
@@ -188,8 +189,10 @@ def _aggregate_group(
         "rmse": float(np.sqrt(squared_error_sum / count)),
         "mae": absolute_error_sum / count,
         "bias": bias_sum / count,
-        "mean_log_predictive_density": log_density_sum / count,
-        "log_predictive_density": log_density_sum / count,
+        "mean_log_predictive_density": mean_log_predictive_density,
+        # Compatibility alias for aggregate consumers. Row-level scored predictions
+        # use this name for individual log densities; aggregate values are means.
+        "log_predictive_density": mean_log_predictive_density,
     }
     for suffix in _interval_suffixes(group):
         coverage_count = int(group[f"covered_{suffix}"].sum())
@@ -205,7 +208,10 @@ def aggregate_metrics(scored_predictions: pd.DataFrame) -> pd.DataFrame:
     """Aggregate scored rows by fold, horizon, and candidate overall.
 
     Metrics are derived only after summing row-level losses, so folds with more
-    predictions carry their natural weight.
+    predictions carry their natural weight. At the row level,
+    ``log_predictive_density`` is an individual Gaussian log density. In the
+    returned aggregate table, ``mean_log_predictive_density`` is the canonical
+    row-weighted mean and ``log_predictive_density`` is its compatibility alias.
     """
     required = (
         *_REQUIRED_PREDICTION_COLUMNS,
