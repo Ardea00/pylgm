@@ -1,0 +1,18 @@
+response: y
+likelihood:
+  family: gaussian
+  sigma: 0.5
+data:
+  panel: [region]
+  time: time
+predictor:
+  fixed: "1 + x"
+  effects:
+    - name: region_effect
+      type: iid
+      index: region
+      precision: 2.0
+    - name: trend
+      type: rw1
+      index: time
+      precision: 3.0
