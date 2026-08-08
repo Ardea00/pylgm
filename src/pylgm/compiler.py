@@ -1,13 +1,20 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 from formulaic.errors import FormulaicError
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
-from pylgm.effects import build_fixed, build_iid, build_random_walk
+from pylgm.effects import Fixed, IID, RW1, build_fixed, build_iid, build_random_walk
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
 from pylgm.ir import CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
 from pylgm.ir.model import LatentBlock
+from pylgm.likelihoods import Gaussian
+from pylgm.parameters import Hyperparameter
+
+if TYPE_CHECKING:
+    from pylgm.model import LGM
 
 
 def _structured_blocks(
@@ -141,3 +148,72 @@ def compile_gaussian_family(
 
 def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
     return compile_gaussian_family(config.data, config.model, panel, optimized=()).materialize({})
+
+
+def _resolved_precision(value: float | Hyperparameter) -> float:
+    return value.initial if isinstance(value, Hyperparameter) else value
+
+
+def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
+    """Compile a declarative model through the existing sparse effect builders."""
+    if panel.response != model.response:
+        raise DataContractError(
+            "panel response metadata does not match model: "
+            f"{panel.response!r} != {model.response!r}"
+        )
+    frame = panel.frame
+    blocks: list[LatentBlock] = []
+    precisions: dict[str, float] = {}
+    for effect in model.predictor.effects:
+        try:
+            if isinstance(effect, Fixed):
+                block = build_fixed(frame, effect.formula, effect.prior_precision)
+            elif isinstance(effect, IID):
+                precision = _resolved_precision(effect.precision)
+                block = build_iid(frame, effect.name, effect.index, precision)
+                precisions[effect.name] = precision
+            else:
+                precision = _resolved_precision(effect.precision)
+                order = 1 if isinstance(effect, RW1) else 2
+                block = build_random_walk(
+                    frame, effect.name, effect.index, precision, order
+                )
+                precisions[effect.name] = precision
+        except (
+            DataContractError,
+            FormulaicError,
+            ModelValidationError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise CompilationError(
+                f"failed to compile effect {effect.name!r}: {error}"
+            ) from error
+        blocks.append(block)
+
+    wrong_rows = [block.name for block in blocks if block.design.shape[0] != len(frame)]
+    if wrong_rows:
+        raise CompilationError(
+            f"latent block design row count does not match the panel: {wrong_rows}"
+        )
+    _qualified_labels(blocks)
+    if not isinstance(model.likelihood, Gaussian):
+        raise CompilationError("exact Gaussian compilation requires a Gaussian likelihood")
+    sigma = (
+        model.likelihood.sigma.initial
+        if isinstance(model.likelihood.sigma, Hyperparameter)
+        else model.likelihood.sigma
+    )
+    try:
+        family = CompiledGaussianFamily(
+            y=frame[panel.response].fillna(0.0).to_numpy(dtype=float),
+            observed=panel.observed,
+            offset=np.zeros(len(frame)),
+            blocks=tuple(ScalableBlock(block, None, 1.0) for block in blocks),
+            parameter_names=(),
+            initial=Hyperparameters(sigma=sigma, precisions=precisions),
+        )
+        return family.materialize({})
+    except (TypeError, ValueError) as error:
+        raise CompilationError(f"compiled declarative model is invalid: {error}") from error
