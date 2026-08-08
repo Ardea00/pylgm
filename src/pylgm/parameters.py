@@ -20,7 +20,13 @@ def _positive_real(value: object, name: str) -> float:
 
 @dataclass(frozen=True)
 class Hyperparameter:
-    """A named, positive model parameter and its optional prior."""
+    """A named, positive model parameter and its optional prior.
+
+    In pyLGM 0.3, declarative exact-Gaussian compilation uses ``initial`` as a
+    fixed plug-in value. Names, transforms, and priors remain declaration
+    metadata and are not yet preserved in the materialized IR or used by
+    inference.
+    """
 
     name: str
     initial: float

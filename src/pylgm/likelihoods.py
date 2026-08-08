@@ -25,7 +25,7 @@ class CompiledGaussian:
 
     @property
     def variance(self) -> float:
-        return self.sigma**2
+        return self.sigma * self.sigma
 
 
 @dataclass(frozen=True)

@@ -47,6 +47,86 @@ def test_linear_combinations_propagate_covariance():
     assert combined.variance[0] == pytest.approx(expected[0, 0])
 
 
+class _NoQuadraticTranspose(np.ndarray):
+    @property
+    def T(self):
+        raise AssertionError(
+            "linear combinations must not form a combination-by-combination matrix"
+        )
+
+
+class _NoQuadraticTransposeCSR(csr_matrix):
+    def transpose(self, axes=None, copy=False):
+        raise AssertionError(
+            "linear combinations must not form a combination-by-combination matrix"
+        )
+
+
+def test_many_linear_combinations_do_not_require_a_quadratic_matrix():
+    combination_count = 20_000
+    weights = np.tile([1.0, -1.0], (combination_count, 1)).view(
+        _NoQuadraticTranspose
+    )
+    result = GaussianResult(
+        labels=("a", "b"),
+        mean=np.array([1.0, 2.0]),
+        covariance=np.array([[2.0, 0.5], [0.5, 1.0]]),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.empty(0),
+        predictive_variance=np.empty(0),
+    )
+
+    combined = result.linear_combinations(weights)
+
+    np.testing.assert_allclose(combined.mean, np.full(combination_count, -1.0))
+    np.testing.assert_allclose(combined.variance, np.full(combination_count, 2.0))
+
+
+def test_many_sparse_linear_combinations_do_not_require_a_quadratic_matrix():
+    combination_count = 20_000
+    weights = _NoQuadraticTransposeCSR(
+        np.tile([1.0, -1.0], (combination_count, 1))
+    )
+    result = GaussianResult(
+        labels=("a", "b"),
+        mean=np.array([1.0, 2.0]),
+        covariance=np.array([[2.0, 0.5], [0.5, 1.0]]),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.empty(0),
+        predictive_variance=np.empty(0),
+    )
+
+    combined = result.linear_combinations(weights)
+
+    np.testing.assert_allclose(combined.mean, np.full(combination_count, -1.0))
+    np.testing.assert_allclose(combined.variance, np.full(combination_count, 2.0))
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        np.array([[1.0, -1.0], [2.0, 0.5], [0.0, 3.0]]),
+        csr_matrix([[1.0, -1.0], [2.0, 0.5], [0.0, 3.0]]),
+    ],
+)
+def test_linear_combination_variances_match_for_dense_and_sparse_weights(weights):
+    dense_weights = weights.toarray() if isinstance(weights, csr_matrix) else weights
+    covariance = np.array([[2.0, 0.5], [0.5, 1.0]])
+    result = GaussianResult(
+        labels=("a", "b"),
+        mean=np.array([1.0, 2.0]),
+        covariance=covariance,
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.empty(0),
+        predictive_variance=np.empty(0),
+    )
+
+    combined = result.linear_combinations(weights)
+
+    expected = np.einsum("ij,jk,ik->i", dense_weights, covariance, dense_weights)
+    np.testing.assert_allclose(combined.variance, expected)
+
+
 def test_marginals_are_defensive_and_support_normal_quantiles():
     marginals = _fitted_result().latent_marginals()
 
@@ -155,6 +235,18 @@ def test_result_diagnostics_reject_mutable_values_and_isolate_input_mapping():
             predictive_mean=np.array([0.0]),
             predictive_variance=np.array([1.0]),
             diagnostics={"latent_dimension": np.array([1])},
+        )
+
+
+def test_result_rejects_nonfinite_covariance_at_construction():
+    with pytest.raises(ValueError, match="covariance must be finite"):
+        GaussianResult(
+            labels=("x",),
+            mean=np.array([0.0]),
+            covariance=np.array([[np.inf]]),
+            log_marginal_likelihood=0.0,
+            predictive_mean=np.array([0.0]),
+            predictive_variance=np.array([1.0]),
         )
 
 

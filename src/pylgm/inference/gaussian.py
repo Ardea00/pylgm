@@ -88,9 +88,7 @@ def _block_slices(model: CompiledLGM) -> Mapping[str, slice]:
 
 
 def _fit_dense(model: CompiledLGM) -> GaussianResult:
-    sigma = float(model.sigma)
-    with np.errstate(over="ignore", under="ignore"):
-        variance = float(np.square(sigma))
+    variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
         raise NumericalError("sigma squared must be finite and positive")
 

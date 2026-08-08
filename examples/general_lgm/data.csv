@@ -1,0 +1,7 @@
+region,time,x,y
+north,1,0.0,1.0
+north,2,1.0,1.5
+north,3,2.0,
+south,1,0.5,1.2
+south,2,1.5,1.7
+south,3,2.5,

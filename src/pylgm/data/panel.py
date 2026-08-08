@@ -45,6 +45,7 @@ def _copy_frame(frame: pd.DataFrame) -> pd.DataFrame:
 class CanonicalPanel:
     _frame: pd.DataFrame = field(repr=False)
     _observed: np.ndarray = field(repr=False)
+    _source_positions: np.ndarray = field(repr=False)
     key_columns: tuple[str, ...]
     response: str
 
@@ -54,11 +55,31 @@ class CanonicalPanel:
         observed: np.ndarray,
         key_columns: tuple[str, ...],
         response: str,
+        source_positions: np.ndarray | None = None,
     ) -> None:
         isolated_observed = np.array(observed, dtype=bool, copy=True)
         isolated_observed.setflags(write=False)
+        if source_positions is None:
+            isolated_source_positions = np.arange(len(frame), dtype=np.int64)
+        else:
+            positions = np.asarray(source_positions)
+            expected = np.arange(len(frame), dtype=np.int64)
+            if (
+                positions.ndim != 1
+                or not np.issubdtype(positions.dtype, np.integer)
+                or positions.size != len(frame)
+                or not np.array_equal(np.sort(positions), expected)
+            ):
+                raise DataContractError(
+                    "source positions must be a positional permutation of panel rows"
+                )
+            isolated_source_positions = np.array(
+                positions, dtype=np.int64, copy=True
+            )
+        isolated_source_positions.setflags(write=False)
         object.__setattr__(self, "_frame", _copy_frame(frame))
         object.__setattr__(self, "_observed", isolated_observed)
+        object.__setattr__(self, "_source_positions", isolated_source_positions)
         object.__setattr__(self, "key_columns", tuple(key_columns))
         object.__setattr__(self, "response", response)
 
@@ -69,6 +90,13 @@ class CanonicalPanel:
     @property
     def observed(self) -> np.ndarray:
         result = self._observed.copy()
+        result.setflags(write=False)
+        return result
+
+    @property
+    def source_positions(self) -> np.ndarray:
+        """Caller row positions for each row in canonical panel order."""
+        result = self._source_positions.copy()
         result.setflags(write=False)
         return result
 
@@ -85,10 +113,14 @@ class CanonicalPanel:
         if frame.duplicated(list(keys)).any():
             raise DataContractError(f"duplicate panel keys: {keys}")
         try:
-            ordered = frame.sort_values(list(keys), kind="stable").reset_index(drop=True)
+            positioned = frame.copy(deep=False)
+            positioned.index = pd.RangeIndex(len(positioned))
+            ordered = positioned.sort_values(list(keys), kind="stable")
         except (TypeError, ValueError) as error:
             raise DataContractError(f"panel key columns must be sortable/orderable: {keys}") from error
+        source_positions = ordered.index.to_numpy(dtype=np.int64, copy=True)
+        ordered = ordered.reset_index(drop=True)
         observed = ordered[config.response].notna().to_numpy(dtype=bool)
         if not observed.any():
             raise DataContractError("panel contains no observed responses")
-        return cls(ordered, observed, keys, config.response)
+        return cls(ordered, observed, keys, config.response, source_positions)

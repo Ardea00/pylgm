@@ -71,6 +71,30 @@ def test_pipeline_fingerprint_is_stable_for_equivalent_input_order(tmp_path: Pat
     )["data_fingerprint"]
 
 
+def test_legacy_pipeline_predictions_remain_in_canonical_panel_order(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "schema_version: 1\n"
+        "data: {time: month, response: y}\n"
+        "model: {fixed: '0 + month', fixed_prior_precision: 1.0, sigma: 1.0}\n"
+    )
+    pipeline = Pipeline.from_yaml(config)
+    unsorted = pd.DataFrame({"month": [2, 1, 3], "y": [4.0, 2.0, 6.0]})
+    sorted_frame = unsorted.sort_values("month").reset_index(drop=True)
+
+    from_unsorted = pipeline.run(unsorted, tmp_path / "unsorted")
+    from_sorted = pipeline.run(sorted_frame, tmp_path / "sorted")
+
+    np.testing.assert_allclose(
+        from_unsorted.predictive_mean, from_sorted.predictive_mean
+    )
+    np.testing.assert_allclose(
+        from_unsorted.predictive_variance, from_sorted.predictive_variance
+    )
+
+
 def _fingerprint(frame: pd.DataFrame) -> str:
     panel = CanonicalPanel.from_frame(frame, DataConfig(time="month", response="y"))
     return panel_fingerprint(panel)

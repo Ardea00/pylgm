@@ -3,7 +3,10 @@
 from dataclasses import dataclass
 import math
 
-import numpy as np
+
+_LOG_FLOAT_MAX = math.log(float.fromhex("0x1.fffffffffffffp+1023"))
+_LOG_TWO = math.log(2.0)
+_LOG_TWO_PI = math.log(2.0 * math.pi)
 
 
 def _finite_real(value: object, name: str) -> float:
@@ -19,6 +22,28 @@ def _positive_real(value: object, name: str) -> float:
     return result
 
 
+def _log_absolute_difference(left: float, right: float) -> float:
+    if left == right:
+        return -math.inf
+    if (left < 0.0 < right) or (right < 0.0 < left):
+        left_magnitude = abs(left)
+        right_magnitude = abs(right)
+        scale = max(left_magnitude, right_magnitude)
+        return math.log(scale) + math.log(
+            left_magnitude / scale + right_magnitude / scale
+        )
+    return math.log(abs(left - right))
+
+
+def _exp_or_infinity(log_value: float) -> float:
+    if log_value > _LOG_FLOAT_MAX:
+        return math.inf
+    try:
+        return math.exp(log_value)
+    except OverflowError:
+        return math.inf
+
+
 @dataclass(frozen=True)
 class GaussianPrior:
     """A Gaussian prior parameterized by mean and precision."""
@@ -32,9 +57,18 @@ class GaussianPrior:
 
     def logpdf(self, value: float) -> float:
         value = _finite_real(value, "value")
-        return 0.5 * (np.log(self.precision) - np.log(2.0 * np.pi)) - (
-            0.5 * self.precision * (value - self.mean) ** 2
+        normalization = 0.5 * (math.log(self.precision) - _LOG_TWO_PI)
+        log_difference = _log_absolute_difference(value, self.mean)
+        if log_difference == -math.inf:
+            return normalization
+        log_quadratic = (
+            -_LOG_TWO + math.log(self.precision) + 2.0 * log_difference
         )
+        quadratic = _exp_or_infinity(log_quadratic)
+        if not math.isfinite(quadratic):
+            return -math.inf
+        result = normalization - quadratic
+        return result if math.isfinite(result) else -math.inf
 
 
 @dataclass(frozen=True)
@@ -53,5 +87,10 @@ class PCPrecision:
 
     def logpdf(self, value: float) -> float:
         value = _positive_real(value, "value")
-        rate = -np.log(self.alpha) / self.upper_sd
-        return np.log(rate / 2.0) - 1.5 * np.log(value) - rate / np.sqrt(value)
+        log_value = math.log(value)
+        log_rate = math.log(-math.log(self.alpha)) - math.log(self.upper_sd)
+        penalty = _exp_or_infinity(log_rate - 0.5 * log_value)
+        if not math.isfinite(penalty):
+            return -math.inf
+        result = log_rate - _LOG_TWO - 1.5 * log_value - penalty
+        return result if math.isfinite(result) else -math.inf

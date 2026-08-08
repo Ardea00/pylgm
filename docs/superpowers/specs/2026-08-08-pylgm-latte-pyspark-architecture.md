@@ -2,6 +2,12 @@
 
 **Status:** Approved 2026-08-08
 
+**Scope:** This is the target-state architecture and staged roadmap, not a
+claim that every example or component is runnable in pyLGM 0.3. The narrower
+0.3 contract and a runnable Python/YAML example are documented in the
+[project README](../../../README.md) and
+[general LGM example](../../../examples/general_lgm/README.md).
+
 ## Purpose
 
 pyLGM is a general-purpose Python library for latent Gaussian models (LGMs). Its
@@ -32,41 +38,63 @@ where the observation operator \(A\) and latent precision \(Q\) remain sparse.
 - Preserve current Gaussian behavior while generalizing the architecture.
 - Do not silently fall back from one inference engine to another.
 
-## Public API
+## Target-State Public API
 
-The primary interface is a declarative Python model:
+The intended primary interface is a declarative Python model. The following is
+a target-state example: prior metadata is declared correctly through a
+`Hyperparameter`, but 0.3 only materializes each parameter's `.initial` value,
+and its `spark_df` line requires the deferred PySpark adapter.
 
 ```python
-from pylgm import Gaussian, Fixed, IID, LGM, PCPrecision, RW2
+from pylgm import Gaussian, Fixed, Hyperparameter, IID, LGM, PCPrecision, RW2
+
+region_precision = Hyperparameter(
+    "region_precision",
+    initial=1.0,
+    prior=PCPrecision(upper_sd=1.0, alpha=0.01),
+)
+trend_precision = Hyperparameter(
+    "trend_precision",
+    initial=1.0,
+    prior=PCPrecision(upper_sd=1.0, alpha=0.01),
+)
 
 model = LGM(
     response="inflation",
     likelihood=Gaussian(),
     predictor=(
         Fixed("1 + energy_price")
-        + IID("region", index="region", precision=PCPrecision(1, alpha=0.01))
-        + RW2("trend", index="month", precision=PCPrecision(1, alpha=0.01))
+        + IID("region", index="region", precision=region_precision)
+        + RW2("trend", index="month", precision=trend_precision)
     ),
+    panel=("region",),
+    time="month",
 )
 
 result = model.fit(spark_df, engine="exact_gaussian")
 ```
 
-YAML is a serializable frontend for standard components, not a separate modeling
-system:
+In 0.3, use a Pandas DataFrame and fixed numeric hyperparameters. YAML is a
+serializable frontend for standard components, not a separate modeling system.
+A runnable file using this complete schema is published as
+[`examples/general_lgm/config.yaml`](../../../examples/general_lgm/config.yaml):
 
 ```yaml
 response: inflation
 likelihood:
   family: gaussian
+  sigma: 0.5
+data:
+  panel: [region]
+  time: month
 predictor:
   fixed: "1 + energy_price"
   effects:
-    - {name: region, type: iid, index: region}
-    - {name: trend, type: rw2, index: month}
+    - {name: region, type: iid, index: region, precision: 2.0}
+    - {name: trend, type: rw2, index: month, precision: 3.0}
 ```
 
-Every inference engine returns a common `LGMResult` surface:
+The target state gives every inference engine a common `LGMResult` surface:
 
 ```python
 result.latent_marginals("trend")
@@ -77,10 +105,15 @@ result.log_marginal_likelihood
 result.diagnostics
 ```
 
+In 0.3, fit-row predictions are exposed as `predictive_mean` and
+`predictive_variance`, while `result.predict(new_data)` is deferred.
+`hyperparameter_marginals()` is present but empty for the conditional exact
+fit because hyperparameters are not integrated.
+
 Custom latent effects implement a small compilation protocol that returns a
 validated latent block. Standard users should not need this protocol.
 
-## Data and Inference Boundary
+## Target Data and Inference Boundary
 
 Pandas and PySpark are adapters into the same compiler. An adapter is responsible
 for validating semantic columns, establishing stable categorical/index mappings,
@@ -93,7 +126,11 @@ operators required by the model cross to the driver. Global factorizations and
 hyperparameter integration run on the driver because they operate on a coupled
 sparse precision system and do not decompose naturally by Spark row partitions.
 
-## Core Intermediate Representation
+The 0.3 adapter is Pandas-only. It preserves a positional source-row mapping
+through canonical sorting and realigns declarative fit-row predictions to the
+caller's original order. PySpark input remains a later adapter slice.
+
+## Target Core Intermediate Representation
 
 The generalized IR contains:
 
@@ -110,11 +147,17 @@ The generalized IR contains:
 model. Precision matrices may be intrinsic and constrained. The compiler must not
 assume that every valid global precision is merely a fixed block diagonal matrix.
 
+The 0.3 declarative compiler is an interim conditional implementation: it
+materializes each `Hyperparameter.initial` and does not preserve parameter names,
+transforms, or priors in `CompiledLGM`. Retaining that metadata in a parameterized,
+inference-independent IR is a target-state requirement, not a completed 0.3
+capability.
+
 ## Components and Inference Roadmap
 
 Development proceeds in complete vertical slices.
 
-### 1. General LGM foundation
+### 1. General LGM foundation (target state)
 
 - fixed, IID, RW1, RW2, and AR1 effects;
 - identifiability constraints;
@@ -123,6 +166,13 @@ Development proceeds in complete vertical slices.
 - Pandas and PySpark adapters;
 - posterior marginals, prediction, and linear combinations;
 - exact Gaussian reference inference.
+
+The delivered 0.3 slice is narrower: fixed/IID/RW1/RW2 effects, Gaussian
+likelihood, Pandas input, fit-row prediction, posterior marginals, linear
+combinations, and the exact Gaussian reference engine. AR1, PySpark,
+`result.predict(new_data)`, parameterized IR metadata, and later inference
+engines are explicitly deferred; the target foundation is therefore not
+complete in 0.3.
 
 ### 2. Non-Gaussian LGM
 
@@ -162,7 +212,7 @@ The following implementation is retained and generalized:
 - empirical-Bayes optimization of observation scale and effect precisions;
 - strict validation, CLI conventions, and existing regression tests.
 
-The first implementation milestone is a compatibility-preserving refactor:
+The target compatibility-preserving refactor comprises:
 
 1. separate likelihood-specific state from the general IR;
 2. introduce likelihood, link, prior, and hyperparameter abstractions;
@@ -171,10 +221,14 @@ The first implementation milestone is a compatibility-preserving refactor:
 5. preserve legacy configuration and Gaussian outputs;
 6. move forecasting-specific evaluation behind `pylgm.contrib.forecasting`.
 
+Version 0.3 delivers the likelihood separation, modeling vocabulary, common
+result surface, Pandas compiler, and compatibility preservation. The PySpark
+adapter and `contrib.forecasting` relocation remain follow-up work.
+
 The current dense Gaussian implementation remains a small/medium reference engine.
 A sparse backend replaces it as the scalable default in a later vertical slice.
 
-## Package Boundaries
+## Target Package Boundaries
 
 ```text
 pylgm/
@@ -195,6 +249,9 @@ Forecasting, nowcasting, rolling backtests, Ridge or persistence benchmarks, and
 economic report artifacts do not belong to the inference core. Existing features
 remain available during migration and move to `contrib` with compatibility imports
 where practical.
+
+The current 0.3 tree has not completed the `results/` split or forecasting
+relocation; the diagram is the intended boundary.
 
 ## Failure Model
 
@@ -226,6 +283,10 @@ mathematical correctness.
 
 ## Non-goals for the First Refactor
 
+- AR1 effects;
+- the PySpark adapter;
+- `result.predict(new_data)`;
+- parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
 - INLA integration;
 - spatial effects and SPDE meshes;

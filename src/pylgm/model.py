@@ -9,10 +9,26 @@ from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import Fixed, IID, Predictor, RW1, RW2
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
-from pylgm.inference import fit_gaussian
+from pylgm.inference import GaussianResult, fit_gaussian
 
 
 _ROW_KEY = "__pylgm_row__"
+
+
+def _align_predictions_with_source_rows(
+    result: GaussianResult, source_positions: np.ndarray
+) -> GaussianResult:
+    caller_order = np.argsort(source_positions)
+    return GaussianResult(
+        labels=result.labels,
+        mean=result.mean,
+        covariance=result.covariance,
+        log_marginal_likelihood=result.log_marginal_likelihood,
+        predictive_mean=result.predictive_mean[caller_order],
+        predictive_variance=result.predictive_variance[caller_order],
+        block_slices=result.block_slices,
+        diagnostics=result.diagnostics,
+    )
 
 
 @dataclass(frozen=True)
@@ -48,7 +64,10 @@ class LGM:
             if callable(getattr(frame, "toPandas", None)) or type(frame).__module__.startswith(
                 "pyspark"
             ):
-                raise DataContractError("PySpark support requires the spark extra")
+                raise DataContractError(
+                    "PySpark input is unsupported in pyLGM 0.3; "
+                    "support is planned for a later release"
+                )
             raise DataContractError("frame must be a Pandas DataFrame")
 
         prepared = frame.copy(deep=True)
@@ -70,7 +89,8 @@ class LGM:
             fit = engines[engine]
         except KeyError as error:
             raise UnsupportedEngineError(f"unknown inference engine: {engine}") from error
-        return fit(compiled)
+        result = fit(compiled)
+        return _align_predictions_with_source_rows(result, panel.source_positions)
 
 
 __all__ = ["LGM"]

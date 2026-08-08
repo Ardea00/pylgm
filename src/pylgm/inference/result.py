@@ -178,6 +178,13 @@ class GaussianResult:
             raise TypeError("block_slices must be a mapping")
         if diagnostics is not None and not isinstance(diagnostics, Mapping):
             raise TypeError("diagnostics must be a mapping")
+        covariance = np.asarray(covariance)
+        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
+            covariance
+        ):
+            raise TypeError("covariance must have a real numeric dtype")
+        if not np.isfinite(covariance).all():
+            raise ValueError("covariance must be finite")
         object.__setattr__(self, "labels", tuple(labels))
         object.__setattr__(self, "_mean", _readonly_array(mean))
         object.__setattr__(self, "_covariance", _readonly_array(covariance))
@@ -250,10 +257,19 @@ class GaussianResult:
             raise ValueError("weights must have one column per latent dimension")
         with np.errstate(over="ignore", invalid="ignore"):
             mean = np.asarray(weights @ self._mean).reshape(-1)
-            covariance = np.asarray(weights @ self._covariance @ weights.T)
-        if not np.isfinite(covariance).all():
+            projected_covariance = np.asarray(weights @ self._covariance)
+            if isinstance(weights, csr_matrix):
+                variance = np.asarray(
+                    weights.multiply(projected_covariance).sum(axis=1)
+                ).reshape(-1)
+            else:
+                variance = np.einsum(
+                    "ij,ij->i", projected_covariance, weights
+                )
+        if not np.isfinite(projected_covariance).all() or not np.isfinite(
+            variance
+        ).all():
             raise ValueError("propagated covariance must be finite")
-        variance = np.diag(covariance).copy()
         roundoff_tolerance = _roundoff_tolerances(weights, self._covariance)
         variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
         return GaussianMarginals(mean, variance)

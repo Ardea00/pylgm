@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,6 +15,43 @@ def test_panel_sorts_keys_and_preserves_missing_targets() -> None:
     )
     assert panel.frame["month"].tolist() == [1, 2]
     assert panel.observed.tolist() == [True, False]
+
+
+def test_panel_preserves_an_immutable_positional_source_row_mapping() -> None:
+    frame = pd.DataFrame(
+        {"month": [2, 1, 3], "region": ["A", "A", "A"], "y": [2.0, 1.0, 3.0]},
+        index=["duplicate", "duplicate", "other"],
+    )
+
+    panel = CanonicalPanel.from_frame(
+        frame,
+        DataConfig(time="month", response="y", panel=("region",)),
+    )
+
+    assert panel.source_positions.tolist() == [1, 0, 2]
+    exposed = panel.source_positions
+    with pytest.raises(ValueError):
+        exposed[0] = 0
+    assert panel.source_positions.tolist() == [1, 0, 2]
+
+
+@pytest.mark.parametrize(
+    "source_positions",
+    [np.array([0, 0]), np.array([0, 2]), np.array([0.0, 1.0])],
+)
+def test_panel_rejects_invalid_positional_source_row_mappings(
+    source_positions: np.ndarray,
+) -> None:
+    frame = pd.DataFrame({"month": [1, 2], "y": [1.0, 2.0]})
+
+    with pytest.raises(DataContractError, match="source positions.*permutation"):
+        CanonicalPanel(
+            frame,
+            np.array([True, True]),
+            ("month",),
+            "y",
+            source_positions,
+        )
 
 
 def test_duplicate_panel_key_fails() -> None:
