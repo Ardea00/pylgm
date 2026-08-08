@@ -7,10 +7,33 @@ from scipy.sparse import csr_matrix
 from scipy.stats import norm
 
 
+_IMMUTABLE_DIAGNOSTIC_TYPES = (
+    str,
+    bytes,
+    bool,
+    int,
+    float,
+    complex,
+    type(None),
+    np.generic,
+)
+
+
 def _readonly_array(value: np.ndarray) -> np.ndarray:
     result = np.array(value, copy=True)
     result.setflags(write=False)
     return result
+
+
+def _readonly_diagnostics(value: Mapping[str, object]) -> Mapping[str, object]:
+    result: dict[str, object] = {}
+    for name, item in value.items():
+        if not isinstance(name, str):
+            raise TypeError("diagnostics keys must be strings")
+        if not isinstance(item, _IMMUTABLE_DIAGNOSTIC_TYPES):
+            raise TypeError("diagnostics values must be immutable scalar values")
+        result[name] = item
+    return MappingProxyType(result)
 
 
 def _marginal_array(value: np.ndarray, name: str) -> np.ndarray:
@@ -94,7 +117,11 @@ class GaussianResult:
         object.__setattr__(
             self, "block_slices", MappingProxyType(dict(block_slices or {}))
         )
-        object.__setattr__(self, "diagnostics", MappingProxyType(dict(diagnostics or {})))
+        object.__setattr__(
+            self,
+            "diagnostics",
+            _readonly_diagnostics(diagnostics if diagnostics is not None else {}),
+        )
 
     @property
     def mean(self) -> np.ndarray:
@@ -153,4 +180,14 @@ class GaussianResult:
             raise ValueError("weights must have one column per latent dimension")
         mean = np.asarray(weights @ self._mean).reshape(-1)
         covariance = np.asarray(weights @ self._covariance @ weights.T)
-        return GaussianMarginals(mean, np.diag(covariance))
+        variance = np.diag(covariance).copy()
+        if isinstance(weights, csr_matrix):
+            weight_scales = np.asarray(np.abs(weights).sum(axis=1)).reshape(-1)
+        else:
+            weight_scales = np.sum(np.abs(weights), axis=1)
+        covariance_scale = np.linalg.norm(self._covariance, ord=np.inf)
+        roundoff_tolerance = np.finfo(float).eps * np.maximum(
+            1.0, weight_scales**2 * covariance_scale
+        )
+        variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
+        return GaussianMarginals(mean, variance)

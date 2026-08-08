@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm.inference import fit_gaussian
+from pylgm.inference import GaussianResult, fit_gaussian
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -82,3 +82,63 @@ def test_result_metadata_is_immutable_mapping():
     }
     with pytest.raises(TypeError):
         result.diagnostics["latent_dimension"] = 3  # type: ignore[index]
+
+
+def test_linear_combinations_tolerate_zero_variance_constraint_roundoff():
+    latent_dimension = 30
+    model = CompiledLGM(
+        y=np.zeros(latent_dimension),
+        observed=np.zeros(latent_dimension, dtype=bool),
+        offset=np.zeros(latent_dimension),
+        design=csr_matrix(np.eye(latent_dimension)),
+        precision=csr_matrix(np.eye(latent_dimension)),
+        constraints=np.ones((1, latent_dimension)),
+        labels=tuple(f"x{index}" for index in range(latent_dimension)),
+        likelihood=CompiledGaussian(1.0),
+        blocks=(),
+    )
+
+    combined = fit_gaussian(model).linear_combinations(np.ones((1, latent_dimension)))
+
+    np.testing.assert_allclose(combined.mean, [0.0])
+    np.testing.assert_allclose(combined.variance, [0.0], atol=1e-12)
+
+
+def test_linear_combinations_reject_materially_negative_variance():
+    result = GaussianResult(
+        labels=("x",),
+        mean=np.array([0.0]),
+        covariance=np.array([[-1e-6]]),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.array([0.0]),
+        predictive_variance=np.array([1.0]),
+    )
+
+    with pytest.raises(ValueError, match="variance must be non-negative"):
+        result.linear_combinations(np.array([[1.0]]))
+
+
+def test_result_diagnostics_reject_mutable_values_and_isolate_input_mapping():
+    source = {"latent_dimension": 1}
+    result = GaussianResult(
+        labels=("x",),
+        mean=np.array([0.0]),
+        covariance=np.array([[1.0]]),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.array([0.0]),
+        predictive_variance=np.array([1.0]),
+        diagnostics=source,
+    )
+    source["latent_dimension"] = 99
+
+    assert result.diagnostics == {"latent_dimension": 1}
+    with pytest.raises(TypeError, match="immutable scalar"):
+        GaussianResult(
+            labels=("x",),
+            mean=np.array([0.0]),
+            covariance=np.array([[1.0]]),
+            log_marginal_likelihood=0.0,
+            predictive_mean=np.array([0.0]),
+            predictive_variance=np.array([1.0]),
+            diagnostics={"latent_dimension": np.array([1])},
+        )
