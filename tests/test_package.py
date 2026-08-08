@@ -8,10 +8,28 @@ import pylgm
 from pylgm.cli import app
 
 
-def test_package_exports_version() -> None:
+def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
     metadata = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
 
-    assert pylgm.__version__ == "0.2.0"
+    expected = {
+        "LGM",
+        "Gaussian",
+        "Fixed",
+        "IID",
+        "RW1",
+        "RW2",
+        "Hyperparameter",
+        "GaussianPrior",
+        "PCPrecision",
+        "Pipeline",
+        "Experiment",
+        "ComparisonResult",
+        "CandidateFailure",
+        "FailureCause",
+    }
+
+    assert expected.issubset(set(pylgm.__all__))
+    assert pylgm.__version__ == "0.3.0"
     assert metadata["project"]["version"] == pylgm.__version__
 
 

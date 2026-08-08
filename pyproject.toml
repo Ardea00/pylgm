@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pylgm"
-version = "0.2.0"
-description = "Configuration-driven latent Gaussian models for panel data"
+version = "0.3.0"
+description = "General-purpose latent Gaussian models for Python"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
