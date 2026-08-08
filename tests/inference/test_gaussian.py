@@ -12,7 +12,7 @@ from pylgm.exceptions import (
 )
 from pylgm.inference import gaussian
 from pylgm.inference import fit_gaussian
-from pylgm.ir.model import CompiledLGM
+from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian
 
 
@@ -57,6 +57,39 @@ def test_scalar_gaussian_matches_conjugate_solution() -> None:
     np.testing.assert_allclose(
         result.log_marginal_likelihood, -0.5 * (np.log(4.0 * np.pi) + 2.0)
     )
+
+
+def test_result_exposes_named_block_marginals_and_block_slices() -> None:
+    first = LatentBlock(
+        name="first",
+        labels=("x",),
+        design=csr_matrix([[1.0], [0.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+    )
+    second = LatentBlock(
+        name="second",
+        labels=("y",),
+        design=csr_matrix([[0.0], [1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+    )
+    model = CompiledLGM(
+        y=np.array([2.0, -1.0]),
+        observed=np.array([True, True]),
+        offset=np.zeros(2),
+        design=csr_matrix(np.eye(2)),
+        precision=csr_matrix(np.eye(2)),
+        constraints=np.empty((0, 2)),
+        labels=("first:x", "second:y"),
+        likelihood=CompiledGaussian(1.0),
+        blocks=(first, second),
+    )
+
+    result = fit_gaussian(model)
+
+    assert result.block_slices == {"first": slice(0, 1), "second": slice(1, 2)}
+    np.testing.assert_allclose(result.latent_marginals("second").mean, [-0.5])
 
 
 def test_sum_to_zero_constraint_is_satisfied() -> None:

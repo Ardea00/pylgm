@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve, null_space
 
@@ -75,6 +77,16 @@ def _require_finite(name: str, value: np.ndarray | float) -> None:
         raise NumericalError(f"exact Gaussian produced non-finite {name}")
 
 
+def _block_slices(model: CompiledLGM) -> Mapping[str, slice]:
+    start = 0
+    result: dict[str, slice] = {}
+    for block in model.blocks:
+        stop = start + block.design.shape[1]
+        result[block.name] = slice(start, stop)
+        start = stop
+    return result
+
+
 def _fit_dense(model: CompiledLGM) -> GaussianResult:
     sigma = float(model.sigma)
     with np.errstate(over="ignore", under="ignore"):
@@ -140,6 +152,12 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
+        block_slices=_block_slices(model),
+        diagnostics={
+            "latent_dimension": int(latent_size),
+            "observed_count": int(np.count_nonzero(observed)),
+            "constraint_count": int(constraints.shape[0]),
+        },
     )
 
 
