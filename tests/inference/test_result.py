@@ -118,6 +118,20 @@ def test_linear_combinations_reject_materially_negative_variance():
         result.linear_combinations(np.array([[1.0]]))
 
 
+def test_linear_combinations_reject_nonfinite_variance_from_finite_weights():
+    result = GaussianResult(
+        labels=("x",),
+        mean=np.array([0.0]),
+        covariance=np.array([[-1.0]]),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.array([0.0]),
+        predictive_variance=np.array([1.0]),
+    )
+
+    with pytest.raises(ValueError, match="propagated covariance"):
+        result.linear_combinations(np.array([[np.finfo(float).max]]))
+
+
 def test_result_diagnostics_reject_mutable_values_and_isolate_input_mapping():
     source = {"latent_dimension": 1}
     result = GaussianResult(
@@ -142,3 +156,52 @@ def test_result_diagnostics_reject_mutable_values_and_isolate_input_mapping():
             predictive_variance=np.array([1.0]),
             diagnostics={"latent_dimension": np.array([1])},
         )
+
+
+def test_result_diagnostics_reject_structured_numpy_scalars_with_object_fields():
+    mutable_payload: list[object] = []
+    diagnostic = np.array(
+        [(mutable_payload,)], dtype=[("payload", object)]
+    )[0]
+
+    with pytest.raises(TypeError, match="immutable scalar"):
+        GaussianResult(
+            labels=("x",),
+            mean=np.array([0.0]),
+            covariance=np.array([[1.0]]),
+            log_marginal_likelihood=0.0,
+            predictive_mean=np.array([0.0]),
+            predictive_variance=np.array([1.0]),
+            diagnostics={"payload": diagnostic},
+        )
+
+
+def test_result_diagnostics_normalize_safe_numpy_scalars_to_python_values():
+    result = GaussianResult(
+        labels=("x",),
+        mean=np.array([0.0]),
+        covariance=np.array([[1.0]]),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.array([0.0]),
+        predictive_variance=np.array([1.0]),
+        diagnostics={"latent_dimension": np.int64(1)},
+    )
+
+    assert result.diagnostics == {"latent_dimension": 1}
+    assert type(result.diagnostics["latent_dimension"]) is int
+
+
+def test_linear_combinations_support_empty_latent_dimensions():
+    result = GaussianResult(
+        labels=(),
+        mean=np.empty(0),
+        covariance=np.empty((0, 0)),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.empty(0),
+        predictive_variance=np.empty(0),
+    )
+
+    combined = result.linear_combinations(np.empty((1, 0)))
+
+    np.testing.assert_allclose(combined.mean, [0.0])
+    np.testing.assert_allclose(combined.variance, [0.0])

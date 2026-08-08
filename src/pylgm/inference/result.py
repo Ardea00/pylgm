@@ -15,7 +15,6 @@ _IMMUTABLE_DIAGNOSTIC_TYPES = (
     float,
     complex,
     type(None),
-    np.generic,
 )
 
 
@@ -30,10 +29,81 @@ def _readonly_diagnostics(value: Mapping[str, object]) -> Mapping[str, object]:
     for name, item in value.items():
         if not isinstance(name, str):
             raise TypeError("diagnostics keys must be strings")
-        if not isinstance(item, _IMMUTABLE_DIAGNOSTIC_TYPES):
+        if isinstance(item, np.generic):
+            item = _normalized_numpy_scalar(item)
+        elif type(item) not in _IMMUTABLE_DIAGNOSTIC_TYPES:
             raise TypeError("diagnostics values must be immutable scalar values")
         result[name] = item
     return MappingProxyType(result)
+
+
+def _normalized_numpy_scalar(value: np.generic) -> object:
+    kind = value.dtype.kind
+    if kind == "b":
+        return bool(value)
+    if kind in {"i", "u"}:
+        return int(value)
+    if kind == "f":
+        return float(value)
+    if kind == "c":
+        return complex(value)
+    if kind == "U":
+        return str(value)
+    if kind == "S":
+        return bytes(value)
+    raise TypeError("diagnostics values must be immutable scalar values")
+
+
+def _log_absolute_row_sums(value: np.ndarray) -> np.ndarray:
+    with np.errstate(over="ignore", invalid="ignore"):
+        absolute = np.abs(np.asarray(value, dtype=np.float64))
+    if not absolute.shape[1]:
+        return np.full(absolute.shape[0], -np.inf)
+    maximum = absolute.max(axis=1)
+    result = np.full(absolute.shape[0], -np.inf)
+    finite_nonzero = np.isfinite(maximum) & (maximum > 0)
+    if np.any(finite_nonzero):
+        normalized = absolute[finite_nonzero] / maximum[finite_nonzero, np.newaxis]
+        result[finite_nonzero] = np.log(maximum[finite_nonzero]) + np.log(
+            normalized.sum(axis=1)
+        )
+    return result
+
+
+def _log_csr_absolute_row_sums(value: csr_matrix) -> np.ndarray:
+    result = np.full(value.shape[0], -np.inf)
+    for row in range(value.shape[0]):
+        start, stop = value.indptr[row : row + 2]
+        with np.errstate(over="ignore", invalid="ignore"):
+            absolute = np.abs(np.asarray(value.data[start:stop], dtype=np.float64))
+        if not absolute.size:
+            continue
+        maximum = absolute.max()
+        if np.isfinite(maximum) and maximum > 0:
+            result[row] = np.log(maximum) + np.log(np.sum(absolute / maximum))
+    return result
+
+
+def _roundoff_tolerances(weights: csr_matrix | np.ndarray, covariance: np.ndarray) -> np.ndarray:
+    if isinstance(weights, csr_matrix):
+        log_weight_scales = _log_csr_absolute_row_sums(weights)
+    else:
+        log_weight_scales = _log_absolute_row_sums(weights)
+    result = np.zeros(log_weight_scales.shape)
+    log_covariance_row_sums = _log_absolute_row_sums(covariance)
+    if not log_covariance_row_sums.size:
+        return result
+    log_covariance_scale = np.max(log_covariance_row_sums)
+    if not np.isfinite(log_covariance_scale):
+        return result
+    log_tolerance = np.log(np.finfo(float).eps) + np.maximum(
+        0.0, 2 * log_weight_scales + log_covariance_scale
+    )
+    finite = np.isfinite(log_tolerance) & (
+        log_tolerance <= np.log(np.finfo(float).max)
+    )
+    result[finite] = np.exp(log_tolerance[finite])
+    return result
 
 
 def _marginal_array(value: np.ndarray, name: str) -> np.ndarray:
@@ -178,16 +248,12 @@ class GaussianResult:
             raise ValueError("weights must be finite")
         if width != self._mean.size:
             raise ValueError("weights must have one column per latent dimension")
-        mean = np.asarray(weights @ self._mean).reshape(-1)
-        covariance = np.asarray(weights @ self._covariance @ weights.T)
+        with np.errstate(over="ignore", invalid="ignore"):
+            mean = np.asarray(weights @ self._mean).reshape(-1)
+            covariance = np.asarray(weights @ self._covariance @ weights.T)
+        if not np.isfinite(covariance).all():
+            raise ValueError("propagated covariance must be finite")
         variance = np.diag(covariance).copy()
-        if isinstance(weights, csr_matrix):
-            weight_scales = np.asarray(np.abs(weights).sum(axis=1)).reshape(-1)
-        else:
-            weight_scales = np.sum(np.abs(weights), axis=1)
-        covariance_scale = np.linalg.norm(self._covariance, ord=np.inf)
-        roundoff_tolerance = np.finfo(float).eps * np.maximum(
-            1.0, weight_scales**2 * covariance_scale
-        )
+        roundoff_tolerance = _roundoff_tolerances(weights, self._covariance)
         variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
         return GaussianMarginals(mean, variance)
