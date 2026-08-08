@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
+from pylgm.likelihoods import CompiledGaussian
 from pylgm.exceptions import ModelValidationError
 from pylgm.ir import CompiledLGM, LatentBlock
 
@@ -14,6 +15,27 @@ def _block(name: str = "effect", rows: int = 2) -> LatentBlock:
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
     )
+
+
+def _compiled(likelihood: object) -> CompiledLGM:
+    return CompiledLGM(
+        y=np.array([2.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        likelihood=likelihood,
+        blocks=(),
+    )
+
+
+def test_compiled_lgm_owns_a_likelihood_not_gaussian_state() -> None:
+    model = _compiled(CompiledGaussian(1.0))
+
+    assert model.likelihood == CompiledGaussian(model.sigma)
+    assert "sigma" not in model.__dataclass_fields__
 
 
 @pytest.mark.parametrize(
@@ -51,7 +73,7 @@ def test_latent_block_centralizes_shape_and_finite_invariants(
         ({"design": csr_matrix([[1.0], [np.nan]])}, "design"),
         ({"constraints": np.empty((0, 2))}, "constraints"),
         ({"labels": ()}, "labels"),
-        ({"sigma": np.inf}, "sigma"),
+        ({"likelihood": None}, "likelihood"),
     ],
 )
 def test_compiled_lgm_centralizes_engine_independent_invariants(
@@ -65,7 +87,7 @@ def test_compiled_lgm_centralizes_engine_independent_invariants(
         "precision": csr_matrix([[1.0]]),
         "constraints": np.empty((0, 1)),
         "labels": ("effect:level",),
-        "sigma": 1.0,
+        "likelihood": CompiledGaussian(1.0),
         "blocks": (_block(),),
     }
     arguments.update(changes)
@@ -87,7 +109,7 @@ def test_compiled_lgm_requires_unique_block_identities() -> None:
             precision=csr_matrix(np.eye(2)),
             constraints=np.empty((0, 2)),
             labels=("duplicate:level", "duplicate:level-2"),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(first, second),
         )
 
@@ -102,7 +124,7 @@ def test_compiled_lgm_aligns_nonempty_blocks_with_global_latent_width() -> None:
             precision=csr_matrix(np.eye(2)),
             constraints=np.empty((0, 2)),
             labels=("effect:level", "orphan"),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(_block(),),
         )
 
@@ -117,7 +139,7 @@ def test_compiled_lgm_rejects_block_with_mismatched_design_rows() -> None:
             precision=csr_matrix([[1.0]]),
             constraints=np.empty((0, 1)),
             labels=("effect:level",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(_block(rows=1),),
         )
 
@@ -140,7 +162,7 @@ def test_compiled_lgm_requires_global_matrices_to_match_blocks(
         "precision": csr_matrix([[1.0]]),
         "constraints": np.empty((0, 1)),
         "labels": ("effect:level",),
-        "sigma": 1.0,
+        "likelihood": CompiledGaussian(1.0),
         "blocks": (_block(),),
     }
     arguments[field] = value
@@ -167,7 +189,7 @@ def test_compiled_lgm_requires_global_constraints_to_match_blocks() -> None:
             precision=csr_matrix([[1.0]]),
             constraints=np.array([[2.0]]),
             labels=("effect:level",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(block,),
         )
 
@@ -217,7 +239,7 @@ def test_compiled_lgm_rejects_complex_dense_and_sparse_payloads(
         "precision": csr_matrix([[1.0]]),
         "constraints": np.empty((0, 1)),
         "labels": ("x",),
-        "sigma": 1.0,
+        "likelihood": CompiledGaussian(1.0),
         "blocks": (),
     }
     arguments[field] = value
@@ -232,7 +254,7 @@ def test_compiled_lgm_rejects_complex_dense_and_sparse_payloads(
         ("y", object()),
         ("offset", [[0.0], [0.0, 1.0]]),
         ("observed", [[True], [False, True]]),
-        ("sigma", object()),
+        ("likelihood", None),
     ],
 )
 def test_invalid_compiled_scalar_and_dtype_inputs_are_typed_model_errors(
@@ -246,7 +268,7 @@ def test_invalid_compiled_scalar_and_dtype_inputs_are_typed_model_errors(
         "precision": csr_matrix([[1.0]]),
         "constraints": np.empty((0, 1)),
         "labels": ("x",),
-        "sigma": 1.0,
+        "likelihood": CompiledGaussian(1.0),
         "blocks": (),
     }
     arguments[field] = value

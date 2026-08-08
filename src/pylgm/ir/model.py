@@ -4,6 +4,7 @@ import numpy as np
 from scipy.sparse import block_diag, csr_matrix, hstack
 
 from pylgm.exceptions import ModelValidationError
+from pylgm.likelihoods import CompiledGaussian
 
 
 def _readonly_array(value: np.ndarray) -> np.ndarray:
@@ -144,7 +145,7 @@ class CompiledLGM:
     _precision: csr_matrix = field(repr=False)
     _constraints: np.ndarray = field(repr=False)
     labels: tuple[str, ...]
-    sigma: float
+    likelihood: object
     blocks: tuple[LatentBlock, ...]
 
     def __init__(
@@ -156,7 +157,7 @@ class CompiledLGM:
         precision: csr_matrix,
         constraints: np.ndarray,
         labels: tuple[str, ...],
-        sigma: float,
+        likelihood: object,
         blocks: tuple[LatentBlock, ...],
     ) -> None:
         y = _numeric_array(y, "y", 1, require_finite=False)
@@ -197,10 +198,8 @@ class CompiledLGM:
             raise ModelValidationError("labels must be strings")
         if len(labels) != len(set(labels)):
             raise ModelValidationError("labels must be unique")
-        sigma_array = _numeric_array(sigma, "sigma", 0)
-        sigma_value = float(sigma_array)
-        if sigma_value <= 0:
-            raise ModelValidationError("sigma must be finite and positive")
+        if likelihood is None:
+            raise ModelValidationError("likelihood must be present")
         block_names = [block.name for block in blocks]
         if len(block_names) != len(set(block_names)):
             raise ModelValidationError("block names must be unique")
@@ -242,7 +241,7 @@ class CompiledLGM:
         object.__setattr__(self, "_precision", _readonly_csr_matrix(precision))
         object.__setattr__(self, "_constraints", _readonly_array(constraints))
         object.__setattr__(self, "labels", labels)
-        object.__setattr__(self, "sigma", sigma_value)
+        object.__setattr__(self, "likelihood", likelihood)
         object.__setattr__(self, "blocks", blocks)
 
     @property
@@ -268,3 +267,9 @@ class CompiledLGM:
     @property
     def constraints(self) -> np.ndarray:
         return _readonly_array(self._constraints)
+
+    @property
+    def sigma(self) -> float:
+        if not isinstance(self.likelihood, CompiledGaussian):
+            raise AttributeError("sigma is only defined for a Gaussian likelihood")
+        return self.likelihood.sigma

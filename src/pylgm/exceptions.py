@@ -37,6 +37,10 @@ class InferenceError(PyLGMError):
     """Inference cannot produce a valid result for a compiled model."""
 
 
+class UnsupportedEngineError(PyLGMError):
+    """A compiled likelihood is not supported by the selected engine."""
+
+
 class NumericalError(InferenceError, LinAlgError, ArithmeticError):
     """Numerical inference produced an invalid or non-finite result."""
 

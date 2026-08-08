@@ -7,6 +7,7 @@ from scipy.sparse import block_diag, csr_matrix, hstack
 
 from pylgm.exceptions import ModelValidationError, NumericalError
 from pylgm.ir.model import CompiledLGM, LatentBlock
+from pylgm.likelihoods import CompiledGaussian
 
 
 def _readonly_array(value: np.ndarray) -> np.ndarray:
@@ -91,7 +92,7 @@ def _assemble_compiled_model(
     observed: np.ndarray,
     offset: np.ndarray,
     blocks: tuple[LatentBlock, ...],
-    sigma: float,
+    likelihood: object,
 ) -> CompiledLGM:
     if not blocks:
         return CompiledLGM(
@@ -102,7 +103,7 @@ def _assemble_compiled_model(
             precision=csr_matrix((0, 0)),
             constraints=np.empty((0, 0)),
             labels=(),
-            sigma=sigma,
+            likelihood=likelihood,
             blocks=(),
         )
     widths = [block.design.shape[1] for block in blocks]
@@ -126,7 +127,7 @@ def _assemble_compiled_model(
         precision=block_diag([block.precision for block in blocks], format="csr"),
         constraints=constraints,
         labels=_qualified_labels(blocks),
-        sigma=sigma,
+        likelihood=likelihood,
         blocks=blocks,
     )
 
@@ -261,9 +262,9 @@ class CompiledGaussianFamily:
                     item.block.constraints,
                 )
             )
-        sigma = resolved.get("sigma", self.initial.sigma)
+        likelihood = CompiledGaussian(resolved.get("sigma", self.initial.sigma))
         return _assemble_compiled_model(
-            self._y, self._observed, self._offset, tuple(blocks), sigma
+            self._y, self._observed, self._offset, tuple(blocks), likelihood
         )
 
     def block_slice(self, name: str) -> slice:

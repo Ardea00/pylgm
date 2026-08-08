@@ -5,6 +5,7 @@ from scipy.sparse import csr_matrix
 
 from pylgm.effects.fixed import build_fixed
 from pylgm.ir import CompiledLGM, LatentBlock
+from pylgm.likelihoods import CompiledGaussian
 
 
 def test_fixed_block_has_stable_columns_and_precision() -> None:
@@ -61,7 +62,7 @@ def test_compiled_lgm_rejects_dense_payload_mutation() -> None:
         precision=csr_matrix([[2.0]]),
         constraints=np.empty((0, 1)),
         labels=("coefficient",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -78,7 +79,7 @@ def test_compiled_lgm_sparse_access_is_structurally_isolated() -> None:
         precision=csr_matrix([[2.0]]),
         constraints=np.empty((0, 1)),
         labels=("coefficient",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 

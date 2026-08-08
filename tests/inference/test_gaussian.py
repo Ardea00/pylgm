@@ -4,10 +4,35 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import DenseReferenceLimitError, ModelValidationError, NumericalError
+from pylgm.exceptions import (
+    DenseReferenceLimitError,
+    ModelValidationError,
+    NumericalError,
+    UnsupportedEngineError,
+)
 from pylgm.inference import gaussian
 from pylgm.inference import fit_gaussian
 from pylgm.ir.model import CompiledLGM
+from pylgm.likelihoods import CompiledGaussian
+
+
+def _compiled(likelihood: object) -> CompiledLGM:
+    return CompiledLGM(
+        y=np.array([2.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        design=csr_matrix([[1.0]]),
+        precision=csr_matrix([[1.0]]),
+        constraints=np.empty((0, 1)),
+        labels=("x",),
+        likelihood=likelihood,
+        blocks=(),
+    )
+
+
+def test_exact_gaussian_rejects_an_incompatible_likelihood() -> None:
+    with pytest.raises(UnsupportedEngineError, match="Gaussian"):
+        fit_gaussian(_compiled(object()))
 
 
 def test_scalar_gaussian_matches_conjugate_solution() -> None:
@@ -19,7 +44,7 @@ def test_scalar_gaussian_matches_conjugate_solution() -> None:
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -43,7 +68,7 @@ def test_sum_to_zero_constraint_is_satisfied() -> None:
         precision=csr_matrix([[1.0, -1.0], [-1.0, 1.0]]),
         constraints=np.array([[1.0, 1.0]]),
         labels=("a", "b"),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -61,7 +86,7 @@ def test_missing_observation_is_excluded_from_posterior_and_likelihood() -> None
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -84,7 +109,7 @@ def test_fully_constrained_latent_space_uses_noise_only_likelihood() -> None:
         precision=csr_matrix([[2.0]]),
         constraints=np.array([[1.0]]),
         labels=("x",),
-        sigma=2.0,
+        likelihood=CompiledGaussian(2.0),
         blocks=(),
     )
 
@@ -109,7 +134,7 @@ def test_result_arrays_are_value_isolated() -> None:
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -130,7 +155,7 @@ def test_non_symmetric_precision_fails_explicitly() -> None:
             precision=csr_matrix([[1.0, 5.0], [0.0, 1.0]]),
             constraints=np.empty((0, 2)),
             labels=("a", "b"),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -144,7 +169,7 @@ def test_singular_reduced_prior_fails_even_when_likelihood_is_informative() -> N
         precision=csr_matrix([[0.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -163,7 +188,7 @@ def test_tiny_nonzero_constraint_row_is_not_discarded() -> None:
         precision=csr_matrix(np.eye(2)),
         constraints=np.diag([1.0, 1e-20]),
         labels=("a", "b"),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -184,7 +209,7 @@ def test_redundant_scaled_constraints_preserve_the_same_constrained_posterior() 
         precision=csr_matrix([[1.0, -1.0], [-1.0, 1.0]]),
         constraints=constraints,
         labels=("a", "b"),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -204,7 +229,7 @@ def test_near_asymmetric_precision_is_rejected() -> None:
             precision=csr_matrix([[2.0, 1e-9], [0.0, 2.0]]),
             constraints=np.empty((0, 2)),
             labels=("a", "b"),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -219,7 +244,7 @@ def test_integer_observation_mask_is_rejected() -> None:
             precision=csr_matrix([[1.0]]),
             constraints=np.empty((0, 1)),
             labels=("x",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -234,7 +259,7 @@ def test_observation_lengths_must_match_design_rows() -> None:
             precision=csr_matrix([[1.0]]),
             constraints=np.empty((0, 1)),
             labels=("x",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -249,7 +274,7 @@ def test_sigma_must_have_a_finite_positive_variance(sigma: float) -> None:
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=sigma,
+        likelihood=CompiledGaussian(float(sigma)),
         blocks=(),
     )
 
@@ -267,7 +292,7 @@ def test_observed_nan_response_fails_before_zero_dimensional_inference() -> None
             precision=csr_matrix([[1.0]]),
             constraints=np.array([[1.0]]),
             labels=("x",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -283,7 +308,7 @@ def test_nonfinite_offset_is_rejected_for_predictions(bad_offset: float) -> None
             precision=csr_matrix([[1.0]]),
             constraints=np.empty((0, 1)),
             labels=("x",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -299,7 +324,7 @@ def test_nonfinite_sparse_design_data_is_rejected(bad_design_value: float) -> No
             precision=csr_matrix([[1.0]]),
             constraints=np.empty((0, 1)),
             labels=("x",),
-            sigma=1.0,
+            likelihood=CompiledGaussian(1.0),
             blocks=(),
         )
 
@@ -313,7 +338,7 @@ def test_extreme_finite_response_raises_typed_numerical_error_without_warnings()
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 
@@ -336,7 +361,7 @@ def test_dense_reference_dimension_limit_runs_before_dense_algebra(
         precision=csr_matrix(np.eye(2)),
         constraints=np.empty((0, 2)),
         labels=("a", "b"),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
     monkeypatch.setattr(gaussian, "_MAX_DENSE_LATENT_DIMENSION", 1)
@@ -361,7 +386,7 @@ def test_dense_reference_estimated_byte_limit_can_be_explicitly_overridden(
         precision=csr_matrix([[1.0]]),
         constraints=np.empty((0, 1)),
         labels=("x",),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
     monkeypatch.setattr(gaussian, "_MAX_DENSE_BYTES", 1)
@@ -382,7 +407,7 @@ def test_constrained_gaussian_matches_independent_one_coordinate_solution() -> N
         precision=csr_matrix([[1.0, -1.0], [-1.0, 1.0]]),
         constraints=np.array([[1.0, 1.0]]),
         labels=("a", "b"),
-        sigma=1.0,
+        likelihood=CompiledGaussian(1.0),
         blocks=(),
     )
 

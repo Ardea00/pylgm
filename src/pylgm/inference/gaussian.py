@@ -1,9 +1,10 @@
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve, null_space
 
-from pylgm.exceptions import DenseReferenceLimitError, NumericalError
+from pylgm.exceptions import DenseReferenceLimitError, NumericalError, UnsupportedEngineError
 from pylgm.inference.result import GaussianResult
 from pylgm.ir.model import CompiledLGM
+from pylgm.likelihoods import CompiledGaussian
 
 
 _MAX_DENSE_LATENT_DIMENSION = 4_096
@@ -148,6 +149,8 @@ def fit_gaussian(model: CompiledLGM, *, allow_large_dense: bool = False) -> Gaus
     The explicit override disables conservative memory and dimension guards. It does
     not change the algorithm's O(p^2) covariance storage or O(p^3) dense solve cost.
     """
+    if not isinstance(model.likelihood, CompiledGaussian):
+        raise UnsupportedEngineError("exact Gaussian inference requires a Gaussian likelihood")
     preflight_dense_reference(model, allow_large_dense=allow_large_dense)
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
