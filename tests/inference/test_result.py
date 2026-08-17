@@ -1,12 +1,47 @@
 from types import MappingProxyType
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
 from pylgm.inference import GaussianResult, fit_gaussian
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
+
+
+def test_result_preserves_prediction_keys_by_defensive_copy():
+    keys = pd.DataFrame({"region": ["A", "B"], "time": [1, 2]})
+    result = GaussianResult(
+        labels=("x",),
+        mean=np.array([0.0]),
+        covariance=np.eye(1),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.array([1.0, 2.0]),
+        predictive_variance=np.array([1.0, 1.0]),
+        prediction_keys=keys,
+    )
+
+    keys.loc[0, "region"] = "mutated"
+    exposed = result.prediction_keys
+
+    assert exposed is not None
+    assert exposed["region"].tolist() == ["A", "B"]
+    exposed.loc[1, "time"] = 99
+    assert result.prediction_keys["time"].tolist() == [1, 2]
+
+
+def test_result_rejects_prediction_keys_with_wrong_row_count():
+    with pytest.raises(ValueError, match="prediction keys.*row count"):
+        GaussianResult(
+            labels=("x",),
+            mean=np.array([0.0]),
+            covariance=np.eye(1),
+            log_marginal_likelihood=0.0,
+            predictive_mean=np.array([1.0, 2.0]),
+            predictive_variance=np.array([1.0, 1.0]),
+            prediction_keys=pd.DataFrame({"time": [1]}),
+        )
 
 
 def _fitted_result():

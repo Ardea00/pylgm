@@ -28,6 +28,7 @@ def _align_predictions_with_source_rows(
         predictive_variance=result.predictive_variance[caller_order],
         block_slices=result.block_slices,
         diagnostics=result.diagnostics,
+        prediction_keys=result.prediction_keys,
     )
 
 

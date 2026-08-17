@@ -9,6 +9,7 @@ from pylgm.data import CanonicalPanel
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.parameters import Hyperparameter
+from pylgm.model import _align_predictions_with_source_rows
 
 
 def _example():
@@ -67,6 +68,26 @@ def test_declarative_predictions_align_with_unsorted_caller_rows():
         result.predictive_variance,
         1.0 + np.array([16.0, 1.0, 9.0, 4.0]) / 31.0,
     )
+
+
+def test_prediction_alignment_retains_prediction_keys():
+    from pylgm.inference import GaussianResult
+
+    keys = pd.DataFrame({"region": ["A", "B"], "time": [1, 2]})
+    result = GaussianResult(
+        labels=("x",),
+        mean=np.array([0.0]),
+        covariance=np.eye(1),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.array([10.0, 20.0]),
+        predictive_variance=np.array([1.0, 1.0]),
+        prediction_keys=keys,
+    )
+
+    aligned = _align_predictions_with_source_rows(result, np.array([1, 0]))
+
+    np.testing.assert_allclose(aligned.predictive_mean, [20.0, 10.0])
+    pd.testing.assert_frame_equal(aligned.prediction_keys, keys)
 
 
 def test_model_does_not_fallback_from_unknown_engine():

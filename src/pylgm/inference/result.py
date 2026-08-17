@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 import numpy as np
+import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.stats import norm
 
@@ -160,6 +161,7 @@ class GaussianResult:
     log_marginal_likelihood: float
     _predictive_mean: np.ndarray = field(repr=False)
     _predictive_variance: np.ndarray = field(repr=False)
+    _prediction_keys: pd.DataFrame | None = field(repr=False)
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
 
@@ -173,11 +175,23 @@ class GaussianResult:
         predictive_variance: np.ndarray,
         block_slices: Mapping[str, slice] | None = None,
         diagnostics: Mapping[str, object] | None = None,
+        prediction_keys: pd.DataFrame | None = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
         if diagnostics is not None and not isinstance(diagnostics, Mapping):
             raise TypeError("diagnostics must be a mapping")
+        if prediction_keys is not None:
+            if not isinstance(prediction_keys, pd.DataFrame):
+                raise TypeError("prediction keys must be a Pandas DataFrame")
+            if not all(isinstance(column, str) for column in prediction_keys.columns):
+                raise TypeError("prediction key column labels must be strings")
+            if not prediction_keys.columns.is_unique:
+                raise ValueError("prediction key column labels must be unique")
+            if prediction_keys.isna().to_numpy().any():
+                raise ValueError("prediction keys must not contain null cells")
+            if len(prediction_keys) != np.asarray(predictive_mean).size:
+                raise ValueError("prediction keys row count must match predictive results")
         covariance = np.asarray(covariance)
         if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
             covariance
@@ -191,6 +205,11 @@ class GaussianResult:
         object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
         object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
         object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        object.__setattr__(
+            self,
+            "_prediction_keys",
+            prediction_keys.copy(deep=True) if prediction_keys is not None else None,
+        )
         object.__setattr__(
             self, "block_slices", MappingProxyType(dict(block_slices or {}))
         )
@@ -215,6 +234,12 @@ class GaussianResult:
     @property
     def predictive_variance(self) -> np.ndarray:
         return _readonly_array(self._predictive_variance)
+
+    @property
+    def prediction_keys(self) -> pd.DataFrame | None:
+        if self._prediction_keys is None:
+            return None
+        return self._prediction_keys.copy(deep=True)
 
     @property
     def engine(self) -> str:
