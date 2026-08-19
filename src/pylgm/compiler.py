@@ -200,6 +200,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         )
     labels = _qualified_labels(blocks)
 
+    if model.offset is not None and model.offset not in frame.columns:
+        raise DataContractError(f"offset column not found: {model.offset!r}")
     offset = (
         frame[model.offset].to_numpy(dtype=float)
         if model.offset is not None
@@ -232,6 +234,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         compiled_likelihood = model.likelihood.materialize({})
         observed = panel.observed
         compiled_likelihood.validate_response(y[observed])
+        if not blocks:
+            raise CompilationError("model must contain at least one latent effect")
         width = sum(block.design.shape[1] for block in blocks)
         design = hstack([block.design for block in blocks], format="csr")
         precision = block_diag([block.precision for block in blocks], format="csr")

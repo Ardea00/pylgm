@@ -5,6 +5,7 @@ from scipy.sparse import csr_matrix
 from typing import cast
 
 from pylgm import Bernoulli, Fixed, LGM, Poisson
+from pylgm.effects import Predictor
 from pylgm.compiler import compile_gaussian_family, compile_lgm, compile_model
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
 from pylgm.config.schema import DataConfig, RunConfig
@@ -418,3 +419,17 @@ def test_compile_bernoulli_default_offset_is_zero():
     model = LGM("y", Bernoulli(), Fixed("1"), time="t")
     compiled = compile_lgm(model, _panel(frame))
     np.testing.assert_allclose(compiled.offset, [0.0, 0.0])
+
+
+def test_compile_rejects_missing_offset_column():
+    frame = pd.DataFrame({"t": [1, 2], "y": [1.0, 2.0]})
+    model = LGM("y", Poisson(), Fixed("1"), time="t", offset="does_not_exist")
+    with pytest.raises(DataContractError, match="offset column not found"):
+        compile_lgm(model, _panel(frame))
+
+
+def test_compile_rejects_empty_predictor_for_non_gaussian():
+    frame = pd.DataFrame({"t": [1, 2], "y": [1.0, 2.0]})
+    model = LGM("y", Poisson(), Predictor(()), time="t")
+    with pytest.raises(CompilationError, match="model must contain at least one latent effect"):
+        compile_lgm(model, _panel(frame))
