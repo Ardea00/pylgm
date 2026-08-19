@@ -7,7 +7,6 @@ import scipy.optimize
 
 from pylgm.exceptions import InferenceError, NumericalError, OptimizationError
 from pylgm.inference import GaussianResult, fit_gaussian
-from pylgm.ir import CompiledGaussianFamily
 from pylgm.optimization.result import EmpiricalBayesResult, OptimizationDiagnostics
 
 
@@ -61,18 +60,21 @@ class _Evaluation:
 
 
 def _validate_problem(
-    family: CompiledGaussianFamily,
+    family: object,
     bounds: Mapping[str, OptimizationBounds],
     initial: Mapping[str, float] | None,
 ) -> tuple[tuple[str, ...], dict[str, float]]:
-    if not isinstance(family, CompiledGaussianFamily):
-        raise TypeError("family must be a compiled Gaussian family")
+    parameter_names = getattr(family, "parameter_names", None)
+    if not isinstance(parameter_names, tuple) or not callable(
+        getattr(family, "materialize", None)
+    ):
+        raise TypeError("family must expose parameter_names and a materialize method")
     if not isinstance(bounds, Mapping):
         raise TypeError("bounds must be a mapping")
     names = tuple(bounds)
     if not names:
         raise OptimizationError("bounds must contain at least one parameter")
-    if set(names) != set(family.parameter_names):
+    if set(names) != set(parameter_names):
         raise ValueError("bounds must contain exactly the compiled family parameter names")
     for name in names:
         if not isinstance(bounds[name], OptimizationBounds):
@@ -132,7 +134,7 @@ def _log_bound_tolerance(lower: float, upper: float) -> float:
 
 
 def optimize_empirical_bayes(
-    family: CompiledGaussianFamily,
+    family: object,
     bounds: Mapping[str, OptimizationBounds],
     *,
     initial: Mapping[str, float] | None = None,

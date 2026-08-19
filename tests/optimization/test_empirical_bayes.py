@@ -6,17 +6,20 @@ import weakref
 import numpy as np
 import pytest
 from scipy.optimize import OptimizeResult
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, eye
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, OptimizationError
 from pylgm.inference import GaussianResult, fit_gaussian
+from pylgm.inference.laplace import fit_laplace
 from pylgm.ir import (
+    CompiledFamily,
     CompiledGaussianFamily,
     CompiledLGM,
     Hyperparameters,
     LatentBlock,
     ScalableBlock,
 )
+from pylgm.likelihoods import CompiledGaussian, CompiledPoisson
 from pylgm.optimization import (
     OptimizationBounds,
     optimize_empirical_bayes,
@@ -774,3 +777,44 @@ def test_result_and_diagnostics_expose_isolated_json_ready_snapshots() -> None:
     assert result.parameters["sigma"] != 99.0
     assert result.diagnostics.initial["sigma"] != 99.0
     assert len(result.to_dict()["fit"]["arrays_omitted"]) == 4
+
+
+def _unit_block(name: str) -> LatentBlock:
+    return LatentBlock(
+        name,
+        ("a", "b"),
+        csr_matrix(np.eye(2)),
+        eye(2, format="csr"),
+        np.empty((0, 2), dtype=float),
+    )
+
+
+def test_optimize_over_compiled_family_gaussian() -> None:
+    blocks = (ScalableBlock(_unit_block("g"), "g_prec", 1.0),)
+    family = CompiledFamily(
+        y=np.array([1.0, -1.0]),
+        observed=np.array([True, True]),
+        offset=np.zeros(2),
+        blocks=blocks,
+        parameter_names=("g_prec",),
+        likelihood_factory=lambda r: CompiledGaussian(1.0),
+    )
+    result = optimize_empirical_bayes(family, {"g_prec": OptimizationBounds(1.0, 1e-3, 1e3)})
+    assert result.diagnostics.converged
+    assert "g_prec" in result.parameters
+
+
+def test_optimize_over_laplace_family_converges() -> None:
+    blocks = (ScalableBlock(_unit_block("g"), "g_prec", 1.0),)
+    family = CompiledFamily(
+        y=np.array([2.0, 4.0]),
+        observed=np.array([True, True]),
+        offset=np.zeros(2),
+        blocks=blocks,
+        parameter_names=("g_prec",),
+        likelihood_factory=lambda r: CompiledPoisson(),
+    )
+    result = optimize_empirical_bayes(
+        family, {"g_prec": OptimizationBounds(1.0, 1e-3, 1e3)}, fit=fit_laplace
+    )
+    assert result.diagnostics.converged

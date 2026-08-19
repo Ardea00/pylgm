@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from pylgm.inference import GaussianResult
+from pylgm.inference import GaussianResult, LaplaceResult
 
 
 def _immutable_float_mapping(values: Mapping[str, float]) -> Mapping[str, float]:
@@ -61,13 +61,13 @@ class OptimizationDiagnostics:
 @dataclass(frozen=True, init=False)
 class EmpiricalBayesResult:
     parameters: Mapping[str, float]
-    fit: GaussianResult
+    fit: GaussianResult | LaplaceResult
     diagnostics: OptimizationDiagnostics
 
     def __init__(
         self,
         parameters: Mapping[str, float],
-        fit: GaussianResult,
+        fit: GaussianResult | LaplaceResult,
         diagnostics: OptimizationDiagnostics,
     ) -> None:
         object.__setattr__(self, "parameters", _immutable_float_mapping(parameters))
