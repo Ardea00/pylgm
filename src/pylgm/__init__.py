@@ -2,7 +2,7 @@
 
 from pylgm.effects import Fixed, IID, RW1, RW2
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
-from pylgm.likelihoods import Gaussian
+from pylgm.likelihoods import Bernoulli, Gaussian, Poisson
 from pylgm.model import LGM
 from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
@@ -11,6 +11,7 @@ from pylgm.priors import GaussianPrior, PCPrecision
 __version__ = "0.3.0"
 
 __all__ = [
+    "Bernoulli",
     "CandidateFailure",
     "ComparisonResult",
     "Experiment",
@@ -23,6 +24,7 @@ __all__ = [
     "LGM",
     "PCPrecision",
     "Pipeline",
+    "Poisson",
     "RW1",
     "RW2",
     "__version__",

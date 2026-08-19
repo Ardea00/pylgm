@@ -92,3 +92,60 @@ def test_pc_precision_extreme_scales_never_warn_or_return_nan():
     assert math.isfinite(representable_tail)
     assert representable_tail < 0.0
     assert underflowed_density == -math.inf
+
+
+# Tests for Poisson and Bernoulli likelihoods with GLM protocol
+import pytest
+
+from pylgm import Bernoulli, Poisson
+from pylgm.exceptions import DataContractError
+
+
+def test_poisson_glm_pieces():
+    like = Poisson().materialize({})
+    assert like.link.name == "log"
+    eta = np.array([0.0, np.log(2.0)])
+    y = np.array([1.0, 3.0])
+    np.testing.assert_allclose(like.response_mean(eta), [1.0, 2.0])
+    np.testing.assert_allclose(like.gradient(eta, y), y - np.exp(eta))   # y - mu
+    np.testing.assert_allclose(like.working_weights(eta, y), np.exp(eta))  # mu
+    # log-normal predictive mean for the log link
+    np.testing.assert_allclose(
+        like.response_prediction(np.array([0.0]), np.array([2.0])), [np.exp(1.0)]
+    )
+
+
+def test_poisson_rejects_non_count_response():
+    like = Poisson().materialize({})
+    with pytest.raises(DataContractError, match="non-negative integer"):
+        like.validate_response(np.array([1.0, -2.0]))
+    with pytest.raises(DataContractError, match="non-negative integer"):
+        like.validate_response(np.array([1.5]))
+
+
+def test_bernoulli_glm_pieces():
+    like = Bernoulli().materialize({})
+    assert like.link.name == "logit"
+    eta = np.array([0.0])
+    y = np.array([1.0])
+    np.testing.assert_allclose(like.response_mean(eta), [0.5])
+    np.testing.assert_allclose(like.gradient(eta, y), [0.5])       # y - p
+    np.testing.assert_allclose(like.working_weights(eta, y), [0.25])  # p(1-p)
+
+
+def test_bernoulli_rejects_non_binary_response():
+    like = Bernoulli().materialize({})
+    with pytest.raises(DataContractError, match="0 or 1"):
+        like.validate_response(np.array([0.0, 2.0]))
+
+
+def test_compiled_gaussian_satisfies_glm_protocol():
+    from pylgm.likelihoods import CompiledGaussian
+
+    like = CompiledGaussian(2.0)  # sigma=2 -> variance 4
+    assert like.link.name == "identity"
+    eta = np.array([1.0, 2.0])
+    y = np.array([3.0, 2.0])
+    np.testing.assert_allclose(like.gradient(eta, y), (y - eta) / 4.0)
+    np.testing.assert_allclose(like.working_weights(eta, y), [0.25, 0.25])
+    np.testing.assert_allclose(like.response_mean(eta), eta)
