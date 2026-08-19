@@ -38,6 +38,21 @@ def _readonly_diagnostics(value: Mapping[str, object]) -> Mapping[str, object]:
     return MappingProxyType(result)
 
 
+def _readonly_hyperparameters(values):
+    if values is None:
+        return None
+    if not isinstance(values, Mapping):
+        raise TypeError("hyperparameters must be a mapping")
+    resolved = {}
+    for name, value in values.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError("hyperparameter names must be non-empty strings")
+        resolved[name] = float(value)
+        if not np.isfinite(resolved[name]):
+            raise ValueError("hyperparameter values must be finite")
+    return MappingProxyType(resolved)
+
+
 def _normalized_numpy_scalar(value: np.generic) -> object:
     kind = value.dtype.kind
     if kind == "b":
@@ -222,6 +237,7 @@ class GaussianResult:
     _prediction_keys: pd.DataFrame | None = field(repr=False)
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
+    _hyperparameters: Mapping[str, float] | None = field(repr=False)
 
     def __init__(
         self,
@@ -234,6 +250,8 @@ class GaussianResult:
         block_slices: Mapping[str, slice] | None = None,
         diagnostics: Mapping[str, object] | None = None,
         prediction_keys: pd.DataFrame | None = None,
+        *,
+        hyperparameters: Mapping[str, float] | None = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -266,6 +284,9 @@ class GaussianResult:
             "diagnostics",
             _readonly_diagnostics(diagnostics if diagnostics is not None else {}),
         )
+        object.__setattr__(
+            self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
+        )
 
     @property
     def mean(self) -> np.ndarray:
@@ -288,6 +309,10 @@ class GaussianResult:
         if self._prediction_keys is None:
             return None
         return self._prediction_keys.copy(deep=True)
+
+    @property
+    def hyperparameters(self) -> Mapping[str, float] | None:
+        return self._hyperparameters
 
     @property
     def engine(self) -> str:
@@ -337,6 +362,7 @@ class LaplaceResult:
     _prediction_keys: pd.DataFrame | None = field(repr=False)
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
+    _hyperparameters: Mapping[str, float] | None = field(repr=False)
 
     def __init__(
         self,
@@ -351,6 +377,8 @@ class LaplaceResult:
         block_slices: Mapping[str, slice] | None = None,
         diagnostics: Mapping[str, object] | None = None,
         prediction_keys: pd.DataFrame | None = None,
+        *,
+        hyperparameters: Mapping[str, float] | None = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -385,6 +413,9 @@ class LaplaceResult:
             "diagnostics",
             _readonly_diagnostics(diagnostics if diagnostics is not None else {}),
         )
+        object.__setattr__(
+            self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
+        )
 
     @property
     def mean(self) -> np.ndarray:
@@ -412,6 +443,10 @@ class LaplaceResult:
         if self._prediction_keys is None:
             return None
         return self._prediction_keys.copy(deep=True)
+
+    @property
+    def hyperparameters(self) -> Mapping[str, float] | None:
+        return self._hyperparameters
 
     @property
     def engine(self) -> str:

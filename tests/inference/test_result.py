@@ -381,3 +381,33 @@ def test_laplace_result_prediction_keys_defensive_copy():
     result = _laplace(prediction_keys=keys)
     keys.loc[0, "region"] = "mutated"
     assert result.prediction_keys["region"].tolist() == ["A", "B"]
+
+
+def test_gaussian_result_hyperparameters_defaults_none_and_is_readonly():
+    result = GaussianResult(
+        labels=("x",), mean=np.array([0.0]), covariance=np.eye(1),
+        log_marginal_likelihood=0.0, predictive_mean=np.array([1.0]),
+        predictive_variance=np.array([1.0]),
+    )
+    assert result.hyperparameters is None
+    result2 = GaussianResult(
+        labels=("x",), mean=np.array([0.0]), covariance=np.eye(1),
+        log_marginal_likelihood=0.0, predictive_mean=np.array([1.0]),
+        predictive_variance=np.array([1.0]), hyperparameters={"p": 2.0},
+    )
+    exposed = result2.hyperparameters
+    assert exposed == {"p": 2.0}
+    with pytest.raises(Exception):
+        exposed["p"] = 9.0  # read-only mapping
+    assert result2.hyperparameters["p"] == 2.0
+
+
+def test_laplace_result_hyperparameters_defaults_none_and_is_readonly():
+    result = _laplace()
+    assert result.hyperparameters is None
+    result2 = _laplace(hyperparameters={"alpha": 1.5})
+    exposed = result2.hyperparameters
+    assert exposed == {"alpha": 1.5}
+    with pytest.raises(Exception):
+        exposed["alpha"] = 9.0  # read-only mapping
+    assert result2.hyperparameters["alpha"] == 1.5
