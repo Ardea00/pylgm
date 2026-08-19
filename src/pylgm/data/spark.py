@@ -48,6 +48,8 @@ def _validate_max_driver_rows(max_driver_rows: int | None) -> int | None:
 
 def _required_columns(model) -> set[str]:
     required = {model.response, *model.panel, model.time}
+    if getattr(model, "offset", None) is not None:
+        required.add(model.offset)
     for effect in model.predictor.effects:
         if isinstance(effect, Fixed):
             required.update(Formula(effect.formula).required_variables)

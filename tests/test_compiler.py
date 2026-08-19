@@ -4,13 +4,15 @@ import pytest
 from scipy.sparse import csr_matrix
 from typing import cast
 
-from pylgm.compiler import compile_gaussian_family, compile_model
+from pylgm import Bernoulli, Fixed, LGM, Poisson
+from pylgm.compiler import compile_gaussian_family, compile_lgm, compile_model
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
-from pylgm.config.schema import RunConfig
+from pylgm.config.schema import DataConfig, RunConfig
 from pylgm.data import CanonicalPanel
 from pylgm.evaluation import build_fold_definitions, materialize_fold
 from pylgm.exceptions import CompilationError, DataContractError
 from pylgm.ir import LatentBlock
+from pylgm.likelihoods import CompiledPoisson
 
 
 def test_compiler_assembles_named_blocks() -> None:
@@ -390,3 +392,29 @@ def test_unexpected_effect_builder_failures_propagate(
     monkeypatch.setattr("pylgm.compiler.build_iid", broken_effect)
     with pytest.raises(type(error), match="effect"):
         compile_model(config, panel)
+
+
+def _panel(frame):
+    return CanonicalPanel.from_frame(frame, DataConfig(time="t", response="y", panel=()))
+
+
+def test_compile_poisson_uses_non_gaussian_likelihood_and_offset():
+    frame = pd.DataFrame({"t": [1, 2, 3], "x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 4.0], "logexp": [0.0, 0.1, 0.2]})
+    model = LGM("y", Poisson(), Fixed("1 + x"), time="t", offset="logexp")
+    compiled = compile_lgm(model, _panel(frame))
+    assert isinstance(compiled.likelihood, CompiledPoisson)
+    np.testing.assert_allclose(compiled.offset, [0.0, 0.1, 0.2])
+
+
+def test_compile_poisson_rejects_non_count_response():
+    frame = pd.DataFrame({"t": [1, 2], "y": [1.0, 1.5]})
+    model = LGM("y", Poisson(), Fixed("1"), time="t")
+    with pytest.raises(DataContractError, match="non-negative integer"):
+        compile_lgm(model, _panel(frame))
+
+
+def test_compile_bernoulli_default_offset_is_zero():
+    frame = pd.DataFrame({"t": [1, 2], "y": [0.0, 1.0]})
+    model = LGM("y", Bernoulli(), Fixed("1"), time="t")
+    compiled = compile_lgm(model, _panel(frame))
+    np.testing.assert_allclose(compiled.offset, [0.0, 0.0])

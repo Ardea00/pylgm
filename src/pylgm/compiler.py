@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from formulaic.errors import FormulaicError
+from scipy.sparse import block_diag, hstack
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
@@ -9,8 +10,8 @@ from pylgm.data import CanonicalPanel
 from pylgm.effects import Fixed, IID, RW1, build_fixed, build_iid, build_random_walk
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
 from pylgm.ir import CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
-from pylgm.ir.model import LatentBlock
-from pylgm.likelihoods import Gaussian
+from pylgm.ir.model import LatentBlock, _block_constraints
+from pylgm.likelihoods import Bernoulli, Gaussian, Poisson
 from pylgm.parameters import Hyperparameter
 
 if TYPE_CHECKING:
@@ -197,23 +198,57 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         raise CompilationError(
             f"latent block design row count does not match the panel: {wrong_rows}"
         )
-    _qualified_labels(blocks)
-    if not isinstance(model.likelihood, Gaussian):
-        raise CompilationError("exact Gaussian compilation requires a Gaussian likelihood")
-    sigma = (
-        model.likelihood.sigma.initial
-        if isinstance(model.likelihood.sigma, Hyperparameter)
-        else model.likelihood.sigma
+    labels = _qualified_labels(blocks)
+
+    offset = (
+        frame[model.offset].to_numpy(dtype=float)
+        if model.offset is not None
+        else np.zeros(len(frame))
     )
-    try:
-        family = CompiledGaussianFamily(
-            y=frame[panel.response].fillna(0.0).to_numpy(dtype=float),
-            observed=panel.observed,
-            offset=np.zeros(len(frame)),
-            blocks=tuple(ScalableBlock(block, None, 1.0) for block in blocks),
-            parameter_names=(),
-            initial=Hyperparameters(sigma=sigma, precisions=precisions),
+    if not np.isfinite(offset).all():
+        raise CompilationError("offset column must be finite")
+    y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
+
+    if isinstance(model.likelihood, Gaussian):
+        sigma = (
+            model.likelihood.sigma.initial
+            if isinstance(model.likelihood.sigma, Hyperparameter)
+            else model.likelihood.sigma
         )
-        return family.materialize({})
-    except (TypeError, ValueError) as error:
-        raise CompilationError(f"compiled declarative model is invalid: {error}") from error
+        try:
+            family = CompiledGaussianFamily(
+                y=y,
+                observed=panel.observed,
+                offset=offset,
+                blocks=tuple(ScalableBlock(block, None, 1.0) for block in blocks),
+                parameter_names=(),
+                initial=Hyperparameters(sigma=sigma, precisions=precisions),
+            )
+            return family.materialize({})
+        except (TypeError, ValueError) as error:
+            raise CompilationError(f"compiled declarative model is invalid: {error}") from error
+
+    if isinstance(model.likelihood, (Poisson, Bernoulli)):
+        compiled_likelihood = model.likelihood.materialize({})
+        observed = panel.observed
+        compiled_likelihood.validate_response(y[observed])
+        width = sum(block.design.shape[1] for block in blocks)
+        design = hstack([block.design for block in blocks], format="csr")
+        precision = block_diag([block.precision for block in blocks], format="csr")
+        constraints = _block_constraints(tuple(blocks), width)
+        try:
+            return CompiledLGM(
+                y=y,
+                observed=observed,
+                offset=offset,
+                design=design,
+                precision=precision,
+                constraints=constraints,
+                labels=labels,
+                likelihood=compiled_likelihood,
+                blocks=tuple(blocks),
+            )
+        except (TypeError, ValueError, ModelValidationError) as error:
+            raise CompilationError(f"compiled declarative model is invalid: {error}") from error
+
+    raise CompilationError("unsupported likelihood for declarative compilation")

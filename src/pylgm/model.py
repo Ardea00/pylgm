@@ -41,6 +41,7 @@ class LGM:
     predictor: Predictor | Fixed | IID | RW1 | RW2
     panel: tuple[str, ...] = ()
     time: str | None = None
+    offset: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.response, str) or not self.response:
@@ -57,6 +58,8 @@ class LGM:
             raise ValueError("panel columns must be non-empty strings")
         if self.time is not None and (not isinstance(self.time, str) or not self.time):
             raise ValueError("time must be a non-empty string or None")
+        if self.offset is not None and (not isinstance(self.offset, str) or not self.offset):
+            raise ValueError("offset must be a non-empty string or None")
         object.__setattr__(self, "panel", panel)
 
     def fit(
