@@ -147,3 +147,23 @@ def test_compiled_gaussian_satisfies_glm_protocol():
     np.testing.assert_allclose(like.gradient(eta, y), (y - eta) / 4.0)
     np.testing.assert_allclose(like.working_weights(eta, y), [0.25, 0.25])
     np.testing.assert_allclose(like.response_mean(eta), eta)
+
+
+def test_hyperparameter_default_bounds_bracket_initial():
+    hp = Hyperparameter("p", initial=2.0)
+    assert hp.lower == pytest.approx(2.0e-3)
+    assert hp.upper == pytest.approx(2.0e3)
+
+
+def test_hyperparameter_explicit_bounds():
+    hp = Hyperparameter("p", initial=1.0, lower=0.1, upper=10.0)
+    assert (hp.lower, hp.upper) == (0.1, 10.0)
+
+
+def test_hyperparameter_rejects_bounds_not_bracketing_initial():
+    with pytest.raises(ValueError, match="lower"):
+        Hyperparameter("p", initial=1.0, lower=2.0)
+    with pytest.raises(ValueError, match="upper"):
+        Hyperparameter("p", initial=1.0, upper=0.5)
+    with pytest.raises(ValueError):
+        Hyperparameter("p", initial=1.0, lower=-1.0)

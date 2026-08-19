@@ -32,6 +32,8 @@ class Hyperparameter:
     initial: float
     prior: Prior | None = None
     transform: Literal["identity", "log"] = "log"
+    lower: float | None = None
+    upper: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -41,3 +43,11 @@ class Hyperparameter:
             raise ValueError("prior must provide a logpdf method")
         if self.transform not in ("identity", "log"):
             raise ValueError("transform must be 'identity' or 'log'")
+        lower = self.initial * 1e-3 if self.lower is None else _positive_real(self.lower, "lower")
+        upper = self.initial * 1e3 if self.upper is None else _positive_real(self.upper, "upper")
+        if not lower < self.initial:
+            raise ValueError("lower bound must be below initial")
+        if not self.initial < upper:
+            raise ValueError("upper bound must be above initial")
+        object.__setattr__(self, "lower", lower)
+        object.__setattr__(self, "upper", upper)
