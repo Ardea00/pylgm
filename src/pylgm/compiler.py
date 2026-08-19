@@ -9,9 +9,9 @@ from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import Fixed, IID, RW1, build_fixed, build_iid, build_random_walk
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
-from pylgm.ir import CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
+from pylgm.ir import CompiledFamily, CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
 from pylgm.ir.model import LatentBlock, _block_constraints
-from pylgm.likelihoods import Bernoulli, Gaussian, Poisson
+from pylgm.likelihoods import Bernoulli, CompiledGaussian, Gaussian, Poisson
 from pylgm.parameters import Hyperparameter
 
 if TYPE_CHECKING:
@@ -256,3 +256,74 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
     raise CompilationError("unsupported likelihood for declarative compilation")
+
+
+def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
+    """Return (target_name, Hyperparameter) pairs declared on the model."""
+    found: list[tuple[str, Hyperparameter]] = []
+    if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
+        found.append(("sigma", model.likelihood.sigma))
+    for effect in model.predictor.effects:
+        precision = getattr(effect, "precision", None)
+        if isinstance(precision, Hyperparameter):
+            found.append((effect.name, precision))
+    return found
+
+
+def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
+    """Build an optimisable family, or None when no Hyperparameter is declared."""
+    if not _model_hyperparameters(model):
+        return None
+    frame = panel.frame
+    offset = (
+        frame[model.offset].to_numpy(dtype=float)
+        if model.offset is not None
+        else np.zeros(len(frame))
+    )
+    y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
+
+    scalable: list[ScalableBlock] = []
+    parameter_names: list[str] = []
+    for effect in model.predictor.effects:
+        if isinstance(effect, Fixed):
+            block = build_fixed(frame, effect.formula, effect.prior_precision)
+            scalable.append(ScalableBlock(block, None, 1.0))
+            continue
+        precision = effect.precision
+        optimized = isinstance(precision, Hyperparameter)
+        value = 1.0 if optimized else precision
+        if isinstance(effect, IID):
+            block = build_iid(frame, effect.name, effect.index, value)
+        else:
+            order = 1 if isinstance(effect, RW1) else 2
+            block = build_random_walk(frame, effect.name, effect.index, value, order)
+        scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+        if optimized:
+            parameter_names.append(precision.name)
+
+    if isinstance(model.likelihood, Gaussian):
+        sigma = model.likelihood.sigma
+        if isinstance(sigma, Hyperparameter):
+            parameter_names.append(sigma.name)
+            sigma_name = sigma.name
+
+            def factory(resolved: dict, sigma_name: str = sigma_name) -> CompiledGaussian:
+                return CompiledGaussian(resolved[sigma_name])
+        else:
+
+            def factory(resolved: dict, sigma: float = sigma) -> CompiledGaussian:
+                return CompiledGaussian(sigma)
+    else:
+        likelihood = model.likelihood
+
+        def factory(resolved: dict, likelihood: object = likelihood) -> object:
+            return likelihood.materialize({})
+
+    return CompiledFamily(
+        y=y,
+        observed=panel.observed,
+        offset=offset,
+        blocks=tuple(scalable),
+        parameter_names=tuple(parameter_names),
+        likelihood_factory=factory,
+    )

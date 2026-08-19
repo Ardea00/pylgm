@@ -4,16 +4,17 @@ import pytest
 from scipy.sparse import csr_matrix
 from typing import cast
 
-from pylgm import Bernoulli, Fixed, LGM, Poisson
+from pylgm import Bernoulli, Fixed, Gaussian, IID, LGM, Poisson
 from pylgm.effects import Predictor
-from pylgm.compiler import compile_gaussian_family, compile_lgm, compile_model
+from pylgm.compiler import compile_family, compile_gaussian_family, compile_lgm, compile_model
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
 from pylgm.config.schema import DataConfig, RunConfig
 from pylgm.data import CanonicalPanel
 from pylgm.evaluation import build_fold_definitions, materialize_fold
 from pylgm.exceptions import CompilationError, DataContractError
-from pylgm.ir import LatentBlock
+from pylgm.ir import CompiledFamily, LatentBlock
 from pylgm.likelihoods import CompiledPoisson
+from pylgm.parameters import Hyperparameter
 
 
 def test_compiler_assembles_named_blocks() -> None:
@@ -433,3 +434,23 @@ def test_compile_rejects_empty_predictor_for_non_gaussian():
     model = LGM("y", Poisson(), Predictor(()), time="t")
     with pytest.raises(CompilationError, match="model must contain at least one latent effect"):
         compile_lgm(model, _panel(frame))
+
+
+def test_compile_family_returns_none_without_hyperparameters():
+    frame = pd.DataFrame({"t": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
+    model = LGM("y", Gaussian(1.0), Fixed("1"), time="t")
+    assert compile_family(model, _panel(frame)) is None
+
+
+def test_compile_family_binds_declared_hyperparameters():
+    frame = pd.DataFrame({"t": [1, 2, 3, 4], "region": ["a", "a", "b", "b"], "y": [1.0, 2.0, 3.0, 4.0]})
+    model = LGM(
+        "y", Gaussian(1.0),
+        Fixed("1") + IID("region", index="region", precision=Hyperparameter("region_prec", initial=1.0)),
+        panel=("region",), time="t",
+    )
+    family = compile_family(model, CanonicalPanel.from_frame(frame, DataConfig(time="t", response="y", panel=("region",))))
+    assert isinstance(family, CompiledFamily)
+    assert family.parameter_names == ("region_prec",)
+    compiled = family.materialize({"region_prec": 2.0})
+    assert compiled.y.shape[0] == 4

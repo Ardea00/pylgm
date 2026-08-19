@@ -1,5 +1,6 @@
 """Declarative latent Gaussian model API."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,40 +12,62 @@ from pylgm.effects import Fixed, IID, Predictor, RW1, RW2
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
 from pylgm.inference import GaussianResult, LaplaceResult, fit_gaussian, fit_laplace
 from pylgm.likelihoods import Gaussian
+from pylgm.optimization.empirical_bayes import OptimizationBounds, optimize_empirical_bayes
 
 
 _ROW_KEY = "__pylgm_row__"
 
 
-def _align_predictions_with_source_rows(
-    result: GaussianResult | LaplaceResult, source_positions: np.ndarray
+def _rebuild_result(
+    result: GaussianResult | LaplaceResult,
+    *,
+    caller_order: np.ndarray | None = None,
+    prediction_keys: pd.DataFrame | None = None,
+    hyperparameters: Mapping[str, float] | None = None,
+    diagnostics: Mapping[str, object] | None = None,
 ) -> GaussianResult | LaplaceResult:
-    caller_order = np.argsort(source_positions)
-    if isinstance(result, LaplaceResult):
-        return LaplaceResult(
-            labels=result.labels,
-            mean=result.mean,
-            covariance=result.covariance,
-            log_marginal_likelihood=result.log_marginal_likelihood,
-            predictive_mean=result.predictive_mean[caller_order],
-            predictive_variance=result.predictive_variance[caller_order],
-            fitted_mean=result.fitted_mean[caller_order],
-            link_name=result.link_name,
-            block_slices=result.block_slices,
-            diagnostics=result.diagnostics,
-            prediction_keys=result.prediction_keys,
-        )
-    return GaussianResult(
+    """Rebuild a result of the same type, optionally reordering rows or overriding metadata.
+
+    Any override left as ``None`` carries the corresponding value forward from ``result``
+    unchanged, so callers only pass what they mean to change.
+    """
+    predictive_mean = result.predictive_mean
+    predictive_variance = result.predictive_variance
+    if caller_order is not None:
+        predictive_mean = predictive_mean[caller_order]
+        predictive_variance = predictive_variance[caller_order]
+    common = dict(
         labels=result.labels,
         mean=result.mean,
         covariance=result.covariance,
         log_marginal_likelihood=result.log_marginal_likelihood,
-        predictive_mean=result.predictive_mean[caller_order],
-        predictive_variance=result.predictive_variance[caller_order],
+        predictive_mean=predictive_mean,
+        predictive_variance=predictive_variance,
         block_slices=result.block_slices,
-        diagnostics=result.diagnostics,
-        prediction_keys=result.prediction_keys,
+        diagnostics=diagnostics if diagnostics is not None else result.diagnostics,
+        prediction_keys=prediction_keys if prediction_keys is not None else result.prediction_keys,
+        hyperparameters=hyperparameters if hyperparameters is not None else result.hyperparameters,
     )
+    if isinstance(result, LaplaceResult):
+        fitted_mean = (
+            result.fitted_mean[caller_order] if caller_order is not None else result.fitted_mean
+        )
+        return LaplaceResult(fitted_mean=fitted_mean, link_name=result.link_name, **common)
+    return GaussianResult(**common)
+
+
+def _align_predictions_with_source_rows(
+    result: GaussianResult | LaplaceResult, source_positions: np.ndarray
+) -> GaussianResult | LaplaceResult:
+    return _rebuild_result(result, caller_order=np.argsort(source_positions))
+
+
+def _attach_estimates(
+    result: GaussianResult | LaplaceResult,
+    hyperparameters: Mapping[str, float],
+    diagnostics: Mapping[str, object],
+) -> GaussianResult | LaplaceResult:
+    return _rebuild_result(result, hyperparameters=hyperparameters, diagnostics=diagnostics)
 
 
 @dataclass(frozen=True)
@@ -119,6 +142,23 @@ class LGM:
             )
         return fit
 
+    def _run_empirical_bayes(self, family, engine: str) -> GaussianResult | LaplaceResult:
+        from pylgm.compiler import _model_hyperparameters
+
+        fit = self._engine(engine)
+        bounds = {}
+        initial = {}
+        for _, hyperparameter in _model_hyperparameters(self):
+            bounds[hyperparameter.name] = OptimizationBounds(
+                hyperparameter.initial, hyperparameter.lower, hyperparameter.upper
+            )
+            initial[hyperparameter.name] = hyperparameter.initial
+        eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit)
+        diagnostics = dict(eb.fit.diagnostics)
+        diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
+        diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
+        return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
+
     def _fit_pandas(self, frame: pd.DataFrame, engine: str) -> GaussianResult | LaplaceResult:
         prepared = frame.copy(deep=True)
         time = self.time
@@ -131,10 +171,14 @@ class LGM:
         data = DataConfig(time=time, response=self.response, panel=self.panel)
         panel = CanonicalPanel.from_frame(prepared, data)
 
-        from pylgm.compiler import compile_lgm
+        from pylgm.compiler import compile_family, compile_lgm
 
-        compiled = compile_lgm(self, panel)
-        result = self._engine(engine)(compiled)
+        family = compile_family(self, panel)
+        if family is None:
+            compiled = compile_lgm(self, panel)
+            result = self._engine(engine)(compiled)
+        else:
+            result = self._run_empirical_bayes(family, engine)
         return _align_predictions_with_source_rows(result, panel.source_positions)
 
     def _fit_spark(
@@ -144,35 +188,15 @@ class LGM:
 
         canonical = canonicalize_spark_frame(frame, self, max_driver_rows=max_driver_rows)
 
-        from pylgm.compiler import compile_lgm
+        from pylgm.compiler import compile_family, compile_lgm
 
-        compiled = compile_lgm(self, canonical.panel)
-        result = self._engine(engine)(compiled)
-        if isinstance(result, LaplaceResult):
-            return LaplaceResult(
-                labels=result.labels,
-                mean=result.mean,
-                covariance=result.covariance,
-                log_marginal_likelihood=result.log_marginal_likelihood,
-                predictive_mean=result.predictive_mean,
-                predictive_variance=result.predictive_variance,
-                fitted_mean=result.fitted_mean,
-                link_name=result.link_name,
-                block_slices=result.block_slices,
-                diagnostics=result.diagnostics,
-                prediction_keys=canonical.prediction_keys,
-            )
-        return GaussianResult(
-            labels=result.labels,
-            mean=result.mean,
-            covariance=result.covariance,
-            log_marginal_likelihood=result.log_marginal_likelihood,
-            predictive_mean=result.predictive_mean,
-            predictive_variance=result.predictive_variance,
-            block_slices=result.block_slices,
-            diagnostics=result.diagnostics,
-            prediction_keys=canonical.prediction_keys,
-        )
+        family = compile_family(self, canonical.panel)
+        if family is None:
+            compiled = compile_lgm(self, canonical.panel)
+            result = self._engine(engine)(compiled)
+        else:
+            result = self._run_empirical_bayes(family, engine)
+        return _rebuild_result(result, prediction_keys=canonical.prediction_keys)
 
 
 __all__ = ["LGM"]

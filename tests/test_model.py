@@ -256,3 +256,44 @@ def test_lgm_rejects_engine_likelihood_mismatch():
         LGM("y", Gaussian(1.0), Fixed("1"), time="t").fit(frame, engine="laplace")
     with pytest.raises(UnsupportedEngineError, match="non-Gaussian"):
         LGM("y", Poisson(), Fixed("1"), time="t").fit(frame, engine="exact_gaussian")
+
+
+def test_gaussian_empirical_bayes_estimates_precision():
+    rng = np.random.default_rng(0)
+    regions = ["a", "b", "c", "d"]
+    rows = []
+    for t in range(1, 21):
+        for r in regions:
+            rows.append({"region": r, "t": t, "y": rng.normal()})
+    frame = pd.DataFrame(rows)
+    model = LGM(
+        "y", Gaussian(0.5),
+        Fixed("1") + IID("region", index="region",
+                         precision=Hyperparameter("region_prec", initial=1.0)),
+        panel=("region",), time="t",
+    )
+    result = model.fit(frame, engine="exact_gaussian")
+    assert result.hyperparameters is not None
+    assert "region_prec" in result.hyperparameters
+    assert result.hyperparameters["region_prec"] > 0
+    assert result.diagnostics["empirical_bayes_converged"] is True
+
+
+def test_poisson_empirical_bayes_runs_via_laplace():
+    rows = [{"region": r, "t": t, "y": float((t + (r == "b")) % 5)}
+            for t in range(1, 16) for r in ["a", "b"]]
+    frame = pd.DataFrame(rows)
+    model = LGM(
+        "y", Poisson(),
+        Fixed("1") + IID("region", index="region",
+                         precision=Hyperparameter("region_prec", initial=1.0)),
+        panel=("region",), time="t",
+    )
+    result = model.fit(frame, engine="laplace")
+    assert result.hyperparameters is not None and result.hyperparameters["region_prec"] > 0
+
+
+def test_no_hyperparameter_model_has_none_hyperparameters():
+    frame = pd.DataFrame({"t": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
+    result = LGM("y", Gaussian(1.0), Fixed("1"), time="t").fit(frame)
+    assert result.hyperparameters is None
