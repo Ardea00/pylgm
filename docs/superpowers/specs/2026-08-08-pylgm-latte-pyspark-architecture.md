@@ -177,11 +177,22 @@ complete in 0.3.
 
 ### 2. Non-Gaussian LGM
 
-- Poisson, Binomial, and Bernoulli likelihoods;
-- identity, log, and logit links;
-- offsets, exposures, and weights;
-- latent-mode optimization and Laplace approximation;
-- fast inference at the hyperparameter mode.
+The Laplace core of this slice has shipped: `Poisson()` (canonical log link)
+and `Bernoulli()` (canonical logit link) likelihoods, an `LGM.offset` column
+added to the linear predictor before the link, and a Newton-Raphson
+`engine="laplace"` mode-finder dispatched through `LGM.fit`, exposed through
+both the Python and YAML frontends and the existing Pandas/PySpark data
+boundary. It fits at **fixed plug-in hyperparameters** (declared effect
+precisions are conditioned on, not integrated); `result.fitted_mean` is exact
+for the log link and a documented point estimate for the logit link. Still
+deferred:
+
+- Binomial(n) likelihood;
+- non-canonical links;
+- exposures and observation weights;
+- empirical-Bayes hyperparameter optimization at the Laplace mode;
+- INLA-style numerical integration over hyperparameters;
+- spatial effects.
 
 ### 3. INLA-style inference
 

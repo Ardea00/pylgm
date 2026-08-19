@@ -2,11 +2,12 @@
 
 General-purpose latent Gaussian modeling foundations for Python.
 
-Version 0.3 is a bounded foundation release: its only stable inference engine
-is exact Gaussian, and its declarative runtime accepts Pandas data. It provides
-`LGM`, Gaussian likelihoods, fixed/IID/RW1/RW2 effects, fit-row predictions,
-posterior marginals, and linear combinations. Schema-v1 and schema-v2
-forecasting interfaces remain available for compatibility.
+Version 0.3 is a bounded foundation release: its stable inference engines are
+exact Gaussian and Laplace (fixed plug-in hyperparameters), and its
+declarative runtime accepts Pandas and Spark data. It provides `LGM`,
+Gaussian/Poisson/Bernoulli likelihoods, fixed/IID/RW1/RW2 effects, fit-row
+predictions, posterior marginals, and linear combinations. Schema-v1 and
+schema-v2 forecasting interfaces remain available for compatibility.
 
 See the [approved Latte-parity and PySpark architecture](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md)
 for the explicitly labeled target state and staged roadmap. It is not the 0.3
@@ -38,6 +39,47 @@ INLA, spatial effects, and HMC are deferred to later slices. Optional PySpark
 input is now supported as a data boundary (see below). Pandas predictions in 0.3
 cover the rows supplied to `LGM.fit`; their arrays follow the caller's original
 row order.
+
+## Non-Gaussian likelihoods (Laplace)
+
+`Poisson()` (canonical log link) and `Bernoulli()` (canonical logit link) fit
+through a dedicated `engine="laplace"` Newton-Raphson mode-finder; the Gaussian
+likelihood keeps using `engine="exact_gaussian"` and `LGM.fit` rejects the
+mismatched engine/likelihood combination:
+
+```python
+from pylgm import Fixed, IID, LGM, Poisson
+
+model = LGM(
+    response="claims",
+    likelihood=Poisson(),
+    predictor=Fixed("1 + x") + IID("region_effect", index="region", precision=2.0),
+    panel=("region",),
+    time="time",
+    offset="log_exposure",
+)
+result = model.fit(frame, engine="laplace")
+```
+
+`LGM.offset` names an optional column added directly to the linear predictor
+`eta` before the link (e.g. a log-exposure column for a Poisson rate model);
+it is not itself modeled. The YAML frontend exposes the same vocabulary:
+`likelihood: {family: poisson}` / `{family: bernoulli}` and a top-level
+`offset: <col>`. `family: gaussian` still requires `sigma`; `poisson` and
+`bernoulli` forbid it, since they have no free dispersion parameter.
+
+The Laplace engine uses **fixed plug-in hyperparameters** — the declared
+effect precisions are conditioned on, not integrated over; empirical-Bayes
+and INLA-style hyperparameter inference are deferred to a later slice.
+`result.fitted_mean` is the response-scale prediction, and its meaning
+depends on the link: for the Poisson **log link** it is the exact lognormal
+expectation `exp(mean + variance / 2)` of the linear predictor; for the
+Bernoulli **logit link** there is no closed form, so it is a documented
+**point estimate** `logit^-1(mean)` that ignores the linear-predictor
+variance. A runnable example lives at
+[`examples/count_glm/README.md`](examples/count_glm/README.md), including the
+Spark data-boundary path (Spark only collects and canonicalizes data; the
+Laplace fit itself still runs on the driver, same as `exact_gaussian`).
 
 ## Development installation
 

@@ -193,3 +193,22 @@ def test_spark_and_pandas_compile_to_equal_panels(spark):
     assert (
         spark_compiled.precision.toarray() == pandas_compiled.precision.toarray()
     ).all()
+
+
+def test_spark_laplace_matches_sorted_pandas(spark):
+    import numpy as np
+    import pandas as pd
+
+    from pylgm import Fixed, LGM, Poisson
+
+    rows = [("B", 2, 4.0, 5.0), ("A", 1, 1.0, 1.0), ("B", 1, 3.0, 3.0), ("A", 2, 2.0, 2.0)]
+    columns = ["region", "time", "x", "y"]
+    model = LGM("y", Poisson(), Fixed("1 + x"), panel=("region",), time="time")
+    spark_result = model.fit(spark.createDataFrame(rows, columns), engine="laplace")
+    pandas_result = model.fit(
+        pd.DataFrame(rows, columns=columns).sort_values(["region", "time"]), engine="laplace"
+    )
+    np.testing.assert_allclose(spark_result.predictive_mean, pandas_result.predictive_mean, atol=1e-8)
+    assert spark_result.prediction_keys.to_dict("list") == {
+        "region": ["A", "A", "B", "B"], "time": [1, 2, 1, 2],
+    }

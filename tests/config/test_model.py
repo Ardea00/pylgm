@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pylgm import Fixed, Gaussian, IID, LGM, RW1
+from pylgm import Bernoulli, Fixed, Gaussian, IID, LGM, Poisson, RW1
 from pylgm.config import load_model
 from pylgm.exceptions import ConfigurationError
 
@@ -90,3 +90,30 @@ def test_load_model_rejects_duplicate_mapping_keys(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="duplicate mapping key"):
         load_model(path)
+
+
+def test_load_poisson_model_with_offset(tmp_path):
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: poisson\n"
+        "offset: logexp\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1 + x'\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, Poisson)
+    assert model.offset == "logexp"
+
+
+def test_load_bernoulli_model(tmp_path):
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: bernoulli\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1'\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, Bernoulli)
+    assert model.offset is None

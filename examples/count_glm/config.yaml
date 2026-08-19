@@ -1,0 +1,11 @@
+response: y
+likelihood:
+  family: poisson
+offset: logexp
+data:
+  panel: [region]
+  time: time
+predictor:
+  fixed: "1 + x"
+  effects:
+    - {name: region_effect, type: iid, index: region, precision: 2.0}

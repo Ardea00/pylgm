@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import yaml
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from pylgm.exceptions import ConfigurationError
 
@@ -23,8 +23,16 @@ class _DataModelConfig(StrictModel):
 
 
 class _LikelihoodModelConfig(StrictModel):
-    family: Literal["gaussian"]
-    sigma: FinitePositiveFloat
+    family: Literal["gaussian", "poisson", "bernoulli"]
+    sigma: FinitePositiveFloat | None = None
+
+    @model_validator(mode="after")
+    def _sigma_matches_family(self) -> "_LikelihoodModelConfig":
+        if self.family == "gaussian" and self.sigma is None:
+            raise ValueError("sigma is required for likelihood: {family: gaussian}")
+        if self.family != "gaussian" and self.sigma is not None:
+            raise ValueError(f"sigma is not a valid field for likelihood: {{family: {self.family}}}")
+        return self
 
 
 class _EffectModelConfig(StrictModel):
@@ -42,6 +50,7 @@ class _PredictorModelConfig(StrictModel):
 class _StandaloneModelConfig(StrictModel):
     response: str
     likelihood: _LikelihoodModelConfig
+    offset: str | None = None
     data: _DataModelConfig = Field(default_factory=_DataModelConfig)
     predictor: _PredictorModelConfig
 
@@ -53,9 +62,18 @@ def _build_effect(config: _EffectModelConfig) -> object:
     return effect_types[config.type](config.name, config.index, config.precision)
 
 
+def _build_likelihood(config: _LikelihoodModelConfig) -> object:
+    from pylgm.likelihoods import Bernoulli, Gaussian, Poisson
+
+    if config.family == "gaussian":
+        return Gaussian(config.sigma)
+    if config.family == "poisson":
+        return Poisson()
+    return Bernoulli()
+
+
 def _build_model(config: _StandaloneModelConfig) -> LGM:
     from pylgm.effects import Fixed, Predictor
-    from pylgm.likelihoods import Gaussian
     from pylgm.model import LGM
 
     effects = (Fixed(config.predictor.fixed),) + tuple(
@@ -63,10 +81,11 @@ def _build_model(config: _StandaloneModelConfig) -> LGM:
     )
     return LGM(
         response=config.response,
-        likelihood=Gaussian(config.likelihood.sigma),
+        likelihood=_build_likelihood(config.likelihood),
         predictor=Predictor(effects),
         panel=config.data.panel,
         time=config.data.time,
+        offset=config.offset,
     )
 
 
