@@ -6,6 +6,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from pylgm.inference import GaussianResult, fit_gaussian
+from pylgm.inference.result import LaplaceResult
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -332,3 +333,52 @@ def test_linear_combinations_support_empty_latent_dimensions():
 
     np.testing.assert_allclose(combined.mean, [0.0])
     np.testing.assert_allclose(combined.variance, [0.0])
+
+
+def _laplace(**overrides):
+    kwargs = dict(
+        labels=("fixed:1",),
+        mean=np.array([0.5]),
+        covariance=np.array([[0.25]]),
+        log_marginal_likelihood=-1.0,
+        predictive_mean=np.array([0.5, 0.5]),
+        predictive_variance=np.array([0.25, 0.25]),
+        fitted_mean=np.array([1.6487, 1.6487]),
+        link_name="log",
+        block_slices={"fixed": slice(0, 1)},
+        diagnostics={"newton_iterations": 3, "final_gradient_norm": 1e-10},
+    )
+    kwargs.update(overrides)
+    return LaplaceResult(**kwargs)
+
+
+def test_laplace_result_surface_and_immutability():
+    result = _laplace()
+    assert result.engine == "laplace"
+    assert result.converged is True
+    assert result.link_name == "log"
+    np.testing.assert_allclose(result.fitted_mean, [1.6487, 1.6487])
+    # defensive copy out
+    exposed = result.fitted_mean
+    exposed[0] = 99.0
+    np.testing.assert_allclose(result.fitted_mean, [1.6487, 1.6487])
+    assert result.diagnostics["newton_iterations"] == 3
+
+
+def test_laplace_result_latent_and_linear_combinations_match_gaussian_helpers():
+    result = _laplace()
+    marg = result.latent_marginals("fixed")
+    np.testing.assert_allclose(marg.mean, [0.5])
+    np.testing.assert_allclose(marg.variance, [0.25])
+    lc = result.linear_combinations(np.array([[2.0]]))
+    np.testing.assert_allclose(lc.mean, [1.0])
+    np.testing.assert_allclose(lc.variance, [1.0])
+
+
+def test_laplace_result_prediction_keys_defensive_copy():
+    import pandas as pd
+
+    keys = pd.DataFrame({"region": ["A", "B"]})
+    result = _laplace(prediction_keys=keys)
+    keys.loc[0, "region"] = "mutated"
+    assert result.prediction_keys["region"].tolist() == ["A", "B"]

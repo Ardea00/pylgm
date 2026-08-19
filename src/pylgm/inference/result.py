@@ -118,6 +118,64 @@ def _marginal_array(value: np.ndarray, name: str) -> np.ndarray:
     return result
 
 
+def latent_marginals_from(
+    mean: np.ndarray,
+    covariance: np.ndarray,
+    block_slices: Mapping[str, slice],
+    block: str | None = None,
+) -> "GaussianMarginals":
+    if block is None:
+        selection = slice(None)
+    else:
+        try:
+            selection = block_slices[block]
+        except (KeyError, TypeError) as error:
+            raise KeyError(f"unknown latent block {block!r}") from error
+    selected_covariance = covariance[selection, selection]
+    return GaussianMarginals(mean[selection], np.diag(selected_covariance))
+
+
+def linear_combinations_from(
+    mean: np.ndarray,
+    covariance: np.ndarray,
+    weights: csr_matrix | np.ndarray,
+) -> "GaussianMarginals":
+    if isinstance(weights, csr_matrix):
+        values = weights.data
+        width = weights.shape[1]
+    elif isinstance(weights, np.ndarray):
+        if weights.ndim != 2:
+            raise ValueError("weights must be a two-dimensional matrix")
+        values = weights
+        width = weights.shape[1]
+    else:
+        raise TypeError("weights must be a CSR sparse matrix or numpy array")
+    if not np.issubdtype(weights.dtype, np.number) or not np.isrealobj(values):
+        raise TypeError("weights must have a real numeric dtype")
+    if not np.isfinite(values).all():
+        raise ValueError("weights must be finite")
+    if width != mean.size:
+        raise ValueError("weights must have one column per latent dimension")
+    with np.errstate(over="ignore", invalid="ignore"):
+        result_mean = np.asarray(weights @ mean).reshape(-1)
+        projected_covariance = np.asarray(weights @ covariance)
+        if isinstance(weights, csr_matrix):
+            variance = np.asarray(
+                weights.multiply(projected_covariance).sum(axis=1)
+            ).reshape(-1)
+        else:
+            variance = np.einsum(
+                "ij,ij->i", projected_covariance, weights
+            )
+    if not np.isfinite(projected_covariance).all() or not np.isfinite(
+        variance
+    ).all():
+        raise ValueError("propagated covariance must be finite")
+    roundoff_tolerance = _roundoff_tolerances(weights, covariance)
+    variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
+    return GaussianMarginals(result_mean, variance)
+
+
 @dataclass(frozen=True, init=False)
 class GaussianMarginals:
     """Independent Gaussian summaries for one or more posterior quantities."""
@@ -181,17 +239,7 @@ class GaussianResult:
             raise TypeError("block_slices must be a mapping")
         if diagnostics is not None and not isinstance(diagnostics, Mapping):
             raise TypeError("diagnostics must be a mapping")
-        if prediction_keys is not None:
-            if not isinstance(prediction_keys, pd.DataFrame):
-                raise TypeError("prediction keys must be a Pandas DataFrame")
-            if not all(isinstance(column, str) for column in prediction_keys.columns):
-                raise TypeError("prediction key column labels must be strings")
-            if not prediction_keys.columns.is_unique:
-                raise ValueError("prediction key column labels must be unique")
-            if prediction_keys.isna().to_numpy().any():
-                raise ValueError("prediction keys must not contain null cells")
-            if len(prediction_keys) != np.asarray(predictive_mean).size:
-                raise ValueError("prediction keys row count must match predictive results")
+        _validate_prediction_keys(prediction_keys, predictive_mean)
         covariance = np.asarray(covariance)
         if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
             covariance
@@ -250,51 +298,137 @@ class GaussianResult:
         return True
 
     def latent_marginals(self, block: str | None = None) -> GaussianMarginals:
-        if block is None:
-            selection = slice(None)
-        else:
-            try:
-                selection = self.block_slices[block]
-            except (KeyError, TypeError) as error:
-                raise KeyError(f"unknown latent block {block!r}") from error
-        covariance = self._covariance[selection, selection]
-        return GaussianMarginals(self._mean[selection], np.diag(covariance))
+        return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
         return MappingProxyType({})
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
-        if isinstance(weights, csr_matrix):
-            values = weights.data
-            width = weights.shape[1]
-        elif isinstance(weights, np.ndarray):
-            if weights.ndim != 2:
-                raise ValueError("weights must be a two-dimensional matrix")
-            values = weights
-            width = weights.shape[1]
-        else:
-            raise TypeError("weights must be a CSR sparse matrix or numpy array")
-        if not np.issubdtype(weights.dtype, np.number) or not np.isrealobj(values):
-            raise TypeError("weights must have a real numeric dtype")
-        if not np.isfinite(values).all():
-            raise ValueError("weights must be finite")
-        if width != self._mean.size:
-            raise ValueError("weights must have one column per latent dimension")
-        with np.errstate(over="ignore", invalid="ignore"):
-            mean = np.asarray(weights @ self._mean).reshape(-1)
-            projected_covariance = np.asarray(weights @ self._covariance)
-            if isinstance(weights, csr_matrix):
-                variance = np.asarray(
-                    weights.multiply(projected_covariance).sum(axis=1)
-                ).reshape(-1)
-            else:
-                variance = np.einsum(
-                    "ij,ij->i", projected_covariance, weights
-                )
-        if not np.isfinite(projected_covariance).all() or not np.isfinite(
-            variance
-        ).all():
-            raise ValueError("propagated covariance must be finite")
-        roundoff_tolerance = _roundoff_tolerances(weights, self._covariance)
-        variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
-        return GaussianMarginals(mean, variance)
+        return linear_combinations_from(self._mean, self._covariance, weights)
+
+
+def _validate_prediction_keys(
+    prediction_keys: pd.DataFrame | None, predictive_mean: np.ndarray
+) -> None:
+    if prediction_keys is None:
+        return
+    if not isinstance(prediction_keys, pd.DataFrame):
+        raise TypeError("prediction keys must be a Pandas DataFrame")
+    if not all(isinstance(column, str) for column in prediction_keys.columns):
+        raise TypeError("prediction key column labels must be strings")
+    if not prediction_keys.columns.is_unique:
+        raise ValueError("prediction key column labels must be unique")
+    if prediction_keys.isna().to_numpy().any():
+        raise ValueError("prediction keys must not contain null cells")
+    if len(prediction_keys) != np.asarray(predictive_mean).size:
+        raise ValueError("prediction keys row count must match predictive results")
+
+
+@dataclass(frozen=True, init=False)
+class LaplaceResult:
+    labels: tuple[str, ...]
+    _mean: np.ndarray = field(repr=False)
+    _covariance: np.ndarray = field(repr=False)
+    log_marginal_likelihood: float
+    _predictive_mean: np.ndarray = field(repr=False)
+    _predictive_variance: np.ndarray = field(repr=False)
+    _fitted_mean: np.ndarray = field(repr=False)
+    link_name: str
+    _prediction_keys: pd.DataFrame | None = field(repr=False)
+    block_slices: Mapping[str, slice]
+    diagnostics: Mapping[str, object]
+
+    def __init__(
+        self,
+        labels: tuple[str, ...],
+        mean: np.ndarray,
+        covariance: np.ndarray,
+        log_marginal_likelihood: float,
+        predictive_mean: np.ndarray,
+        predictive_variance: np.ndarray,
+        fitted_mean: np.ndarray,
+        link_name: str,
+        block_slices: Mapping[str, slice] | None = None,
+        diagnostics: Mapping[str, object] | None = None,
+        prediction_keys: pd.DataFrame | None = None,
+    ) -> None:
+        if block_slices is not None and not isinstance(block_slices, Mapping):
+            raise TypeError("block_slices must be a mapping")
+        if diagnostics is not None and not isinstance(diagnostics, Mapping):
+            raise TypeError("diagnostics must be a mapping")
+        _validate_prediction_keys(prediction_keys, predictive_mean)
+        covariance = np.asarray(covariance)
+        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
+            covariance
+        ):
+            raise TypeError("covariance must have a real numeric dtype")
+        if not np.isfinite(covariance).all():
+            raise ValueError("covariance must be finite")
+        object.__setattr__(self, "labels", tuple(labels))
+        object.__setattr__(self, "_mean", _readonly_array(mean))
+        object.__setattr__(self, "_covariance", _readonly_array(covariance))
+        object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
+        object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
+        object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
+        object.__setattr__(self, "link_name", str(link_name))
+        object.__setattr__(
+            self,
+            "_prediction_keys",
+            prediction_keys.copy(deep=True) if prediction_keys is not None else None,
+        )
+        object.__setattr__(
+            self, "block_slices", MappingProxyType(dict(block_slices or {}))
+        )
+        object.__setattr__(
+            self,
+            "diagnostics",
+            _readonly_diagnostics(diagnostics if diagnostics is not None else {}),
+        )
+
+    @property
+    def mean(self) -> np.ndarray:
+        return _readonly_array(self._mean)
+
+    @property
+    def covariance(self) -> np.ndarray:
+        return _readonly_array(self._covariance)
+
+    @property
+    def predictive_mean(self) -> np.ndarray:
+        return _readonly_array(self._predictive_mean)
+
+    @property
+    def predictive_variance(self) -> np.ndarray:
+        return _readonly_array(self._predictive_variance)
+
+    @property
+    def fitted_mean(self) -> np.ndarray:
+        # ponytail: plain copy (not write-locked like the other array
+        # properties) — test_laplace_result_surface_and_immutability mutates
+        # the returned array and expects no exception, only isolation from
+        # internal state.
+        return np.array(self._fitted_mean, copy=True)
+
+    @property
+    def prediction_keys(self) -> pd.DataFrame | None:
+        if self._prediction_keys is None:
+            return None
+        return self._prediction_keys.copy(deep=True)
+
+    @property
+    def engine(self) -> str:
+        return "laplace"
+
+    @property
+    def converged(self) -> bool:
+        return True
+
+    def latent_marginals(self, block: str | None = None) -> GaussianMarginals:
+        return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
+
+    def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
+        return MappingProxyType({})
+
+    def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
+        return linear_combinations_from(self._mean, self._covariance, weights)

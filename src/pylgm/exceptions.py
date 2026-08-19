@@ -37,6 +37,18 @@ class InferenceError(PyLGMError):
     """Inference cannot produce a valid result for a compiled model."""
 
 
+class InferenceConvergenceError(InferenceError):
+    """Iterative inference failed to converge within its iteration budget."""
+
+    def __init__(self, iterations: int, gradient_norm: float) -> None:
+        self.iterations = int(iterations)
+        self.gradient_norm = float(gradient_norm)
+        super().__init__(
+            f"Laplace Newton iteration did not converge in {self.iterations} "
+            f"iterations (final gradient norm {self.gradient_norm:.3e})"
+        )
+
+
 class UnsupportedEngineError(PyLGMError):
     """A compiled likelihood is not supported by the selected engine."""
 
