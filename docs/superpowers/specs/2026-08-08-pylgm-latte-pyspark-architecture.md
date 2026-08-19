@@ -170,7 +170,12 @@ Development proceeds in complete vertical slices.
 The delivered 0.3 slice is narrower: fixed/IID/RW1/RW2 effects, Gaussian
 likelihood, Pandas input, fit-row prediction, posterior marginals, linear
 combinations, and the exact Gaussian reference engine. The optional PySpark
-data-boundary adapter has since shipped (see below). AR1,
+data-boundary adapter has since shipped (see below). Declarative empirical
+Bayes has since shipped for the exact-Gaussian engine: a `Hyperparameter`
+declared on `sigma` or an effect precision is estimated by type-II ML rather
+than merely materialized at `.initial` (see below and the
+[project README](../../../README.md#empirical-bayes)); this is a point
+estimate at a fixed (unpenalized) prior, not a marginal. AR1,
 `result.predict(new_data)`, parameterized IR metadata, and later inference
 engines are explicitly deferred; the target foundation is therefore not
 complete in 0.3.
@@ -182,20 +187,25 @@ and `Bernoulli()` (canonical logit link) likelihoods, an `LGM.offset` column
 added to the linear predictor before the link, and a Newton-Raphson
 `engine="laplace"` mode-finder dispatched through `LGM.fit`, exposed through
 both the Python and YAML frontends and the existing Pandas/PySpark data
-boundary. It fits at **fixed plug-in hyperparameters** (declared effect
+boundary. It fits at plug-in hyperparameters by default (declared effect
 precisions are conditioned on, not integrated); `result.fitted_mean` is exact
-for the log link and a documented point estimate for the logit link. Still
-deferred:
+for the log link and a documented point estimate for the logit link.
+Declarative empirical Bayes has since shipped for this engine too: a
+`Hyperparameter` declared on an effect precision is estimated by type-II ML
+at the Laplace mode, dispatched the same way through `LGM.fit` (see the
+[project README](../../../README.md#empirical-bayes)). Still deferred:
 
 - Binomial(n) likelihood;
 - non-canonical links;
 - exposures and observation weights;
-- empirical-Bayes hyperparameter optimization at the Laplace mode;
+- penalized MAP-II (prior-penalized) hyperparameter estimation;
 - INLA-style numerical integration over hyperparameters;
 - spatial effects.
 
 ### 3. INLA-style inference
 
+- penalized MAP-II (prior-penalized hyperparameter estimation) as an interim
+  step short of full integration;
 - numerical integration over hyperparameters;
 - latent and hyperparameter marginals;
 - log marginal likelihood, DIC, WAIC, CPO, and PIT;

@@ -27,18 +27,21 @@ effect `precision`.
 
 ## 0.3 scope and explicit deferrals
 
-The 0.3 exact engine is conditional on fixed hyperparameter values. A
-declarative `Hyperparameter` contributes its validated `.initial` value during
-compilation; its name, transform, and prior are not copied into the materialized
-IR or evaluated by inference. `PCPrecision` and `GaussianPrior` therefore define
-target-state prior vocabulary, not integrated 0.3 hyperparameter inference.
+The 0.3 exact and Laplace engines condition on plain numeric hyperparameter
+values. A declarative `Hyperparameter` contributes its validated `.initial`
+value during compilation and, since the ["Empirical Bayes"](#empirical-bayes)
+slice, is estimated by type-II ML rather than merely held fixed; its prior is
+still not copied into the materialized IR or evaluated by inference.
+`PCPrecision` and `GaussianPrior` therefore define target-state prior
+vocabulary, not integrated 0.3 penalized (MAP-II) or marginal hyperparameter
+inference.
 
-AR1 effects, `result.predict(new_data)`, parameterized IR
-metadata, hyperparameter-aware inference, sparse production engines, Laplace,
-INLA, spatial effects, and HMC are deferred to later slices. Optional PySpark
-input is now supported as a data boundary (see below). Pandas predictions in 0.3
-cover the rows supplied to `LGM.fit`; their arrays follow the caller's original
-row order.
+AR1 effects, `result.predict(new_data)`, parameterized IR metadata,
+penalized MAP-II and INLA-style hyperparameter marginals, sparse production
+engines, spatial effects, and HMC are deferred to later slices. Optional
+PySpark input is now supported as a data boundary (see below). Pandas
+predictions in 0.3 cover the rows supplied to `LGM.fit`; their arrays follow
+the caller's original row order.
 
 ## Non-Gaussian likelihoods (Laplace)
 
@@ -68,9 +71,10 @@ it is not itself modeled. The YAML frontend exposes the same vocabulary:
 `offset: <col>`. `family: gaussian` still requires `sigma`; `poisson` and
 `bernoulli` forbid it, since they have no free dispersion parameter.
 
-The Laplace engine uses **fixed plug-in hyperparameters** — the declared
-effect precisions are conditioned on, not integrated over; empirical-Bayes
-and INLA-style hyperparameter inference are deferred to a later slice.
+The Laplace engine conditions on its effect precisions by default; declaring
+one as a `Hyperparameter` instead estimates it by type-II ML (see
+["Empirical Bayes"](#empirical-bayes) below) — INLA-style numerical
+integration over hyperparameters remains deferred to a later slice.
 `result.fitted_mean` is the response-scale prediction, and its meaning
 depends on the link: for the Poisson **log link** it is the exact lognormal
 expectation `exp(mean + variance / 2)` of the linear predictor; for the
@@ -82,6 +86,42 @@ posterior variance and excludes response-scale observation noise, unlike
 [`examples/count_glm/README.md`](examples/count_glm/README.md), including the
 Spark data-boundary path (Spark only collects and canonicalizes data; the
 Laplace fit itself still runs on the driver, same as `exact_gaussian`).
+
+## Empirical Bayes
+
+Declaring an effect's precision (or a Gaussian likelihood's `sigma`) as a
+`Hyperparameter` — instead of passing a plain number — makes `LGM.fit`
+estimate it by **type-II maximum likelihood**: it optimizes the marginal
+likelihood over the declared hyperparameter(s), starting from `.initial` and
+respecting any declared `lower`/`upper` bounds, for both the
+`exact_gaussian` and `laplace` engines:
+
+```python
+from pylgm import Fixed, Gaussian, Hyperparameter, IID, LGM
+
+model = LGM(
+    response="y",
+    likelihood=Gaussian(0.5),
+    predictor=Fixed("1")
+    + IID("region", index="region", precision=Hyperparameter("region_precision", initial=1.0)),
+    panel=("region",),
+    time="time",
+)
+result = model.fit(frame, engine="exact_gaussian")
+result.hyperparameters["region_precision"]  # the type-II ML estimate
+result.diagnostics["empirical_bayes_converged"]
+```
+
+The fitted value is exposed on `result.hyperparameters`; a model with no
+declared `Hyperparameter` leaves `result.hyperparameters` as `None`. A
+`Hyperparameter`'s `prior` (e.g. `PCPrecision`, `GaussianPrior`) remains
+declaration metadata only — this estimation is unpenalized type-II ML at a
+fixed initial value, not a MAP estimate, and the prior is not yet evaluated
+by inference; it is reserved for later INLA-style integration. This is a
+point estimate, not a marginal over the hyperparameter. YAML declaration of
+`Hyperparameter`s is not yet supported — this is a Python-API-only
+capability. A runnable example lives at
+[`examples/empirical_bayes/README.md`](examples/empirical_bayes/README.md).
 
 ## Development installation
 

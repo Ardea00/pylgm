@@ -58,6 +58,17 @@ def test_spark_example_runs_and_reports_prediction_keys() -> None:
     assert "prediction_keys" in completed.stdout
 
 
+def test_empirical_bayes_example_reports_estimates():
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/empirical_bayes/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "hyperparameters" in completed.stdout
+
+
 def test_installed_console_entrypoint_loads_and_reports_help() -> None:
     matches = tuple(entry_points(group="console_scripts", name="pylgm"))
 
