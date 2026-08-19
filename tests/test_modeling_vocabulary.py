@@ -4,10 +4,12 @@ import warnings
 import numpy as np
 import pytest
 
+from pylgm import Bernoulli, Poisson
 from pylgm.likelihoods import CompiledGaussian, Gaussian
 from pylgm.links import IdentityLink
 from pylgm.parameters import Hyperparameter
 from pylgm.priors import GaussianPrior, PCPrecision
+from pylgm.exceptions import DataContractError
 
 
 def test_gaussian_vocabulary_is_immutable_and_validated():
@@ -95,10 +97,6 @@ def test_pc_precision_extreme_scales_never_warn_or_return_nan():
 
 
 # Tests for Poisson and Bernoulli likelihoods with GLM protocol
-import pytest
-
-from pylgm import Bernoulli, Poisson
-from pylgm.exceptions import DataContractError
 
 
 def test_poisson_glm_pieces():

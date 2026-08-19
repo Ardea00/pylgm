@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 import numpy as np
+from scipy.special import gammaln
 
 from pylgm.links import IdentityLink, LogLink, LogitLink
 from pylgm.exceptions import DataContractError
@@ -54,17 +55,6 @@ class CompiledGaussian:
         return None
 
 
-def _sigmoid(eta: np.ndarray) -> np.ndarray:
-    """Numerically stable sigmoid function."""
-    eta = np.asarray(eta, dtype=float)
-    result = np.empty_like(eta)
-    positive = eta >= 0
-    result[positive] = 1.0 / (1.0 + np.exp(-eta[positive]))
-    exp_eta = np.exp(eta[~positive])
-    result[~positive] = exp_eta / (1.0 + exp_eta)
-    return result
-
-
 @dataclass(frozen=True)
 class Gaussian:
     """A Gaussian likelihood with a fixed or optimisable standard deviation."""
@@ -99,21 +89,20 @@ class CompiledPoisson:
     def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
-        from scipy.special import gammaln
 
         return float(np.sum(y * eta - np.exp(eta) - gammaln(y + 1.0)))
 
     def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.asarray(y, dtype=float) - np.exp(np.asarray(eta, dtype=float))
+        return np.asarray(y, dtype=float) - self.link.inverse(eta)
 
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.exp(np.asarray(eta, dtype=float))
+        return self.link.inverse(eta)
 
     def response_mean(self, eta: np.ndarray) -> np.ndarray:
-        return np.exp(np.asarray(eta, dtype=float))
+        return self.link.inverse(eta)
 
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
-        return np.exp(np.asarray(eta_mean, dtype=float) + 0.5 * np.asarray(eta_variance, dtype=float))
+        return self.link.inverse(np.asarray(eta_mean, dtype=float) + 0.5 * np.asarray(eta_variance, dtype=float))
 
     def validate_response(self, y: np.ndarray) -> None:
         y = np.asarray(y, dtype=float)
@@ -135,17 +124,17 @@ class CompiledBernoulli:
         return float(np.sum(y * eta - softplus))
 
     def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.asarray(y, dtype=float) - _sigmoid(eta)
+        return np.asarray(y, dtype=float) - self.link.inverse(eta)
 
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        p = _sigmoid(eta)
+        p = self.link.inverse(eta)
         return p * (1.0 - p)
 
     def response_mean(self, eta: np.ndarray) -> np.ndarray:
-        return _sigmoid(eta)
+        return self.link.inverse(eta)
 
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
-        return _sigmoid(np.asarray(eta_mean, dtype=float))  # point estimate; variance ignored
+        return self.link.inverse(np.asarray(eta_mean, dtype=float))  # point estimate; variance ignored
 
     def validate_response(self, y: np.ndarray) -> None:
         y = np.asarray(y, dtype=float)
