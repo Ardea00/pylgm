@@ -5,10 +5,16 @@ of the top-level compatibility contract. Prefer :class:`pylgm.LGM` or
 ``pylgm.config.load_model`` for model construction.
 """
 
-from pylgm.ir.family import CompiledGaussianFamily, Hyperparameters, ScalableBlock
+from pylgm.ir.family import (
+    CompiledFamily,
+    CompiledGaussianFamily,
+    Hyperparameters,
+    ScalableBlock,
+)
 from pylgm.ir.model import CompiledLGM, LatentBlock
 
 __all__ = [
+    "CompiledFamily",
     "CompiledGaussianFamily",
     "CompiledLGM",
     "Hyperparameters",

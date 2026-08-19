@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
@@ -85,6 +86,30 @@ def _qualified_labels(blocks: tuple[LatentBlock, ...]) -> tuple[str, ...]:
     if len(labels) != len(set(labels)):
         raise ModelValidationError("duplicate latent labels after qualification")
     return labels
+
+
+def _materialize_blocks(
+    blocks: tuple[ScalableBlock, ...], resolved: Mapping[str, float]
+) -> tuple[LatentBlock, ...]:
+    materialized: list[LatentBlock] = []
+    for item in blocks:
+        multiplier = resolved[item.parameter] if item.parameter else item.scale
+        with np.errstate(over="ignore", invalid="ignore"):
+            precision = item.block.precision * multiplier
+        if not np.isfinite(precision.data).all():
+            raise NumericalError(
+                f"precision scaling for block {item.block.name!r} must remain finite"
+            )
+        materialized.append(
+            LatentBlock(
+                item.block.name,
+                item.block.labels,
+                item.block.design,
+                precision,
+                item.block.constraints,
+            )
+        )
+    return tuple(materialized)
 
 
 def _assemble_compiled_model(
@@ -241,30 +266,10 @@ class CompiledGaussianFamily:
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(values, self.parameter_names)
-        blocks: list[LatentBlock] = []
-        for item in self.blocks:
-            multiplier = (
-                resolved[item.parameter] if item.parameter else item.scale
-            )
-            with np.errstate(over="ignore", invalid="ignore"):
-                precision = item.block.precision * multiplier
-            if not np.isfinite(precision.data).all():
-                raise NumericalError(
-                    f"precision scaling for block {item.block.name!r} "
-                    "must remain finite"
-                )
-            blocks.append(
-                LatentBlock(
-                    item.block.name,
-                    item.block.labels,
-                    item.block.design,
-                    precision,
-                    item.block.constraints,
-                )
-            )
+        blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = CompiledGaussian(resolved.get("sigma", self.initial.sigma))
         return _assemble_compiled_model(
-            self._y, self._observed, self._offset, tuple(blocks), likelihood
+            self._y, self._observed, self._offset, blocks, likelihood
         )
 
     def block_slice(self, name: str) -> slice:
@@ -275,3 +280,78 @@ class CompiledGaussianFamily:
                 return slice(start, stop)
             start = stop
         raise KeyError(name)
+
+
+@dataclass(frozen=True, init=False)
+class CompiledFamily:
+    """A likelihood-agnostic optimisable family for the declarative path."""
+
+    _y: np.ndarray = field(repr=False)
+    _observed: np.ndarray = field(repr=False)
+    _offset: np.ndarray = field(repr=False)
+    blocks: tuple[ScalableBlock, ...]
+    parameter_names: tuple[str, ...]
+    likelihood_factory: Callable[[Mapping[str, float]], object] = field(repr=False)
+
+    def __init__(
+        self,
+        y: np.ndarray,
+        observed: np.ndarray,
+        offset: np.ndarray,
+        blocks: tuple[ScalableBlock, ...],
+        parameter_names: tuple[str, ...],
+        likelihood_factory: Callable[[Mapping[str, float]], object],
+    ) -> None:
+        y_value = np.asarray(y)
+        observed_value = np.asarray(observed)
+        offset_value = np.asarray(offset)
+        if y_value.ndim != 1 or not np.issubdtype(y_value.dtype, np.number) or not np.isrealobj(y_value):
+            raise ModelValidationError("family y must be a one-dimensional numeric array")
+        if observed_value.ndim != 1 or not np.issubdtype(observed_value.dtype, np.bool_):
+            raise ModelValidationError("family observed must be a one-dimensional boolean array")
+        if (
+            offset_value.ndim != 1
+            or not np.issubdtype(offset_value.dtype, np.number)
+            or not np.isrealobj(offset_value)
+            or not np.isfinite(offset_value).all()
+        ):
+            raise ModelValidationError("family offset must be a finite one-dimensional numeric array")
+        if not (y_value.size == observed_value.size == offset_value.size):
+            raise ModelValidationError("family arrays must have equal row counts")
+        block_values = tuple(blocks)
+        names = tuple(parameter_names)
+        if any(not isinstance(item, ScalableBlock) for item in block_values):
+            raise ModelValidationError("family blocks must be scalable blocks")
+        if any(item.block.design.shape[0] != y_value.size for item in block_values):
+            raise ModelValidationError("family block design rows must match the response")
+        block_names = [item.block.name for item in block_values]
+        if len(block_names) != len(set(block_names)):
+            raise ModelValidationError("family block names must be unique")
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ModelValidationError("parameter names must be non-empty strings")
+        if len(names) != len(set(names)):
+            raise ModelValidationError("parameter names must be unique")
+        bound = tuple(item.parameter for item in block_values if item.parameter is not None)
+        if len(bound) != len(set(bound)):
+            raise ModelValidationError("scalable block parameters must be unique")
+        for parameter in bound:
+            if parameter not in names:
+                raise ModelValidationError(
+                    f"bound block parameter {parameter!r} must appear in parameter_names"
+                )
+        if not callable(likelihood_factory):
+            raise ModelValidationError("likelihood_factory must be callable")
+        object.__setattr__(self, "_y", _readonly_array(y_value))
+        object.__setattr__(self, "_observed", _readonly_array(observed_value))
+        object.__setattr__(self, "_offset", _readonly_array(offset_value))
+        object.__setattr__(self, "blocks", block_values)
+        object.__setattr__(self, "parameter_names", names)
+        object.__setattr__(self, "likelihood_factory", likelihood_factory)
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
+        resolved = _validate_parameter_mapping(values, self.parameter_names)
+        blocks = _materialize_blocks(self.blocks, resolved)
+        likelihood = self.likelihood_factory(resolved)
+        return _assemble_compiled_model(
+            self._y, self._observed, self._offset, blocks, likelihood
+        )
