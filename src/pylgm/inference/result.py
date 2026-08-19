@@ -404,11 +404,7 @@ class LaplaceResult:
 
     @property
     def fitted_mean(self) -> np.ndarray:
-        # ponytail: plain copy (not write-locked like the other array
-        # properties) — test_laplace_result_surface_and_immutability mutates
-        # the returned array and expects no exception, only isolation from
-        # internal state.
-        return np.array(self._fitted_mean, copy=True)
+        return _readonly_array(self._fitted_mean)
 
     @property
     def prediction_keys(self) -> pd.DataFrame | None:

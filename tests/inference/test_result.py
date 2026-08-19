@@ -358,9 +358,10 @@ def test_laplace_result_surface_and_immutability():
     assert result.converged is True
     assert result.link_name == "log"
     np.testing.assert_allclose(result.fitted_mean, [1.6487, 1.6487])
-    # defensive copy out
+    # read-only array
     exposed = result.fitted_mean
-    exposed[0] = 99.0
+    with pytest.raises(ValueError):
+        exposed[0] = 99.0
     np.testing.assert_allclose(result.fitted_mean, [1.6487, 1.6487])
     assert result.diagnostics["newton_iterations"] == 3
 
@@ -376,8 +377,6 @@ def test_laplace_result_latent_and_linear_combinations_match_gaussian_helpers():
 
 
 def test_laplace_result_prediction_keys_defensive_copy():
-    import pandas as pd
-
     keys = pd.DataFrame({"region": ["A", "B"]})
     result = _laplace(prediction_keys=keys)
     keys.loc[0, "region"] = "mutated"
