@@ -169,7 +169,8 @@ Development proceeds in complete vertical slices.
 
 The delivered 0.3 slice is narrower: fixed/IID/RW1/RW2 effects, Gaussian
 likelihood, Pandas input, fit-row prediction, posterior marginals, linear
-combinations, and the exact Gaussian reference engine. AR1, PySpark,
+combinations, and the exact Gaussian reference engine. The optional PySpark
+data-boundary adapter has since shipped (see below). AR1,
 `result.predict(new_data)`, parameterized IR metadata, and later inference
 engines are explicitly deferred; the target foundation is therefore not
 complete in 0.3.
@@ -223,7 +224,10 @@ The target compatibility-preserving refactor comprises:
 
 Version 0.3 delivers the likelihood separation, modeling vocabulary, common
 result surface, Pandas compiler, and compatibility preservation. The PySpark
-adapter and `contrib.forecasting` relocation remain follow-up work.
+data-boundary adapter (Gaussian-only, driver-side inference) has since shipped
+per the [PySpark adapter design](2026-08-17-pylgm-pyspark-adapter-design.md); the
+`contrib.forecasting` relocation and distributed sparse assembly remain follow-up
+work.
 
 The current dense Gaussian implementation remains a small/medium reference engine.
 A sparse backend replaces it as the scalable default in a later vertical slice.
@@ -284,7 +288,8 @@ mathematical correctness.
 ## Non-goals for the First Refactor
 
 - AR1 effects;
-- the PySpark adapter;
+- the PySpark adapter (was a non-goal of the first refactor; has since shipped
+  as its own Gaussian-only data-boundary slice);
 - `result.predict(new_data)`;
 - parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
