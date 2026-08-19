@@ -38,7 +38,9 @@ def _readonly_diagnostics(value: Mapping[str, object]) -> Mapping[str, object]:
     return MappingProxyType(result)
 
 
-def _readonly_hyperparameters(values):
+def _readonly_hyperparameters(
+    values: Mapping[str, float] | None,
+) -> Mapping[str, float] | None:
     if values is None:
         return None
     if not isinstance(values, Mapping):

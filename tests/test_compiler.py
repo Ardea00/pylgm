@@ -454,3 +454,5 @@ def test_compile_family_binds_declared_hyperparameters():
     assert family.parameter_names == ("region_prec",)
     compiled = family.materialize({"region_prec": 2.0})
     assert compiled.y.shape[0] == 4
+    region_block = next(block for block in compiled.blocks if block.name == "region")
+    np.testing.assert_allclose(region_block.precision.toarray(), 2.0 * np.eye(2))

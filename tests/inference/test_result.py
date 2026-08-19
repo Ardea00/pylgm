@@ -411,3 +411,28 @@ def test_laplace_result_hyperparameters_defaults_none_and_is_readonly():
     with pytest.raises(Exception):
         exposed["alpha"] = 9.0  # read-only mapping
     assert result2.hyperparameters["alpha"] == 1.5
+
+
+def _gaussian_result_with_hyperparameters(hyperparameters):
+    return GaussianResult(
+        labels=("x",), mean=np.array([0.0]), covariance=np.eye(1),
+        log_marginal_likelihood=0.0, predictive_mean=np.array([1.0]),
+        predictive_variance=np.array([1.0]), hyperparameters=hyperparameters,
+    )
+
+
+def test_readonly_hyperparameters_rejects_non_mapping_input():
+    with pytest.raises(TypeError, match="mapping"):
+        _gaussian_result_with_hyperparameters([("p", 1.0)])
+
+
+def test_readonly_hyperparameters_rejects_non_string_or_empty_key():
+    with pytest.raises(TypeError, match="non-empty strings"):
+        _gaussian_result_with_hyperparameters({1: 1.0})
+    with pytest.raises(TypeError, match="non-empty strings"):
+        _gaussian_result_with_hyperparameters({"": 1.0})
+
+
+def test_readonly_hyperparameters_rejects_non_finite_value():
+    with pytest.raises(ValueError, match="finite"):
+        _gaussian_result_with_hyperparameters({"p": float("inf")})

@@ -275,6 +275,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     if not _model_hyperparameters(model):
         return None
     frame = panel.frame
+    if model.offset is not None and model.offset not in frame.columns:
+        raise DataContractError(f"offset column not found: {model.offset!r}")
     offset = (
         frame[model.offset].to_numpy(dtype=float)
         if model.offset is not None

@@ -22,10 +22,12 @@ def _positive_real(value: object, name: str) -> float:
 class Hyperparameter:
     """A named, positive model parameter and its optional prior.
 
-    In pyLGM 0.3, declarative exact-Gaussian compilation uses ``initial`` as a
-    fixed plug-in value. Names, transforms, and priors remain declaration
-    metadata and are not yet preserved in the materialized IR or used by
-    inference.
+    A declared ``Hyperparameter`` is estimated by type-II maximum likelihood
+    (empirical Bayes) in ``LGM.fit``, optimizing over ``[lower, upper]`` starting
+    from ``initial``. This applies to both the exact-Gaussian and Laplace
+    engines; the estimate is reported on ``result.hyperparameters``, keyed by
+    ``name``. ``prior`` remains declaration metadata not yet consumed by
+    inference, reserved for a future INLA slice.
     """
 
     name: str

@@ -297,3 +297,54 @@ def test_no_hyperparameter_model_has_none_hyperparameters():
     frame = pd.DataFrame({"t": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
     result = LGM("y", Gaussian(1.0), Fixed("1"), time="t").fit(frame)
     assert result.hyperparameters is None
+
+
+def _region_panel(seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    regions = ["a", "b", "c", "d"]
+    rows = [
+        {"region": r, "t": t, "y": rng.normal()}
+        for t in range(1, 21)
+        for r in regions
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_gaussian_sigma_hyperparameter_estimates_via_empirical_bayes():
+    frame = _region_panel(1)
+    model = LGM(
+        "y",
+        Gaussian(Hyperparameter("obs_sigma", initial=1.0)),
+        Fixed("1"),
+        panel=("region",), time="t",
+    )
+
+    result = model.fit(frame, engine="exact_gaussian")
+
+    assert result.hyperparameters is not None
+    obs_sigma = result.hyperparameters["obs_sigma"]
+    assert np.isfinite(obs_sigma)
+    assert obs_sigma > 0
+    assert result.diagnostics["empirical_bayes_converged"] is True
+
+
+def test_empirical_bayes_precision_matches_fixed_precision_refit_at_optimum():
+    frame = _region_panel(2)
+
+    def build_model(precision):
+        return LGM(
+            "y",
+            Gaussian(0.5),
+            Fixed("1") + IID("region", index="region", precision=precision),
+            panel=("region",), time="t",
+        )
+
+    eb_result = build_model(Hyperparameter("p", initial=1.0)).fit(frame, engine="exact_gaussian")
+    p_star = eb_result.hyperparameters["p"]
+
+    fixed_result = build_model(p_star).fit(frame, engine="exact_gaussian")
+
+    np.testing.assert_allclose(eb_result.mean, fixed_result.mean, atol=1e-6)
+    np.testing.assert_allclose(
+        eb_result.predictive_mean, fixed_result.predictive_mean, atol=1e-6
+    )
