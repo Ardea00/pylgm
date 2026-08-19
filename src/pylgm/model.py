@@ -59,18 +59,37 @@ class LGM:
             raise ValueError("time must be a non-empty string or None")
         object.__setattr__(self, "panel", panel)
 
-    def fit(self, frame: object, engine: str = "exact_gaussian"):
-        """Compile and fit this model with an explicitly selected engine."""
-        if not isinstance(frame, pd.DataFrame):
-            if callable(getattr(frame, "toPandas", None)) or type(frame).__module__.startswith(
-                "pyspark"
-            ):
-                raise DataContractError(
-                    "PySpark input is unsupported in pyLGM 0.3; "
-                    "support is planned for a later release"
-                )
-            raise DataContractError("frame must be a Pandas DataFrame")
+    def fit(
+        self,
+        frame: object,
+        engine: str = "exact_gaussian",
+        *,
+        max_driver_rows: int | None = 100_000,
+    ):
+        """Compile and fit this model with an explicitly selected engine.
 
+        Pandas input keeps caller-row prediction order. A Spark DataFrame is
+        collected through the optional adapter and its predictions are returned
+        in canonical ``(*panel, time)`` order with immutable ``prediction_keys``.
+        ``max_driver_rows`` bounds the Spark driver collection only.
+        """
+        if isinstance(frame, pd.DataFrame):
+            return self._fit_pandas(frame, engine)
+
+        from pylgm.data.spark import is_spark_dataframe
+
+        if is_spark_dataframe(frame):
+            return self._fit_spark(frame, engine, max_driver_rows=max_driver_rows)
+        raise DataContractError("frame must be a Pandas DataFrame")
+
+    def _engine(self, engine: str):
+        engines = {"exact_gaussian": fit_gaussian}
+        try:
+            return engines[engine]
+        except KeyError as error:
+            raise UnsupportedEngineError(f"unknown inference engine: {engine}") from error
+
+    def _fit_pandas(self, frame: pd.DataFrame, engine: str) -> GaussianResult:
         prepared = frame.copy(deep=True)
         time = self.time
         if time is None:
@@ -85,13 +104,31 @@ class LGM:
         from pylgm.compiler import compile_lgm
 
         compiled = compile_lgm(self, panel)
-        engines = {"exact_gaussian": fit_gaussian}
-        try:
-            fit = engines[engine]
-        except KeyError as error:
-            raise UnsupportedEngineError(f"unknown inference engine: {engine}") from error
-        result = fit(compiled)
+        result = self._engine(engine)(compiled)
         return _align_predictions_with_source_rows(result, panel.source_positions)
+
+    def _fit_spark(
+        self, frame: object, engine: str, *, max_driver_rows: int | None
+    ) -> GaussianResult:
+        from pylgm.data.spark import canonicalize_spark_frame
+
+        canonical = canonicalize_spark_frame(frame, self, max_driver_rows=max_driver_rows)
+
+        from pylgm.compiler import compile_lgm
+
+        compiled = compile_lgm(self, canonical.panel)
+        result = self._engine(engine)(compiled)
+        return GaussianResult(
+            labels=result.labels,
+            mean=result.mean,
+            covariance=result.covariance,
+            log_marginal_likelihood=result.log_marginal_likelihood,
+            predictive_mean=result.predictive_mean,
+            predictive_variance=result.predictive_variance,
+            block_slices=result.block_slices,
+            diagnostics=result.diagnostics,
+            prediction_keys=canonical.prediction_keys,
+        )
 
 
 __all__ = ["LGM"]

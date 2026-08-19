@@ -201,15 +201,29 @@ def test_declarative_rw2_compiles_the_second_order_precision_and_constraints():
     )
 
 
-class _SparkShapedFrame:
+def test_pandas_fit_keeps_no_prediction_keys():
+    result = LGM("y", Gaussian(1.0), Fixed("1")).fit(pd.DataFrame({"y": [1.0, 2.0]}))
+    assert result.prediction_keys is None
+
+
+def test_pandas_fit_preserves_caller_order_with_default_row_limit():
+    frame = pd.DataFrame({"region": ["B", "A"], "time": [2, 1], "y": [8.0, 2.0]})
+    model = LGM("y", Gaussian(1.0), Fixed("1"), panel=("region",), time="time")
+    result = model.fit(frame)
+    # Predictions stay aligned to the caller's B-then-A row order.
+    assert result.predictive_mean.shape == (2,)
+    assert result.prediction_keys is None
+
+
+class _NonSparkFrame:
     def toPandas(self):  # noqa: N802
-        raise AssertionError("Spark-shaped inputs must not be collected")
+        raise AssertionError("non-Spark inputs must not be collected")
 
 
-def test_model_rejects_spark_shaped_input_until_adapter_is_available():
+def test_model_rejects_non_pandas_non_spark_input():
     model = LGM("y", Gaussian(1.0), Fixed("1"))
 
-    with pytest.raises(
-        DataContractError, match=r"PySpark input is unsupported.*0\.3.*planned"
-    ):
-        model.fit(_SparkShapedFrame())
+    # A duck-typed object whose module is not ``pyspark`` is not a genuine Spark
+    # frame, so it takes the plain Pandas error path without being collected.
+    with pytest.raises(DataContractError, match="frame must be a Pandas DataFrame"):
+        model.fit(_NonSparkFrame())
