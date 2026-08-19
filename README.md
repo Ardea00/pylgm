@@ -76,7 +76,9 @@ depends on the link: for the Poisson **log link** it is the exact lognormal
 expectation `exp(mean + variance / 2)` of the linear predictor; for the
 Bernoulli **logit link** there is no closed form, so it is a documented
 **point estimate** `logit^-1(mean)` that ignores the linear-predictor
-variance. A runnable example lives at
+variance. `result.predictive_variance` is the linear-predictor (eta)
+posterior variance and excludes response-scale observation noise, unlike
+`GaussianResult.predictive_variance`, which adds it. A runnable example lives at
 [`examples/count_glm/README.md`](examples/count_glm/README.md), including the
 Spark data-boundary path (Spark only collects and canonicalizes data; the
 Laplace fit itself still runs on the driver, same as `exact_gaussian`).

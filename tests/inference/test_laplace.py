@@ -62,6 +62,15 @@ def test_laplace_raises_on_non_convergence():
         fit_laplace(compile_lgm(model, _panel(frame)), max_iterations=1, tolerance=1e-12)
 
 
+def test_laplace_poisson_converges_for_large_counts():
+    # A high count drives the first Newton step's eta past the exp-overflow
+    # threshold; the line search must backtrack rather than raise NumericalError.
+    frame = pd.DataFrame({"t": [1], "y": [1000.0]})
+    model = LGM("y", Poisson(), Fixed("1", prior_precision=1e-8), time="t")
+    result = fit_laplace(compile_lgm(model, _panel(frame)))
+    np.testing.assert_allclose(result.mean, [np.log(1000.0)], atol=1e-6)
+
+
 def test_laplace_succeeds_within_its_actual_iteration_budget():
     # Fitting with exactly the number of Newton iterations the model needs must
     # NOT spuriously raise (guards the off-by-one in the convergence check).

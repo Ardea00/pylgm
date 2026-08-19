@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -137,9 +137,12 @@ def optimize_empirical_bayes(
     *,
     initial: Mapping[str, float] | None = None,
     allow_large_dense: bool = False,
+    fit: Callable[..., object] | None = None,
 ) -> EmpiricalBayesResult:
     if type(allow_large_dense) is not bool:
         raise TypeError("allow_large_dense must be a boolean")
+    if fit is None:
+        fit = fit_gaussian
     names, initial_values = _validate_problem(family, bounds, initial)
     lower = np.log([bounds[name].lower for name in names])
     upper = np.log([bounds[name].upper for name in names])
@@ -178,18 +181,18 @@ def optimize_empirical_bayes(
                 upper,
             )
             model = family.materialize(parameters)
-            fit = (
-                fit_gaussian(model, allow_large_dense=True)
+            result = (
+                fit(model, allow_large_dense=True)
                 if allow_large_dense
-                else fit_gaussian(model)
+                else fit(model)
             )
-            raw_objective = -float(fit.log_marginal_likelihood)
+            raw_objective = -float(result.log_marginal_likelihood)
             if not np.isfinite(raw_objective):
                 raise NumericalError("optimization objective must be finite")
             evaluation = _Evaluation(
                 _transform_objective(raw_objective),
                 raw_objective,
-                fit,
+                result,
                 parameters,
             )
         except InferenceError as error:

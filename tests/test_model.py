@@ -240,10 +240,14 @@ def test_lgm_fit_laplace_poisson_returns_laplace_result():
 
 
 def test_lgm_fit_laplace_preserves_caller_row_order():
-    frame = pd.DataFrame({"t": [3, 1, 2], "y": [4.0, 1.0, 2.0]})
-    result = LGM("y", Poisson(), Fixed("1"), time="t").fit(frame, engine="laplace")
-    # first row corresponds to t=3 in caller order
-    assert result.predictive_mean.shape == (3,)
+    rows_shuffled = pd.DataFrame({"t": [3, 1, 2], "x": [2.0, 0.0, 1.0], "y": [4.0, 1.0, 2.0]})
+    model = LGM("y", Poisson(), Fixed("1 + x"), time="t")
+    shuffled = model.fit(rows_shuffled, engine="laplace")
+    ordered = model.fit(rows_shuffled.sort_values("t").reset_index(drop=True), engine="laplace")
+    # shuffled row order is t=[3,1,2]; ordered is t=[1,2,3]. Map: shuffled[i] == ordered[perm]
+    perm = [2, 0, 1]  # positions in `ordered` for each shuffled row
+    np.testing.assert_allclose(shuffled.predictive_mean, ordered.predictive_mean[perm], atol=1e-8)
+    np.testing.assert_allclose(shuffled.fitted_mean, ordered.fitted_mean[perm], atol=1e-8)
 
 
 def test_lgm_rejects_engine_likelihood_mismatch():

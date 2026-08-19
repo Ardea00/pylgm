@@ -400,6 +400,7 @@ class LaplaceResult:
 
     @property
     def predictive_variance(self) -> np.ndarray:
+        """Linear-predictor (eta) posterior variance; excludes response-scale observation noise."""
         return _readonly_array(self._predictive_variance)
 
     @property

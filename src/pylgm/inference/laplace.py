@@ -57,7 +57,10 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             scale = 1.0
             for _ in range(50):
                 candidate = z + scale * step
-                candidate_obj = objective(candidate)
+                try:
+                    candidate_obj = objective(candidate)
+                except FloatingPointError:
+                    candidate_obj = np.inf
                 if np.isfinite(candidate_obj) and candidate_obj <= current + 1e-4 * scale * slope:
                     break
                 scale *= 0.5
