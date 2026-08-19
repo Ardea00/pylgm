@@ -9,16 +9,31 @@ from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import Fixed, IID, Predictor, RW1, RW2
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
-from pylgm.inference import GaussianResult, fit_gaussian
+from pylgm.inference import GaussianResult, LaplaceResult, fit_gaussian, fit_laplace
+from pylgm.likelihoods import Gaussian
 
 
 _ROW_KEY = "__pylgm_row__"
 
 
 def _align_predictions_with_source_rows(
-    result: GaussianResult, source_positions: np.ndarray
-) -> GaussianResult:
+    result: GaussianResult | LaplaceResult, source_positions: np.ndarray
+) -> GaussianResult | LaplaceResult:
     caller_order = np.argsort(source_positions)
+    if isinstance(result, LaplaceResult):
+        return LaplaceResult(
+            labels=result.labels,
+            mean=result.mean,
+            covariance=result.covariance,
+            log_marginal_likelihood=result.log_marginal_likelihood,
+            predictive_mean=result.predictive_mean[caller_order],
+            predictive_variance=result.predictive_variance[caller_order],
+            fitted_mean=result.fitted_mean[caller_order],
+            link_name=result.link_name,
+            block_slices=result.block_slices,
+            diagnostics=result.diagnostics,
+            prediction_keys=result.prediction_keys,
+        )
     return GaussianResult(
         labels=result.labels,
         mean=result.mean,
@@ -86,13 +101,25 @@ class LGM:
         raise DataContractError("frame must be a Pandas DataFrame")
 
     def _engine(self, engine: str):
-        engines = {"exact_gaussian": fit_gaussian}
+        engines = {"exact_gaussian": fit_gaussian, "laplace": fit_laplace}
         try:
-            return engines[engine]
+            fit = engines[engine]
         except KeyError as error:
             raise UnsupportedEngineError(f"unknown inference engine: {engine}") from error
+        is_gaussian = isinstance(self.likelihood, Gaussian)
+        if engine == "exact_gaussian" and not is_gaussian:
+            raise UnsupportedEngineError(
+                "exact_gaussian requires a Gaussian likelihood; "
+                "use engine='laplace' for a non-Gaussian likelihood"
+            )
+        if engine == "laplace" and is_gaussian:
+            raise UnsupportedEngineError(
+                "engine='laplace' is for non-Gaussian likelihoods; "
+                "use engine='exact_gaussian' for a Gaussian likelihood"
+            )
+        return fit
 
-    def _fit_pandas(self, frame: pd.DataFrame, engine: str) -> GaussianResult:
+    def _fit_pandas(self, frame: pd.DataFrame, engine: str) -> GaussianResult | LaplaceResult:
         prepared = frame.copy(deep=True)
         time = self.time
         if time is None:
@@ -112,7 +139,7 @@ class LGM:
 
     def _fit_spark(
         self, frame: object, engine: str, *, max_driver_rows: int | None
-    ) -> GaussianResult:
+    ) -> GaussianResult | LaplaceResult:
         from pylgm.data.spark import canonicalize_spark_frame
 
         canonical = canonicalize_spark_frame(frame, self, max_driver_rows=max_driver_rows)
@@ -121,6 +148,20 @@ class LGM:
 
         compiled = compile_lgm(self, canonical.panel)
         result = self._engine(engine)(compiled)
+        if isinstance(result, LaplaceResult):
+            return LaplaceResult(
+                labels=result.labels,
+                mean=result.mean,
+                covariance=result.covariance,
+                log_marginal_likelihood=result.log_marginal_likelihood,
+                predictive_mean=result.predictive_mean,
+                predictive_variance=result.predictive_variance,
+                fitted_mean=result.fitted_mean,
+                link_name=result.link_name,
+                block_slices=result.block_slices,
+                diagnostics=result.diagnostics,
+                prediction_keys=canonical.prediction_keys,
+            )
         return GaussianResult(
             labels=result.labels,
             mean=result.mean,

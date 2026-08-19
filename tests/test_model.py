@@ -2,11 +2,12 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from pylgm import Fixed, Gaussian, IID, LGM, RW1, RW2
+from pylgm import Fixed, Gaussian, IID, LGM, Poisson, RW1, RW2
 from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
+from pylgm.inference.result import LaplaceResult
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.parameters import Hyperparameter
 from pylgm.model import _align_predictions_with_source_rows
@@ -227,3 +228,27 @@ def test_model_rejects_non_pandas_non_spark_input():
     # frame, so it takes the plain Pandas error path without being collected.
     with pytest.raises(DataContractError, match="frame must be a Pandas DataFrame"):
         model.fit(_NonSparkFrame())
+
+
+def test_lgm_fit_laplace_poisson_returns_laplace_result():
+    frame = pd.DataFrame({"t": [1, 2, 3, 4], "x": [0.0, 1.0, 2.0, 3.0], "y": [1.0, 2.0, 4.0, 7.0]})
+    result = LGM("y", Poisson(), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+    assert isinstance(result, LaplaceResult)
+    assert result.converged is True
+    assert result.prediction_keys is None
+    assert result.fitted_mean.shape == (4,)
+
+
+def test_lgm_fit_laplace_preserves_caller_row_order():
+    frame = pd.DataFrame({"t": [3, 1, 2], "y": [4.0, 1.0, 2.0]})
+    result = LGM("y", Poisson(), Fixed("1"), time="t").fit(frame, engine="laplace")
+    # first row corresponds to t=3 in caller order
+    assert result.predictive_mean.shape == (3,)
+
+
+def test_lgm_rejects_engine_likelihood_mismatch():
+    frame = pd.DataFrame({"t": [1, 2], "y": [1.0, 2.0]})
+    with pytest.raises(UnsupportedEngineError, match="Gaussian"):
+        LGM("y", Gaussian(1.0), Fixed("1"), time="t").fit(frame, engine="laplace")
+    with pytest.raises(UnsupportedEngineError, match="non-Gaussian"):
+        LGM("y", Poisson(), Fixed("1"), time="t").fit(frame, engine="exact_gaussian")
