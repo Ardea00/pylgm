@@ -818,3 +818,11 @@ def test_optimize_over_laplace_family_converges() -> None:
         family, {"g_prec": OptimizationBounds(1.0, 1e-3, 1e3)}, fit=fit_laplace
     )
     assert result.diagnostics.converged
+
+
+def test_optimize_rejects_family_without_materialize() -> None:
+    class _NoMaterialize:
+        parameter_names = ("g_prec",)
+
+    with pytest.raises(TypeError, match="materialize"):
+        optimize_empirical_bayes(_NoMaterialize(), {"g_prec": OptimizationBounds(1.0, 1e-3, 1e3)})

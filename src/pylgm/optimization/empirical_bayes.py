@@ -6,7 +6,7 @@ import numpy as np
 import scipy.optimize
 
 from pylgm.exceptions import InferenceError, NumericalError, OptimizationError
-from pylgm.inference import GaussianResult, fit_gaussian
+from pylgm.inference import GaussianResult, LaplaceResult, fit_gaussian
 from pylgm.optimization.result import EmpiricalBayesResult, OptimizationDiagnostics
 
 
@@ -55,7 +55,7 @@ class OptimizationBounds:
 class _Evaluation:
     objective: float
     raw_objective: float | None
-    fit: GaussianResult | None
+    fit: GaussianResult | LaplaceResult | None
     parameters: Mapping[str, float] | None
 
 
