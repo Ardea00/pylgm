@@ -60,3 +60,15 @@ def test_laplace_raises_on_non_convergence():
     model = LGM("y", Poisson(), Fixed("1 + x"), time="t")
     with pytest.raises(InferenceConvergenceError):
         fit_laplace(compile_lgm(model, _panel(frame)), max_iterations=1, tolerance=1e-12)
+
+
+def test_laplace_succeeds_within_its_actual_iteration_budget():
+    # Fitting with exactly the number of Newton iterations the model needs must
+    # NOT spuriously raise (guards the off-by-one in the convergence check).
+    frame = pd.DataFrame({"t": [1, 2, 3, 4, 5], "x": [0.0, 1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, 3.0, 5.0, 8.0]})
+    model = LGM("y", Poisson(), Fixed("1 + x"), time="t")
+    compiled = compile_lgm(model, _panel(frame))
+    full = fit_laplace(compiled)
+    needed = full.diagnostics["newton_iterations"]
+    tight = fit_laplace(compiled, max_iterations=needed)
+    np.testing.assert_allclose(tight.mean, full.mean, atol=1e-8)

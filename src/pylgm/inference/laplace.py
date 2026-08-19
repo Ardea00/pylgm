@@ -38,6 +38,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     z = np.zeros(reduced_dim)
     gradient_norm = 0.0
     iterations = 0
+    converged = reduced_dim == 0
     if reduced_dim:
         current = objective(z)
         for iterations in range(1, max_iterations + 1):
@@ -47,6 +48,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             gradient = reduced_precision @ z - reduced_design.T @ grad_ll
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
+                converged = True
                 break
             hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
             factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
@@ -63,8 +65,14 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
                 raise NumericalError("Laplace line search failed to reduce the objective")
             z = candidate
             current = candidate_obj
-        else:
-            raise InferenceConvergenceError(iterations, gradient_norm)
+        if not converged:
+            eta = reduced_design @ z + offset_obs
+            gradient = reduced_precision @ z - reduced_design.T @ likelihood.gradient(eta, y_obs)
+            gradient_norm = float(np.max(np.abs(gradient)))
+            if gradient_norm < tolerance:
+                converged = True
+            else:
+                raise InferenceConvergenceError(iterations, gradient_norm)
         eta = reduced_design @ z + offset_obs
         weights = likelihood.working_weights(eta, y_obs)
         hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
