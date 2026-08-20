@@ -6,7 +6,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from pylgm.inference import GaussianResult, fit_gaussian
-from pylgm.inference.result import LaplaceResult
+from pylgm.inference.result import GaussianMarginals, INLAResult, LaplaceResult
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -436,3 +436,44 @@ def test_readonly_hyperparameters_rejects_non_string_or_empty_key():
 def test_readonly_hyperparameters_rejects_non_finite_value():
     with pytest.raises(ValueError, match="finite"):
         _gaussian_result_with_hyperparameters({"p": float("inf")})
+
+
+def _inla(**overrides):
+    kwargs = dict(
+        labels=("g:a",),
+        mean=np.array([0.5]),
+        covariance=np.array([[0.25]]),
+        log_marginal_likelihood=-2.0,
+        predictive_mean=np.array([0.5, 0.5]),
+        predictive_variance=np.array([0.3, 0.3]),
+        hyperparameter_marginals={"p": GaussianMarginals(np.array([1.5]), np.array([0.4]))},
+        block_slices={"g": slice(0, 1)},
+        diagnostics={"inla_grid_points": 7},
+    )
+    kwargs.update(overrides)
+    return INLAResult(**kwargs)
+
+
+def test_inla_result_surface():
+    result = _inla()
+    assert result.engine == "inla"
+    assert result.converged is True
+    assert result.fitted_mean is None
+    hm = result.hyperparameter_marginals()
+    np.testing.assert_allclose(hm["p"].mean, [1.5])
+    np.testing.assert_allclose(hm["p"].variance, [0.4])
+    marg = result.latent_marginals("g")
+    np.testing.assert_allclose(marg.mean, [0.5])
+    np.testing.assert_allclose(marg.variance, [0.25])
+    lc = result.linear_combinations(np.array([[2.0]]))
+    np.testing.assert_allclose(lc.mean, [1.0])
+
+
+def test_inla_result_carries_fitted_mean_and_is_immutable():
+    result = _inla(fitted_mean=np.array([1.6, 1.6]), link_name="log")
+    assert result.link_name == "log"
+    exposed = result.fitted_mean
+    with pytest.raises(ValueError):
+        exposed[0] = 9.0
+    np.testing.assert_allclose(result.fitted_mean, [1.6, 1.6])
+    assert result.hyperparameters is None
