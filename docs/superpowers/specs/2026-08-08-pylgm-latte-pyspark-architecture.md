@@ -180,8 +180,11 @@ carries a `prior`, its native-scale log density penalizes the same marginal
 likelihood, and `result.diagnostics["hyperparameter_penalized"]` records it
 (no Jacobian correction for `transform`). This is still a point estimate,
 not a marginal. AR1, `result.predict(new_data)`, parameterized IR metadata,
-and full hyperparameter integration are explicitly deferred; the target
-foundation is therefore not complete in 0.3.
+and advanced hyperparameter-integration features are explicitly deferred
+(model-assessment criteria—DIC/WAIC/CPO/PIT—and richer latent strategies
+beyond Gaussian, section 3c); the hyperparameter integration core (grid
+quadrature, section 3a) has since shipped. The target foundation is therefore
+not complete in 0.3.
 
 ### 2. Non-Gaussian LGM
 
@@ -333,7 +336,9 @@ mathematical correctness.
 - `result.predict(new_data)`;
 - parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
-- INLA integration;
+- INLA integration (was a non-goal of the first refactor; the integration core
+  has since shipped as sub-slice 3a with model-assessment criteria and richer
+  latent strategies remaining);
 - spatial effects and SPDE meshes;
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
