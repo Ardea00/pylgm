@@ -146,14 +146,15 @@ class LGM:
         from pylgm.compiler import _model_hyperparameters
 
         fit = self._engine(engine)
+        hyperparameters = list(_model_hyperparameters(self))
         bounds = {}
         initial = {}
-        for _, hyperparameter in _model_hyperparameters(self):
+        for _, hyperparameter in hyperparameters:
             bounds[hyperparameter.name] = OptimizationBounds(
                 hyperparameter.initial, hyperparameter.lower, hyperparameter.upper
             )
             initial[hyperparameter.name] = hyperparameter.initial
-        priored = [hp for _, hp in _model_hyperparameters(self) if hp.prior is not None]
+        priored = [hp for _, hp in hyperparameters if hp.prior is not None]
         penalty = None
         if priored:
             def penalty(values, priored=priored):

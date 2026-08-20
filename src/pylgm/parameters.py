@@ -24,14 +24,16 @@ class Hyperparameter:
 
     A declared ``Hyperparameter`` is estimated by type-II maximum likelihood
     (empirical Bayes) in ``LGM.fit``, optimizing over ``[lower, upper]`` starting
-    from ``initial``. This applies to both the exact-Gaussian and Laplace
-    engines; the estimate is reported on ``result.hyperparameters``, keyed by
-    ``name``. When ``prior`` is declared, it is added as a native-scale log
-    penalty to that objective, turning the estimate into a MAP-II estimate
-    (no Jacobian correction for ``transform``); ``result.diagnostics``
-    records whether any declared hyperparameter was penalized this way. Full
-    posterior *integration* over hyperparameters (marginals) remains future
-    INLA work.
+    from ``initial``. The optimizer searches in log space, and the MAP penalty
+    (when a ``prior`` is declared) is evaluated on the native scale with no
+    Jacobian correction; the ``transform`` field is reserved for future use and
+    not yet wired into inference. This applies to both the exact-Gaussian and
+    Laplace engines; the estimate is reported on ``result.hyperparameters``,
+    keyed by ``name``. When ``prior`` is declared, it is added as a native-scale
+    log penalty to that objective, turning the estimate into a MAP-II estimate;
+    ``result.diagnostics`` records whether any declared hyperparameter was
+    penalized this way. Full posterior *integration* over hyperparameters
+    (marginals) remains future INLA work.
     """
 
     name: str

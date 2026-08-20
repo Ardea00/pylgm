@@ -48,3 +48,6 @@ later INLA slice).
 The fitted precision is exposed on `result.hyperparameters["region_precision"]`
 and the penalization flag on `result.diagnostics["hyperparameter_penalized"]`,
 which is `True` whenever any declared `Hyperparameter` carries a `prior`.
+Note that the reported `PCPrecision` estimate is the precision-scale posterior
+mode, which differs from a standard-deviation-scale mode because the PC prior's
+σ→τ change of variables is built into its density.
