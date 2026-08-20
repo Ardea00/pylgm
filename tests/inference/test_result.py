@@ -469,6 +469,11 @@ def test_inla_result_surface():
     np.testing.assert_allclose(lc.mean, [1.0])
 
 
+def test_inla_result_rejects_empty_string_hyperparameter_marginal_key():
+    with pytest.raises(TypeError, match="non-empty strings"):
+        _inla(hyperparameter_marginals={"": GaussianMarginals(np.array([1.5]), np.array([0.4]))})
+
+
 def test_inla_result_carries_fitted_mean_and_is_immutable():
     result = _inla(fitted_mean=np.array([1.6, 1.6]), link_name="log")
     assert result.link_name == "log"

@@ -167,6 +167,7 @@ def integrate_inla(
         "inla_effective_weight": float(1.0 / np.sum(weights**2)),
         "inla_conditional_engine": "laplace" if is_laplace else "exact_gaussian",
         "inla_active_bounds": ",".join(eb.diagnostics.active_bounds),
+        "inla_collapsed": len(kept) == 1,
     }
     for name in names:
         diagnostics[f"inla_mode_{name}"] = float(eb.parameters[name])
@@ -176,6 +177,8 @@ def integrate_inla(
                          ("predictive variance", predictive_variance)):
         if not np.isfinite(value).all():
             raise NumericalError(f"INLA produced non-finite {label}")
+    if not np.isfinite(integrated_lml):
+        raise NumericalError("INLA produced non-finite log marginal likelihood")
 
     return INLAResult(
         labels=reference.labels,

@@ -475,8 +475,8 @@ def _readonly_hyperparameter_marginals(
         raise TypeError("hyperparameter_marginals must be a mapping")
     resolved = {}
     for name, value in values.items():
-        if not isinstance(name, str):
-            raise TypeError("hyperparameter_marginals keys must be strings")
+        if not isinstance(name, str) or not name:
+            raise TypeError("hyperparameter_marginals keys must be non-empty strings")
         if not isinstance(value, GaussianMarginals):
             raise TypeError("hyperparameter_marginals values must be GaussianMarginals")
         resolved[name] = value

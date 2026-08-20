@@ -92,6 +92,36 @@ def test_integrate_inla_matches_fine_1d_quadrature():
     assert result.diagnostics["inla_grid_points"] >= 3
 
 
+def test_integrate_inla_matches_fine_1d_quadrature_at_default_grid():
+    # Same anchor as test_integrate_inla_matches_fine_1d_quadrature, but at
+    # integrate_inla's shipped defaults (grid_step=1.0, radius=3) -- the
+    # settings LGM.fit's INLA path (_run_inla) actually uses. The fine-config
+    # anchor above measures accuracy at settings the shipped path never calls.
+    family = _one_hyperparameter_family()
+    bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+    result = integrate_inla(family, bounds, fit=fit_gaussian)
+
+    # independent fine 1-D quadrature over u = log p
+    us = np.linspace(np.log(1e-2), np.log(1e2), 1601)
+    logw, means, variances = [], [], []
+    for u in us:
+        fit = fit_gaussian(family.materialize({"p": float(np.exp(u))}))
+        logw.append(float(fit.log_marginal_likelihood) + u)  # + Jacobian
+        means.append(fit.mean[0])
+        variances.append(fit.covariance[0, 0])
+    logw = np.asarray(logw)
+    w = np.exp(logw - logsumexp(logw))
+    ref_mean = float(np.sum(w * np.asarray(means)))
+    ref_var = float(np.sum(w * (np.asarray(variances) + np.asarray(means) ** 2)) - ref_mean ** 2)
+
+    # Observed at these defaults: |mean diff| ~= 3.0e-5, var rel diff ~= 2.6e-4 --
+    # far tighter than the fine-config anchor's tolerance (atol=5e-3, rtol=5e-2).
+    # Using tightened-but-not-brittle tolerances rather than the looser ceiling.
+    np.testing.assert_allclose(result.mean[0], ref_mean, atol=1e-3)
+    np.testing.assert_allclose(result.covariance[0, 0], ref_var, rtol=1e-2)
+    assert result.hyperparameter_marginals()["p"].mean[0] > 0
+
+
 def test_integrate_inla_produces_a_hyperparameter_distribution():
     family = _one_hyperparameter_family()
     bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}

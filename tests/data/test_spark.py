@@ -212,3 +212,49 @@ def test_spark_laplace_matches_sorted_pandas(spark):
     assert spark_result.prediction_keys.to_dict("list") == {
         "region": ["A", "A", "B", "B"], "time": [1, 2, 1, 2],
     }
+
+
+def test_spark_inla_matches_sorted_pandas(spark):
+    import numpy as np
+    import pandas as pd
+
+    from pylgm import Hyperparameter, IID
+    from pylgm.inference.result import INLAResult
+
+    # Real per-region effects (not pure noise) so the region precision
+    # hyperparameter has a non-degenerate interior posterior mode: see
+    # tests/optimization/test_inla.py's `_one_hyperparameter_family` and
+    # tests/test_model.py's `_region_panel` for the same requirement.
+    rng = np.random.default_rng(2)
+    regions = list("abcd")
+    effects = {r: rng.normal(0.0, 1.0) for r in regions}
+    rows = [
+        (r, t, effects[r] + rng.normal(0.0, 0.5))
+        for t in range(1, 21) for r in regions
+    ]
+    columns = ["region", "time", "y"]
+
+    model = LGM(
+        "y", Gaussian(0.5),
+        Fixed("1") + IID("region", index="region",
+                          precision=Hyperparameter("p", initial=1.0)),
+        panel=("region",), time="time",
+    )
+    spark_result = model.fit(
+        spark.createDataFrame(rows, columns),
+        engine="exact_gaussian", hyperparameters="integrate",
+    )
+    pandas_result = model.fit(
+        pd.DataFrame(rows, columns=columns).sort_values(["region", "time"]),
+        engine="exact_gaussian", hyperparameters="integrate",
+    )
+
+    assert isinstance(spark_result, INLAResult)
+    assert isinstance(pandas_result, INLAResult)
+    np.testing.assert_allclose(
+        spark_result.predictive_mean, pandas_result.predictive_mean, atol=1e-6
+    )
+    assert spark_result.prediction_keys.to_dict("list") == {
+        "region": [r for r in sorted(regions) for _ in range(20)],
+        "time": list(range(1, 21)) * 4,
+    }
