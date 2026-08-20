@@ -167,3 +167,32 @@ def test_hyperparameter_rejects_bounds_not_bracketing_initial():
         Hyperparameter("p", initial=1.0, upper=0.5)
     with pytest.raises(ValueError):
         Hyperparameter("p", initial=1.0, lower=-1.0)
+
+
+# Tests for per-observation likelihood methods
+
+
+def test_pointwise_log_density_sums_to_log_likelihood():
+    from pylgm.likelihoods import CompiledPoisson, CompiledBernoulli
+    eta = np.array([0.3, -0.5, 1.2])
+    y = np.array([1.0, 0.0, 2.0])
+    for like in (CompiledGaussian(1.3), CompiledPoisson(), CompiledBernoulli()):
+        yy = y if not isinstance(like, CompiledBernoulli) else np.array([1.0, 0.0, 1.0])
+        pw = like.pointwise_log_density(eta, yy)
+        np.testing.assert_allclose(pw.sum(), like.log_likelihood(eta, yy))
+
+
+def test_cdf_matches_scipy():
+    from scipy.stats import norm, poisson
+    from pylgm.likelihoods import CompiledPoisson, CompiledBernoulli
+    eta = np.array([0.2, -1.0, 0.5])
+    g = CompiledGaussian(2.0)
+    np.testing.assert_allclose(g.cdf(eta, np.array([0.0, -1.0, 1.5])),
+                               norm.cdf(np.array([0.0, -1.0, 1.5]), loc=eta, scale=2.0))
+    p = CompiledPoisson()
+    y = np.array([0.0, 2.0, 5.0])
+    np.testing.assert_allclose(p.cdf(eta, y), poisson.cdf(y, np.exp(eta)), atol=1e-12)
+    b = CompiledBernoulli()
+    yb = np.array([1.0, 0.0, 1.0])
+    expected = np.where(yb >= 1, 1.0, 1.0 - 1.0 / (1.0 + np.exp(-eta)))
+    np.testing.assert_allclose(b.cdf(eta, yb), expected)

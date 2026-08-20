@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 import numpy as np
-from scipy.special import gammaln
+from scipy.special import gammaln, erf, gammaincc
 
 from pylgm.links import IdentityLink, LogLink, LogitLink
 from pylgm.exceptions import DataContractError
@@ -50,6 +50,16 @@ class CompiledGaussian:
 
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
         return np.asarray(eta_mean, dtype=float)
+
+    def pointwise_log_density(self, eta, y):
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        return -0.5 * (np.log(2 * np.pi * self.variance) + (y - eta) ** 2 / self.variance)
+
+    def cdf(self, eta, y):
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        return 0.5 * (1.0 + erf((y - eta) / (np.sqrt(self.variance) * np.sqrt(2.0))))
 
     def validate_response(self, y: np.ndarray) -> None:
         return None
@@ -104,6 +114,16 @@ class CompiledPoisson:
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
         return self.link.inverse(np.asarray(eta_mean, dtype=float) + 0.5 * np.asarray(eta_variance, dtype=float))
 
+    def pointwise_log_density(self, eta, y):
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        return y * eta - np.exp(eta) - gammaln(y + 1.0)
+
+    def cdf(self, eta, y):
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        return gammaincc(np.floor(y) + 1.0, np.exp(eta))
+
     def validate_response(self, y: np.ndarray) -> None:
         y = np.asarray(y, dtype=float)
         if not np.all(np.isfinite(y)) or np.any(y < 0) or np.any(y != np.round(y)):
@@ -135,6 +155,16 @@ class CompiledBernoulli:
 
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
         return self.link.inverse(np.asarray(eta_mean, dtype=float))  # point estimate; variance ignored
+
+    def pointwise_log_density(self, eta, y):
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        return y * eta - np.logaddexp(0.0, eta)
+
+    def cdf(self, eta, y):
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        return np.where(y >= 1.0, 1.0, 1.0 - self.link.inverse(eta))
 
     def validate_response(self, y: np.ndarray) -> None:
         y = np.asarray(y, dtype=float)
