@@ -7,7 +7,7 @@ from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
-from pylgm.inference.result import LaplaceResult
+from pylgm.inference.result import INLAResult, LaplaceResult
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.parameters import Hyperparameter
 from pylgm.model import _align_predictions_with_source_rows
@@ -411,3 +411,66 @@ def test_mixed_hyperparameters_penalize_only_the_prior_bearing_one():
     assert result.hyperparameters["region_precision"] > 0
     assert result.hyperparameters["time_precision"] > 0
     assert result.diagnostics["empirical_bayes_converged"] is True
+
+
+def _region_panel(seed=2):
+    # Real per-region effects (not pure noise) so the region precision
+    # hyperparameter has a non-degenerate interior posterior mode: an
+    # empirical Bayes fit on iid-across-region data drives the precision to
+    # its upper bound (zero region variance), which collapses the INLA grid
+    # to a single point. See tests/optimization/test_inla.py's
+    # `_one_hyperparameter_family` for the same "informative" requirement.
+    # seed=2 also keeps every grid-point Laplace conditional fit (Poisson
+    # branch) inside its Newton-convergence tolerance.
+    rng = np.random.default_rng(seed)
+    regions = list("abcd")
+    effects = {r: rng.normal(0.0, 1.0) for r in regions}
+    return pd.DataFrame([{"region": r, "t": t, "y": effects[r] + rng.normal(0.0, 0.5)}
+                         for t in range(1, 21) for r in regions])
+
+
+def test_fit_integrate_returns_inla_result_both_engines():
+    frame = _region_panel()
+    gauss = LGM("y", Gaussian(0.5),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    result = gauss.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+    assert isinstance(result, INLAResult)
+    assert result.engine == "inla"
+    assert "p" in result.hyperparameter_marginals()
+    assert result.diagnostics["inla_grid_points"] >= 3
+
+    counts = frame.assign(y=(frame["y"].abs() * 3).round())
+    pois = LGM("y", Poisson(),
+               Fixed("1") + IID("region", index="region",
+                                precision=Hyperparameter("p", initial=1.0)),
+               panel=("region",), time="t")
+    pres = pois.fit(counts, engine="laplace", hyperparameters="integrate")
+    assert isinstance(pres, INLAResult)
+    assert pres.fitted_mean is not None
+
+
+def test_integrate_requires_a_hyperparameter():
+    frame = _region_panel()
+    model = LGM("y", Gaussian(1.0), Fixed("1"), panel=("region",), time="t")
+    with pytest.raises(ValueError, match="integrate"):
+        model.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+
+
+def test_fit_optimize_default_unchanged():
+    frame = _region_panel()
+    model = LGM("y", Gaussian(0.5),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    default = model.fit(frame, engine="exact_gaussian")
+    explicit = model.fit(frame, engine="exact_gaussian", hyperparameters="optimize")
+    np.testing.assert_allclose(default.hyperparameters["p"], explicit.hyperparameters["p"])
+
+
+def test_invalid_hyperparameters_mode_rejected():
+    frame = _region_panel()
+    model = LGM("y", Gaussian(1.0), Fixed("1"), panel=("region",), time="t")
+    with pytest.raises(ValueError, match="hyperparameters"):
+        model.fit(frame, engine="exact_gaussian", hyperparameters="nonsense")

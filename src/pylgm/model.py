@@ -10,22 +10,23 @@ from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import Fixed, IID, Predictor, RW1, RW2
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
-from pylgm.inference import GaussianResult, LaplaceResult, fit_gaussian, fit_laplace
+from pylgm.inference import GaussianResult, INLAResult, LaplaceResult, fit_gaussian, fit_laplace
 from pylgm.likelihoods import Gaussian
 from pylgm.optimization.empirical_bayes import OptimizationBounds, optimize_empirical_bayes
+from pylgm.optimization.inla import integrate_inla
 
 
 _ROW_KEY = "__pylgm_row__"
 
 
 def _rebuild_result(
-    result: GaussianResult | LaplaceResult,
+    result: GaussianResult | LaplaceResult | INLAResult,
     *,
     caller_order: np.ndarray | None = None,
     prediction_keys: pd.DataFrame | None = None,
     hyperparameters: Mapping[str, float] | None = None,
     diagnostics: Mapping[str, object] | None = None,
-) -> GaussianResult | LaplaceResult:
+) -> GaussianResult | LaplaceResult | INLAResult:
     """Rebuild a result of the same type, optionally reordering rows or overriding metadata.
 
     Any override left as ``None`` carries the corresponding value forward from ``result``
@@ -53,12 +54,24 @@ def _rebuild_result(
             result.fitted_mean[caller_order] if caller_order is not None else result.fitted_mean
         )
         return LaplaceResult(fitted_mean=fitted_mean, link_name=result.link_name, **common)
+    if isinstance(result, INLAResult):
+        fitted_mean = (
+            result.fitted_mean[caller_order]
+            if caller_order is not None and result.fitted_mean is not None
+            else result.fitted_mean
+        )
+        return INLAResult(
+            hyperparameter_marginals=result.hyperparameter_marginals(),
+            fitted_mean=fitted_mean,
+            link_name=result.link_name,
+            **common,
+        )
     return GaussianResult(**common)
 
 
 def _align_predictions_with_source_rows(
-    result: GaussianResult | LaplaceResult, source_positions: np.ndarray
-) -> GaussianResult | LaplaceResult:
+    result: GaussianResult | LaplaceResult | INLAResult, source_positions: np.ndarray
+) -> GaussianResult | LaplaceResult | INLAResult:
     return _rebuild_result(result, caller_order=np.argsort(source_positions))
 
 
@@ -106,6 +119,7 @@ class LGM:
         engine: str = "exact_gaussian",
         *,
         max_driver_rows: int | None = 100_000,
+        hyperparameters: str = "optimize",
     ):
         """Compile and fit this model with an explicitly selected engine.
 
@@ -113,14 +127,25 @@ class LGM:
         collected through the optional adapter and its predictions are returned
         in canonical ``(*panel, time)`` order with immutable ``prediction_keys``.
         ``max_driver_rows`` bounds the Spark driver collection only.
+
+        ``hyperparameters`` selects how any declared ``Hyperparameter`` is
+        resolved: ``"optimize"`` (default) fits the empirical Bayes mode, and
+        ``"integrate"`` runs INLA grid integration over the hyperparameter
+        posterior instead (requires at least one declared ``Hyperparameter``).
         """
+        if hyperparameters not in ("optimize", "integrate"):
+            raise ValueError(
+                f"hyperparameters must be 'optimize' or 'integrate', got {hyperparameters!r}"
+            )
         if isinstance(frame, pd.DataFrame):
-            return self._fit_pandas(frame, engine)
+            return self._fit_pandas(frame, engine, hyperparameters=hyperparameters)
 
         from pylgm.data.spark import is_spark_dataframe
 
         if is_spark_dataframe(frame):
-            return self._fit_spark(frame, engine, max_driver_rows=max_driver_rows)
+            return self._fit_spark(
+                frame, engine, max_driver_rows=max_driver_rows, hyperparameters=hyperparameters
+            )
         raise DataContractError("frame must be a Pandas DataFrame")
 
     def _engine(self, engine: str):
@@ -142,23 +167,24 @@ class LGM:
             )
         return fit
 
-    def _run_empirical_bayes(self, family, engine: str) -> GaussianResult | LaplaceResult:
+    def _family_optimization_inputs(self):
         from pylgm.compiler import _model_hyperparameters
 
-        fit = self._engine(engine)
         hyperparameters = list(_model_hyperparameters(self))
-        bounds = {}
-        initial = {}
-        for _, hyperparameter in hyperparameters:
-            bounds[hyperparameter.name] = OptimizationBounds(
-                hyperparameter.initial, hyperparameter.lower, hyperparameter.upper
-            )
-            initial[hyperparameter.name] = hyperparameter.initial
+        bounds, initial = {}, {}
+        for _, hp in hyperparameters:
+            bounds[hp.name] = OptimizationBounds(hp.initial, hp.lower, hp.upper)
+            initial[hp.name] = hp.initial
         priored = [hp for _, hp in hyperparameters if hp.prior is not None]
         penalty = None
         if priored:
             def penalty(values, priored=priored):
                 return sum(hp.prior.logpdf(values[hp.name]) for hp in priored)
+        return bounds, initial, penalty
+
+    def _run_empirical_bayes(self, family, engine: str) -> GaussianResult | LaplaceResult:
+        fit = self._engine(engine)
+        bounds, initial, penalty = self._family_optimization_inputs()
         eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit, penalty=penalty)
         diagnostics = dict(eb.fit.diagnostics)
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
@@ -166,7 +192,14 @@ class LGM:
         diagnostics["hyperparameter_penalized"] = penalty is not None
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
-    def _fit_pandas(self, frame: pd.DataFrame, engine: str) -> GaussianResult | LaplaceResult:
+    def _run_inla(self, family, engine: str) -> INLAResult:
+        fit = self._engine(engine)
+        bounds, initial, penalty = self._family_optimization_inputs()
+        return integrate_inla(family, bounds, initial=initial, fit=fit, penalty=penalty)
+
+    def _fit_pandas(
+        self, frame: pd.DataFrame, engine: str, *, hyperparameters: str = "optimize"
+    ) -> GaussianResult | LaplaceResult | INLAResult:
         prepared = frame.copy(deep=True)
         time = self.time
         if time is None:
@@ -181,7 +214,13 @@ class LGM:
         from pylgm.compiler import compile_family, compile_lgm
 
         family = compile_family(self, panel)
-        if family is None:
+        if hyperparameters == "integrate":
+            if family is None:
+                raise ValueError(
+                    "hyperparameters='integrate' requires a declared Hyperparameter"
+                )
+            result = self._run_inla(family, engine)
+        elif family is None:
             compiled = compile_lgm(self, panel)
             result = self._engine(engine)(compiled)
         else:
@@ -189,8 +228,13 @@ class LGM:
         return _align_predictions_with_source_rows(result, panel.source_positions)
 
     def _fit_spark(
-        self, frame: object, engine: str, *, max_driver_rows: int | None
-    ) -> GaussianResult | LaplaceResult:
+        self,
+        frame: object,
+        engine: str,
+        *,
+        max_driver_rows: int | None,
+        hyperparameters: str = "optimize",
+    ) -> GaussianResult | LaplaceResult | INLAResult:
         from pylgm.data.spark import canonicalize_spark_frame
 
         canonical = canonicalize_spark_frame(frame, self, max_driver_rows=max_driver_rows)
@@ -198,7 +242,13 @@ class LGM:
         from pylgm.compiler import compile_family, compile_lgm
 
         family = compile_family(self, canonical.panel)
-        if family is None:
+        if hyperparameters == "integrate":
+            if family is None:
+                raise ValueError(
+                    "hyperparameters='integrate' requires a declared Hyperparameter"
+                )
+            result = self._run_inla(family, engine)
+        elif family is None:
             compiled = compile_lgm(self, canonical.panel)
             result = self._engine(engine)(compiled)
         else:
