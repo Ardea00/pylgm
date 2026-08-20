@@ -826,3 +826,32 @@ def test_optimize_rejects_family_without_materialize() -> None:
 
     with pytest.raises(TypeError, match="materialize"):
         optimize_empirical_bayes(_NoMaterialize(), {"g_prec": OptimizationBounds(1.0, 1e-3, 1e3)})
+
+
+def _unit_family():
+    block = LatentBlock("g", ("a", "b"), csr_matrix(np.eye(2)), eye(2, format="csr"),
+                        np.empty((0, 2), dtype=float))
+    return CompiledFamily(
+        y=np.array([1.0, -1.0]), observed=np.array([True, True]), offset=np.zeros(2),
+        blocks=(ScalableBlock(block, "g_prec", 1.0),), parameter_names=("g_prec",),
+        likelihood_factory=lambda r: CompiledGaussian(1.0),
+    )
+
+
+def test_penalty_none_matches_unpenalized():
+    family = _unit_family()
+    bounds = {"g_prec": OptimizationBounds(1.0, 1e-3, 1e3)}
+    a = optimize_empirical_bayes(family, bounds)
+    b = optimize_empirical_bayes(family, bounds, penalty=None)
+    assert a.parameters["g_prec"] == b.parameters["g_prec"]
+
+
+def test_penalty_shifts_the_optimum():
+    family = _unit_family()
+    bounds = {"g_prec": OptimizationBounds(1.0, 1e-3, 1e6)}
+    plain = optimize_empirical_bayes(family, bounds)
+    # a penalty that strongly rewards larger g_prec must move the optimum up
+    penalized = optimize_empirical_bayes(
+        family, bounds, penalty=lambda values: 5.0 * np.log(values["g_prec"]),
+    )
+    assert penalized.parameters["g_prec"] > plain.parameters["g_prec"]

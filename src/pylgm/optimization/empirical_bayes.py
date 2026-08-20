@@ -140,6 +140,7 @@ def optimize_empirical_bayes(
     initial: Mapping[str, float] | None = None,
     allow_large_dense: bool = False,
     fit: Callable[..., object] | None = None,
+    penalty: Callable[[Mapping[str, float]], float] | None = None,
 ) -> EmpiricalBayesResult:
     if type(allow_large_dense) is not bool:
         raise TypeError("allow_large_dense must be a boolean")
@@ -189,6 +190,8 @@ def optimize_empirical_bayes(
                 else fit(model)
             )
             raw_objective = -float(result.log_marginal_likelihood)
+            if penalty is not None:
+                raw_objective -= float(penalty(parameters))
             if not np.isfinite(raw_objective):
                 raise NumericalError("optimization objective must be finite")
             evaluation = _Evaluation(
