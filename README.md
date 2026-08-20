@@ -150,12 +150,61 @@ result.diagnostics["hyperparameter_penalized"]  # True
 ```
 
 This is still a point estimate, not a marginal over the hyperparameter —
-full posterior *integration* over hyperparameters remains later INLA-style
-work. YAML declaration of `Hyperparameter`s is not yet supported — this is a
-Python-API-only capability. Runnable examples live at
+full posterior *integration* over hyperparameters is the separate
+`hyperparameters="integrate"` mode described below. YAML declaration of
+`Hyperparameter`s is not yet supported — this is a Python-API-only
+capability. Runnable examples live at
 [`examples/empirical_bayes/README.md`](examples/empirical_bayes/README.md)
 (prior-free, type-II ML) and
 [`examples/map_ii/README.md`](examples/map_ii/README.md) (prior'd, MAP-II).
+
+## INLA integration
+
+Passing `hyperparameters="integrate"` to `LGM.fit` (instead of the default
+`"optimize"`) resolves every declared `Hyperparameter` by **INLA-style grid
+quadrature** rather than plugging in the type-II/MAP-II optimum: it builds a
+grid of hyperparameter values in log space around the empirical-Bayes mode
+(using a finite-difference Hessian to orient and scale it), weights each
+grid point by its marginal likelihood and the log-space Jacobian, and
+averages the conditional fit at each point. This is supported for both the
+`exact_gaussian` and `laplace` engines, and for a declared `prior` (MAP-II
+penalty) just as with `hyperparameters="optimize"`:
+
+```python
+result = model.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+result.hyperparameter_marginals()["region_precision"]  # GaussianMarginals: mean, sd
+result.latent_marginals("region")  # integrated latent marginals (wider than plug-in)
+result.log_marginal_likelihood  # integrated marginal likelihood
+result.diagnostics["inla_grid_points"]  # how many grid points were kept
+```
+
+Compared to `hyperparameters="optimize"`, this gives:
+
+- a populated `result.hyperparameter_marginals()` (mean/sd per declared
+  hyperparameter) instead of only a point estimate on `result.hyperparameters`;
+- latent marginals that account for hyperparameter uncertainty, not just the
+  latent-field uncertainty conditional on the mode;
+- an *integrated* marginal likelihood rather than the conditional one at a
+  single hyperparameter value.
+
+This mode uses the **Gaussian latent strategy** at every grid point (the
+exact-Gaussian posterior, or the Laplace approximation for non-Gaussian
+likelihoods) — it does not yet implement INLA's simplified- or full-Laplace
+latent correction. It is practical for a handful of declared
+hyperparameters: the grid grows as `(2 * radius + 1) ** d`, and a
+`max_grid_points` guard raises `OptimizationError` before building a grid
+that would be too large. Model-assessment criteria (DIC, WAIC, CPO, PIT) are
+not yet implemented for either fit mode.
+
+**Limitation:** grid integration assumes the hyperparameter posterior is
+reasonably interior and near-Gaussian in log space. When it is instead
+boundary-dominated — an under-informative model, or the empirical-Bayes mode
+pinned to a declared `lower`/`upper` bound — the grid degenerates toward a
+single point and the integration quietly reduces to the plug-in fit.
+`result.diagnostics["inla_active_bounds"]` surfaces which hyperparameters (if
+any) hit a bound at the mode, so this degradation is visible rather than
+silent. A runnable example lives at
+[`examples/inla/README.md`](examples/inla/README.md).
 
 ## Development installation
 

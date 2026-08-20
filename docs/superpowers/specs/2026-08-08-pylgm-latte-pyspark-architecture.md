@@ -203,19 +203,32 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - Binomial(n) likelihood;
 - non-canonical links;
 - exposures and observation weights;
-- INLA-style numerical integration over hyperparameters;
+- richer latent strategies for INLA integration (section 3c below);
 - spatial effects.
 
 ### 3. INLA-style inference
 
-Penalized MAP-II (prior-penalized hyperparameter estimation), the interim
-step short of full integration, has shipped for both the exact-Gaussian and
-Laplace engines (see sections 1 and 2 above). Still deferred:
+**3a. INLA integration core — shipped.** Penalized MAP-II (section 1 and 2
+above) was the interim step short of full integration. `LGM.fit(...,
+hyperparameters="integrate")` has since shipped for both the
+exact-Gaussian and Laplace engines: grid quadrature in log space around the
+empirical-Bayes mode, oriented and scaled by a finite-difference Hessian,
+weighted by the marginal likelihood and the log-space Jacobian, with a
+`max_grid_points` guard. It gives an integrated marginal likelihood,
+populated `result.hyperparameter_marginals()`, and integrated latent
+marginals via `result.latent_marginals(...)`, using the Gaussian latent
+strategy at every grid point (see the
+[project README](../../../README.md#inla-integration)).
 
-- numerical integration over hyperparameters;
-- latent and hyperparameter marginals;
-- log marginal likelihood, DIC, WAIC, CPO, and PIT;
-- explicit approximation-quality diagnostics.
+Still deferred:
+
+- **3b. Model-assessment criteria** — DIC, WAIC, CPO, PIT, and explicit
+  approximation-quality diagnostics beyond the existing grid/bound
+  diagnostics (`inla_grid_points`, `inla_active_bounds`, and similar);
+- **3c. Richer latent strategies** — the simplified- and full-Laplace
+  corrections to the latent marginals that give INLA its name; 3a uses only
+  the Gaussian approximation (exact-Gaussian posterior or Laplace mode) at
+  each grid point.
 
 ### 4. Spatial effects
 
