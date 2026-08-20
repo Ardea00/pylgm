@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from pylgm import Fixed, Gaussian, IID, LGM, Poisson, RW1, RW2
+from pylgm import Fixed, Gaussian, IID, LGM, PCPrecision, Poisson, RW1, RW2
 from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
@@ -348,3 +348,45 @@ def test_empirical_bayes_precision_matches_fixed_precision_refit_at_optimum():
     np.testing.assert_allclose(
         eb_result.predictive_mean, fixed_result.predictive_mean, atol=1e-6
     )
+
+
+def _panel_frame(seed=0):
+    rng = np.random.default_rng(seed)
+    rows = [{"region": r, "t": t, "y": rng.normal()} for t in range(1, 21) for r in "abcd"]
+    return pd.DataFrame(rows)
+
+
+def test_map_ii_sets_penalized_flag_and_estimate_both_engines():
+    frame = _panel_frame()
+    gauss = LGM("y", Gaussian(0.5),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0,
+                                                          prior=PCPrecision(upper_sd=1.0, alpha=0.01))),
+                panel=("region",), time="t")
+    result = gauss.fit(frame, engine="exact_gaussian")
+    assert result.diagnostics["hyperparameter_penalized"] is True
+    assert result.hyperparameters["p"] > 0
+
+    counts = frame.assign(y=(frame["y"].abs() * 3).round())
+    pois = LGM("y", Poisson(),
+               Fixed("1") + IID("region", index="region",
+                                precision=Hyperparameter("p", initial=1.0,
+                                                         prior=PCPrecision(upper_sd=1.0, alpha=0.01))),
+               panel=("region",), time="t")
+    pres = pois.fit(counts, engine="laplace")
+    assert pres.diagnostics["hyperparameter_penalized"] is True
+    assert pres.hyperparameters["p"] > 0
+
+
+def test_ml_when_no_prior_and_penalty_changes_estimate():
+    frame = _panel_frame()
+    def build(prior):
+        return LGM("y", Gaussian(0.5),
+                   Fixed("1") + IID("region", index="region",
+                                    precision=Hyperparameter("p", initial=1.0, prior=prior)),
+                   panel=("region",), time="t")
+    ml = build(None).fit(frame, engine="exact_gaussian")
+    assert ml.diagnostics["hyperparameter_penalized"] is False
+    map_ii = build(PCPrecision(upper_sd=0.2, alpha=0.01)).fit(frame, engine="exact_gaussian")
+    # the prior must actually move the estimate
+    assert not np.isclose(ml.hyperparameters["p"], map_ii.hyperparameters["p"])

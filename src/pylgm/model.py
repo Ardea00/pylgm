@@ -153,10 +153,16 @@ class LGM:
                 hyperparameter.initial, hyperparameter.lower, hyperparameter.upper
             )
             initial[hyperparameter.name] = hyperparameter.initial
-        eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit)
+        priored = [hp for _, hp in _model_hyperparameters(self) if hp.prior is not None]
+        penalty = None
+        if priored:
+            def penalty(values, priored=priored):
+                return sum(hp.prior.logpdf(values[hp.name]) for hp in priored)
+        eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit, penalty=penalty)
         diagnostics = dict(eb.fit.diagnostics)
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
         diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
+        diagnostics["hyperparameter_penalized"] = penalty is not None
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
     def _fit_pandas(self, frame: pd.DataFrame, engine: str) -> GaussianResult | LaplaceResult:
