@@ -30,14 +30,17 @@ effect `precision`.
 The 0.3 exact and Laplace engines condition on plain numeric hyperparameter
 values. A declarative `Hyperparameter` contributes its validated `.initial`
 value during compilation and, since the ["Empirical Bayes"](#empirical-bayes)
-slice, is estimated by type-II ML rather than merely held fixed; its prior is
-still not copied into the materialized IR or evaluated by inference.
-`PCPrecision` and `GaussianPrior` therefore define target-state prior
-vocabulary, not integrated 0.3 penalized (MAP-II) or marginal hyperparameter
-inference.
+slice, is estimated by type-II ML rather than merely held fixed. Since the
+same slice's MAP-II follow-up, a `Hyperparameter`'s `prior` — when declared —
+is also consumed: its native-scale log density penalizes the marginal
+likelihood, turning the estimate into a MAP-II point estimate. The prior is
+still not copied into the materialized IR, and there is no Jacobian
+correction for `transform`. `PCPrecision` and `GaussianPrior` therefore
+already drive point estimation, but not yet integrated (marginal)
+hyperparameter inference.
 
 AR1 effects, `result.predict(new_data)`, parameterized IR metadata,
-penalized MAP-II and INLA-style hyperparameter marginals, sparse production
+INLA-style hyperparameter marginals, sparse production
 engines, spatial effects, and HMC are deferred to later slices. Optional
 PySpark input is now supported as a data boundary (see below). Pandas
 predictions in 0.3 cover the rows supplied to `LGM.fit`; their arrays follow
@@ -113,15 +116,46 @@ result.diagnostics["empirical_bayes_converged"]
 ```
 
 The fitted value is exposed on `result.hyperparameters`; a model with no
-declared `Hyperparameter` leaves `result.hyperparameters` as `None`. A
-`Hyperparameter`'s `prior` (e.g. `PCPrecision`, `GaussianPrior`) remains
-declaration metadata only — this estimation is unpenalized type-II ML at a
-fixed initial value, not a MAP estimate, and the prior is not yet evaluated
-by inference; it is reserved for later INLA-style integration. This is a
-point estimate, not a marginal over the hyperparameter. YAML declaration of
-`Hyperparameter`s is not yet supported — this is a Python-API-only
-capability. A runnable example lives at
-[`examples/empirical_bayes/README.md`](examples/empirical_bayes/README.md).
+declared `Hyperparameter` leaves `result.hyperparameters` as `None`.
+
+When a declared `Hyperparameter` also carries a `prior` (e.g. `PCPrecision`,
+`GaussianPrior`), `LGM.fit` estimates it by **MAP-II** instead of pure
+type-II ML: the same marginal-likelihood objective is penalized by the
+prior's log density evaluated on the hyperparameter's native scale (no
+Jacobian correction for `transform`), for both the `exact_gaussian` and
+`laplace` engines. A prior-free `Hyperparameter` stays pure type-II ML.
+`result.diagnostics["hyperparameter_penalized"]` records whether any
+declared hyperparameter was penalized this way:
+
+```python
+from pylgm import Fixed, Gaussian, Hyperparameter, IID, LGM, PCPrecision
+
+model = LGM(
+    response="y",
+    likelihood=Gaussian(0.5),
+    predictor=Fixed("1")
+    + IID(
+        "region", index="region",
+        precision=Hyperparameter(
+            "region_precision", initial=1.0,
+            prior=PCPrecision(upper_sd=1.0, alpha=0.01),
+        ),
+    ),
+    panel=("region",),
+    time="time",
+)
+result = model.fit(frame, engine="exact_gaussian")
+result.hyperparameters["region_precision"]  # the MAP-II estimate
+result.diagnostics["hyperparameter_penalized"]  # True
+```
+
+This is still a point estimate, not a marginal over the hyperparameter —
+full posterior *integration* over hyperparameters remains later INLA-style
+work. YAML declaration of `Hyperparameter`s is not yet supported — this is a
+Python-API-only capability. Runnable examples live at
+[`examples/empirical_bayes/README.md`](examples/empirical_bayes/README.md)
+(prior-free, type-II ML) and
+[`examples/map_ii/README.md`](examples/map_ii/README.md) (prior'd, MAP-II).
 
 ## Development installation
 

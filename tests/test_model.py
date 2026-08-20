@@ -390,3 +390,24 @@ def test_ml_when_no_prior_and_penalty_changes_estimate():
     map_ii = build(PCPrecision(upper_sd=0.2, alpha=0.01)).fit(frame, engine="exact_gaussian")
     # the prior must actually move the estimate
     assert not np.isclose(ml.hyperparameters["p"], map_ii.hyperparameters["p"])
+
+
+def test_mixed_hyperparameters_penalize_only_the_prior_bearing_one():
+    frame = _panel_frame()
+    model = LGM(
+        "y", Gaussian(0.5),
+        Fixed("1")
+        + IID("region", index="region",
+              precision=Hyperparameter("region_precision", initial=1.0,
+                                       prior=PCPrecision(upper_sd=1.0, alpha=0.01)))
+        + IID("time_effect", index="t",
+              precision=Hyperparameter("time_precision", initial=1.0)),
+        panel=("region",), time="t",
+    )
+    result = model.fit(frame, engine="exact_gaussian")
+    assert result.diagnostics["hyperparameter_penalized"] is True
+    assert "region_precision" in result.hyperparameters
+    assert "time_precision" in result.hyperparameters
+    assert result.hyperparameters["region_precision"] > 0
+    assert result.hyperparameters["time_precision"] > 0
+    assert result.diagnostics["empirical_bayes_converged"] is True

@@ -25,14 +25,16 @@ model = LGM(
 result = model.fit(frame, engine="exact_gaussian")
 ```
 
-Declaring `region_precision` as a `Hyperparameter` (instead of passing a
-plain number) makes `LGM.fit` estimate it by **type-II maximum likelihood**:
-it optimizes the exact-Gaussian marginal likelihood over the hyperparameter,
-starting from `initial` and respecting any declared `lower`/`upper` bounds.
-This is a fixed-prior point estimate, not a full Bayesian marginal over the
-hyperparameter — see the ["Empirical Bayes" section](../../README.md) of the
-project README for the full contract, including the Laplace-engine case and
-what is still out of scope (YAML declaration, penalized MAP-II, and
+Declaring `region_precision` as a `Hyperparameter` with no `prior` (instead
+of passing a plain number) makes `LGM.fit` estimate it by **type-II maximum
+likelihood**: it optimizes the exact-Gaussian marginal likelihood over the
+hyperparameter, starting from `initial` and respecting any declared
+`lower`/`upper` bounds. This is an unpenalized point estimate, not a full
+Bayesian marginal over the hyperparameter — see the
+["Empirical Bayes" section](../../README.md) of the project README for the
+full contract, including the Laplace-engine case, the penalized MAP-II case
+(see [`examples/map_ii`](../map_ii/README.md) for a `Hyperparameter` declared
+with a `prior`), and what is still out of scope (YAML declaration and
 hyperparameter marginals/INLA).
 
 The fitted precision is exposed on `result.hyperparameters["region_precision"]`
