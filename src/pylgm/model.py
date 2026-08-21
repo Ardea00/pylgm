@@ -69,6 +69,7 @@ def _rebuild_result(
             criteria=criteria,
             fitted_mean=fitted_mean,
             link_name=result.link_name,
+            latent_marginal_table=result.latent_marginal_table,
             **common,
         )
     return GaussianResult(**common)
@@ -125,6 +126,7 @@ class LGM:
         *,
         max_driver_rows: int | None = 100_000,
         hyperparameters: str = "optimize",
+        latent_strategy: str = "gaussian",
     ):
         """Compile and fit this model with an explicitly selected engine.
 
@@ -137,19 +139,37 @@ class LGM:
         resolved: ``"optimize"`` (default) fits the empirical Bayes mode, and
         ``"integrate"`` runs INLA grid integration over the hyperparameter
         posterior instead (requires at least one declared ``Hyperparameter``).
+
+        ``latent_strategy`` selects how latent marginals are summarized under
+        ``hyperparameters="integrate"``: ``"gaussian"`` (default) keeps the
+        Gaussian conditional summaries, and ``"simplified_laplace"`` fits
+        skew-normal marginals (Rue-Martino-Chopin 2009) and requires
+        ``hyperparameters="integrate"``.
         """
         if hyperparameters not in ("optimize", "integrate"):
             raise ValueError(
                 f"hyperparameters must be 'optimize' or 'integrate', got {hyperparameters!r}"
             )
+        if latent_strategy not in ("gaussian", "simplified_laplace"):
+            raise ValueError(
+                f"latent_strategy must be 'gaussian' or 'simplified_laplace', "
+                f"got {latent_strategy!r}"
+            )
+        if latent_strategy == "simplified_laplace" and hyperparameters != "integrate":
+            raise ValueError(
+                "latent_strategy='simplified_laplace' requires hyperparameters='integrate'"
+            )
         if isinstance(frame, pd.DataFrame):
-            return self._fit_pandas(frame, engine, hyperparameters=hyperparameters)
+            return self._fit_pandas(
+                frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy
+            )
 
         from pylgm.data.spark import is_spark_dataframe
 
         if is_spark_dataframe(frame):
             return self._fit_spark(
-                frame, engine, max_driver_rows=max_driver_rows, hyperparameters=hyperparameters
+                frame, engine, max_driver_rows=max_driver_rows,
+                hyperparameters=hyperparameters, latent_strategy=latent_strategy,
             )
         raise DataContractError("frame must be a Pandas DataFrame")
 
@@ -197,13 +217,17 @@ class LGM:
         diagnostics["hyperparameter_penalized"] = penalty is not None
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
-    def _run_inla(self, family, engine: str) -> INLAResult:
+    def _run_inla(self, family, engine: str, latent_strategy: str = "gaussian") -> INLAResult:
         fit = self._engine(engine)
         bounds, initial, penalty = self._family_optimization_inputs()
-        return integrate_inla(family, bounds, initial=initial, fit=fit, penalty=penalty)
+        return integrate_inla(
+            family, bounds, initial=initial, fit=fit, penalty=penalty,
+            latent_strategy=latent_strategy,
+        )
 
     def _fit_pandas(
-        self, frame: pd.DataFrame, engine: str, *, hyperparameters: str = "optimize"
+        self, frame: pd.DataFrame, engine: str, *,
+        hyperparameters: str = "optimize", latent_strategy: str = "gaussian",
     ) -> GaussianResult | LaplaceResult | INLAResult:
         prepared = frame.copy(deep=True)
         time = self.time
@@ -224,7 +248,7 @@ class LGM:
                 raise ValueError(
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
-            result = self._run_inla(family, engine)
+            result = self._run_inla(family, engine, latent_strategy)
         elif family is None:
             compiled = compile_lgm(self, panel)
             result = self._engine(engine)(compiled)
@@ -239,6 +263,7 @@ class LGM:
         *,
         max_driver_rows: int | None,
         hyperparameters: str = "optimize",
+        latent_strategy: str = "gaussian",
     ) -> GaussianResult | LaplaceResult | INLAResult:
         from pylgm.data.spark import canonicalize_spark_frame
 
@@ -252,7 +277,7 @@ class LGM:
                 raise ValueError(
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
-            result = self._run_inla(family, engine)
+            result = self._run_inla(family, engine, latent_strategy)
         elif family is None:
             compiled = compile_lgm(self, canonical.panel)
             result = self._engine(engine)(compiled)

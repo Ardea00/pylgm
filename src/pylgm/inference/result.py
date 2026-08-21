@@ -336,6 +336,13 @@ class SkewNormalMarginals:
             hi = np.where(below, hi, mid)
         return _readonly_array(0.5 * (lo + hi))
 
+    def select(self, selection: slice) -> "SkewNormalMarginals":
+        """Return the component-subset marginals for the given slice of the component axis."""
+        return SkewNormalMarginals(
+            self._weights[selection], self._location[selection],
+            self._scale[selection], self._shape[selection],
+        )
+
 
 @dataclass(frozen=True, init=False)
 class GaussianResult:
@@ -666,6 +673,7 @@ class INLAResult:
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
     _hyperparameters: Mapping[str, float] | None = field(repr=False)
+    _latent_marginal_table: "SkewNormalMarginals | None" = field(repr=False)
 
     def __init__(
         self,
@@ -684,6 +692,7 @@ class INLAResult:
         diagnostics: Mapping[str, object] | None = None,
         prediction_keys: pd.DataFrame | None = None,
         hyperparameters: Mapping[str, float] | None = None,
+        latent_marginal_table: "SkewNormalMarginals | None" = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -691,6 +700,10 @@ class INLAResult:
             raise TypeError("diagnostics must be a mapping")
         if not isinstance(criteria, ModelCriteria):
             raise TypeError("criteria must be a ModelCriteria")
+        if latent_marginal_table is not None and not isinstance(
+            latent_marginal_table, SkewNormalMarginals
+        ):
+            raise TypeError("latent_marginal_table must be a SkewNormalMarginals")
         _validate_prediction_keys(prediction_keys, predictive_mean)
         covariance = np.asarray(covariance)
         if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
@@ -733,6 +746,7 @@ class INLAResult:
         object.__setattr__(
             self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
         )
+        object.__setattr__(self, "_latent_marginal_table", latent_marginal_table)
 
     @property
     def mean(self) -> np.ndarray:
@@ -767,6 +781,10 @@ class INLAResult:
         return self._hyperparameters
 
     @property
+    def latent_marginal_table(self) -> "SkewNormalMarginals | None":
+        return self._latent_marginal_table
+
+    @property
     def engine(self) -> str:
         return "inla"
 
@@ -774,7 +792,10 @@ class INLAResult:
     def converged(self) -> bool:
         return True
 
-    def latent_marginals(self, block: str | None = None) -> GaussianMarginals:
+    def latent_marginals(self, block: str | None = None) -> "GaussianMarginals | SkewNormalMarginals":
+        if self._latent_marginal_table is not None:
+            selection = slice(None) if block is None else self.block_slices[block]
+            return self._latent_marginal_table.select(selection)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:

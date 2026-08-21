@@ -563,3 +563,39 @@ def test_criteria_cpo_pit_have_nan_at_unobserved_rows():
     assert np.all(np.isnan(pit[~observed_mask]))
     assert np.all(np.isfinite(cpo[observed_mask]))
     assert np.all(np.isfinite(pit[observed_mask]))
+
+
+def test_sla_latent_strategy_returns_skew_marginals_both_engines():
+    from pylgm import Fixed, IID, LGM, Poisson, Hyperparameter
+    from pylgm.inference.result import SkewNormalMarginals, GaussianMarginals
+
+    rng = np.random.default_rng(0)
+    regions = [f"r{i}" for i in range(25)]
+    eff = {r: rng.normal() for r in regions}
+    rows = [{"region": r, "t": t, "y": eff[r] + rng.normal()} for t in range(6) for r in regions]
+    frame = pd.DataFrame(rows)
+    counts = frame.assign(y=(frame["y"].abs() * 3).round())
+    model = LGM("y", Poisson(),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    sla = model.fit(counts, engine="laplace", hyperparameters="integrate",
+                    latent_strategy="simplified_laplace")
+    assert isinstance(sla.latent_marginals("region"), SkewNormalMarginals)
+    # default stays Gaussian
+    gauss = model.fit(counts, engine="laplace", hyperparameters="integrate")
+    assert isinstance(gauss.latent_marginals("region"), GaussianMarginals)
+
+
+def test_sla_requires_integration_and_valid_strategy():
+    from pylgm import Fixed, Gaussian, IID, LGM, Hyperparameter
+    frame = pd.DataFrame({"region": ["a", "b"] * 10, "t": list(range(20)),
+                          "y": np.random.default_rng(0).normal(size=20)})
+    model = LGM("y", Gaussian(1.0),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    with pytest.raises(ValueError, match="integrate"):
+        model.fit(frame, hyperparameters="optimize", latent_strategy="simplified_laplace")
+    with pytest.raises(ValueError, match="latent_strategy"):
+        model.fit(frame, hyperparameters="integrate", latent_strategy="nonsense")

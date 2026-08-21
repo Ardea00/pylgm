@@ -8,7 +8,12 @@ from scipy.special import logsumexp
 
 from pylgm.exceptions import NumericalError, OptimizationError
 from pylgm.inference import LaplaceResult, fit_gaussian
-from pylgm.inference.result import GaussianMarginals, INLAResult, ModelCriteria
+from pylgm.inference.result import (
+    GaussianMarginals,
+    INLAResult,
+    ModelCriteria,
+    SkewNormalMarginals,
+)
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 
 _SN_C = (4.0 - math.pi) * math.sqrt(2.0) / math.pi ** 1.5
@@ -153,6 +158,7 @@ def _build_grid(
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, radius=3, log_density_drop=2.5, max_grid_points=4096,
+    latent_strategy="gaussian",
 ) -> INLAResult:
     names = tuple(family.parameter_names)
     conditional_fit = fit if fit is not None else fit_gaussian
@@ -291,6 +297,15 @@ def integrate_inla(
         cpo_full, pit_full, crit.cpo_failures, crit.log_cpo_sum,
     )
 
+    latent_marginal_table = None
+    if latent_strategy == "simplified_laplace":
+        sla_grid = [(w, cond, compiled.likelihood)
+                    for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
+        location, scale, shape, sla_weights, _ = _simplified_laplace_marginals(
+            design_obs, offset_obs, y_obs, sla_grid,
+        )
+        latent_marginal_table = SkewNormalMarginals(sla_weights, location, scale, shape)
+
     return INLAResult(
         labels=reference.labels,
         mean=mean, covariance=covariance, log_marginal_likelihood=integrated_lml,
@@ -299,6 +314,7 @@ def integrate_inla(
         criteria=criteria,
         fitted_mean=fitted_acc, link_name=link_name,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
+        latent_marginal_table=latent_marginal_table,
     )
 
 
