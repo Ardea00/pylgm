@@ -793,7 +793,7 @@ class INLAResult:
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
     _hyperparameters: Mapping[str, float] | None = field(repr=False)
-    _latent_marginal_table: "SkewNormalMarginals | None" = field(repr=False)
+    _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
 
     def __init__(
         self,
@@ -812,7 +812,7 @@ class INLAResult:
         diagnostics: Mapping[str, object] | None = None,
         prediction_keys: pd.DataFrame | None = None,
         hyperparameters: Mapping[str, float] | None = None,
-        latent_marginal_table: "SkewNormalMarginals | None" = None,
+        latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -821,9 +821,11 @@ class INLAResult:
         if not isinstance(criteria, ModelCriteria):
             raise TypeError("criteria must be a ModelCriteria")
         if latent_marginal_table is not None and not isinstance(
-            latent_marginal_table, SkewNormalMarginals
+            latent_marginal_table, (SkewNormalMarginals, TabulatedMarginals)
         ):
-            raise TypeError("latent_marginal_table must be a SkewNormalMarginals")
+            raise TypeError(
+                "latent_marginal_table must be a SkewNormalMarginals or TabulatedMarginals"
+            )
         _validate_prediction_keys(prediction_keys, predictive_mean)
         covariance = np.asarray(covariance)
         if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
@@ -901,7 +903,7 @@ class INLAResult:
         return self._hyperparameters
 
     @property
-    def latent_marginal_table(self) -> "SkewNormalMarginals | None":
+    def latent_marginal_table(self) -> "SkewNormalMarginals | TabulatedMarginals | None":
         return self._latent_marginal_table
 
     @property

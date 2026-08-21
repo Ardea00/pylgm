@@ -624,3 +624,59 @@ def test_sla_requires_integration_and_valid_strategy():
         model.fit(frame, hyperparameters="optimize", latent_strategy="simplified_laplace")
     with pytest.raises(ValueError, match="latent_strategy"):
         model.fit(frame, hyperparameters="integrate", latent_strategy="nonsense")
+
+
+def test_full_laplace_latent_strategy_returns_tabulated_both_engines():
+    from pylgm import Fixed, Gaussian, IID, LGM, Poisson, Hyperparameter
+    from pylgm.inference.result import TabulatedMarginals
+    rng = np.random.default_rng(0)
+    regions = [f"r{i}" for i in range(25)]
+    eff = {r: rng.normal() for r in regions}
+    rows = [{"region": r, "t": t, "x": rng.normal(), "y": eff[r] + rng.normal()}
+            for t in range(6) for r in regions]
+    frame = pd.DataFrame(rows)
+    counts = frame.assign(y=(frame["y"].abs() * 3).round())
+    # UNCONSTRAINED: Fixed + IID (no RW)
+    model = LGM("y", Poisson(),
+                Fixed("1 + x") + IID("region", index="region",
+                                     precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    res = model.fit(counts, engine="laplace", hyperparameters="integrate",
+                    latent_strategy="laplace")
+    assert isinstance(res.latent_marginals("region"), TabulatedMarginals)
+
+    gauss_model = LGM("y", Gaussian(1.0),
+                      Fixed("1") + IID("region", index="region",
+                                       precision=Hyperparameter("p", initial=1.0)),
+                      panel=("region",), time="t")
+    gauss_frame = frame.drop(columns=["x"])
+    gauss_res = gauss_model.fit(gauss_frame, engine="exact_gaussian", hyperparameters="integrate",
+                                latent_strategy="laplace")
+    assert isinstance(gauss_res.latent_marginals("region"), TabulatedMarginals)
+
+
+def test_full_laplace_rejects_constrained_effects():
+    from pylgm import Fixed, Gaussian, LGM, RW1, Hyperparameter
+    from pylgm.exceptions import UnsupportedEngineError
+    rng = np.random.default_rng(0)
+    rows = [{"t": t, "y": rng.normal()} for t in range(1, 40)]
+    frame = pd.DataFrame(rows)
+    model = LGM("y", Gaussian(1.0),
+                Fixed("1") + RW1("trend", index="t",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                time="t")
+    with pytest.raises(UnsupportedEngineError, match="constrained|laplace"):
+        model.fit(frame, engine="exact_gaussian", hyperparameters="integrate",
+                  latent_strategy="laplace")
+
+
+def test_full_laplace_requires_integration():
+    from pylgm import Fixed, Gaussian, IID, LGM, Hyperparameter
+    frame = pd.DataFrame({"region": ["a", "b"] * 10, "t": list(range(20)),
+                          "y": np.random.default_rng(0).normal(size=20)})
+    model = LGM("y", Gaussian(1.0),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    with pytest.raises(ValueError, match="integrate"):
+        model.fit(frame, hyperparameters="optimize", latent_strategy="laplace")

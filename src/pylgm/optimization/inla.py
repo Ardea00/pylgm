@@ -8,7 +8,7 @@ from scipy.interpolate import CubicSpline
 from scipy.linalg import cho_factor
 from scipy.special import logsumexp
 
-from pylgm.exceptions import NumericalError, OptimizationError
+from pylgm.exceptions import NumericalError, OptimizationError, UnsupportedEngineError
 from pylgm.inference import LaplaceResult, fit_gaussian
 from pylgm.inference.result import (
     GaussianMarginals,
@@ -385,6 +385,15 @@ def integrate_inla(
         )
         latent_marginal_table = SkewNormalMarginals(sla_weights, location, scale, shape)
         diagnostics["skew_clamped"] = int(clamped_count)
+    elif latent_strategy == "laplace":
+        if kept[0][4].constraints.shape[0] > 0:
+            raise UnsupportedEngineError(
+                "full Laplace does not support constrained (RW) effects; "
+                "use latent_strategy='gaussian' or 'simplified_laplace'"
+            )
+        latent_marginal_table = _full_laplace_marginals(
+            design_obs, offset_obs, y_obs, theta_grid, kept[0][4].precision,
+        )
 
     return INLAResult(
         labels=reference.labels,

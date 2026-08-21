@@ -142,22 +142,23 @@ class LGM:
 
         ``latent_strategy`` selects how latent marginals are summarized under
         ``hyperparameters="integrate"``: ``"gaussian"`` (default) keeps the
-        Gaussian conditional summaries, and ``"simplified_laplace"`` fits
-        skew-normal marginals (Rue-Martino-Chopin 2009) and requires
-        ``hyperparameters="integrate"``.
+        Gaussian conditional summaries, ``"simplified_laplace"`` fits
+        skew-normal marginals (Rue-Martino-Chopin 2009), and ``"laplace"``
+        fits full-Laplace tabulated marginals (unconstrained models only);
+        both non-``"gaussian"`` strategies require ``hyperparameters="integrate"``.
         """
         if hyperparameters not in ("optimize", "integrate"):
             raise ValueError(
                 f"hyperparameters must be 'optimize' or 'integrate', got {hyperparameters!r}"
             )
-        if latent_strategy not in ("gaussian", "simplified_laplace"):
+        if latent_strategy not in ("gaussian", "simplified_laplace", "laplace"):
             raise ValueError(
-                f"latent_strategy must be 'gaussian' or 'simplified_laplace', "
+                f"latent_strategy must be 'gaussian', 'simplified_laplace', or 'laplace', "
                 f"got {latent_strategy!r}"
             )
-        if latent_strategy == "simplified_laplace" and hyperparameters != "integrate":
+        if latent_strategy != "gaussian" and hyperparameters != "integrate":
             raise ValueError(
-                "latent_strategy='simplified_laplace' requires hyperparameters='integrate'"
+                f"latent_strategy={latent_strategy!r} requires hyperparameters='integrate'"
             )
         if isinstance(frame, pd.DataFrame):
             return self._fit_pandas(
