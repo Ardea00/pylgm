@@ -194,7 +194,8 @@ latent correction. It is practical for a handful of declared
 hyperparameters: the grid grows as `(2 * radius + 1) ** d`, and a
 `max_grid_points` guard raises `OptimizationError` before building a grid
 that would be too large. Model-assessment criteria (DIC, WAIC, CPO, PIT) are
-not yet implemented for either fit mode.
+computed for every integrated fit — see
+["Model-assessment criteria"](#model-assessment-criteria) below.
 
 **Limitation:** grid integration assumes the hyperparameter posterior is
 reasonably interior and near-Gaussian in log space. When it is instead
@@ -205,6 +206,48 @@ single point and the integration quietly reduces to the plug-in fit.
 any) hit a bound at the mode, so this degradation is visible rather than
 silent. A runnable example lives at
 [`examples/inla/README.md`](examples/inla/README.md).
+
+## Model-assessment criteria
+
+Every integrated fit (`hyperparameters="integrate"`, either the
+`exact_gaussian` or `laplace` engine) carries `result.criteria`, a
+`ModelCriteria` populated with DIC, WAIC, per-observation CPO and PIT, and
+two summary fields:
+
+```python
+result = model.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+
+criteria = result.criteria
+criteria.dic                        # deviance information criterion
+criteria.dic_effective_parameters   # DIC's effective-parameter count
+criteria.waic                       # widely applicable information criterion
+criteria.waic_effective_parameters  # WAIC's effective-parameter count
+criteria.cpo                        # per-observation CPO array
+criteria.pit                        # per-observation PIT array
+criteria.cpo_failures               # count of unreliable per-obs CPO estimates
+criteria.log_cpo_sum                # sum of log CPO, a leave-one-out log score
+```
+
+- **DIC** and **WAIC** are model-*comparison* criteria — lower is better
+  when comparing fits of the same data — each paired with an
+  effective-parameter count as a complexity penalty.
+- **CPO** (conditional predictive ordinate) is the leave-one-out predictive
+  density for each observation, computed via the harmonic-mean identity
+  rather than by refitting once per held-out point. That identity can be
+  numerically unreliable for individual observations, so `cpo_failures`
+  counts how many per-observation CPO values hit the reliability guard;
+  `log_cpo_sum` sums the per-observation log CPO into a single leave-one-out
+  log predictive score.
+- **PIT** (probability integral transform) is the predictive CDF evaluated
+  at each observed response. PIT values that resemble a Uniform(0, 1) sample
+  indicate good calibration; clustering near 0 or 1 indicates miscalibration.
+  For discrete-response likelihoods, `pit` is the non-randomized `P(Y <= y)`
+  rather than the randomized PIT, so it is conservative even for a correctly
+  specified model.
+
+Criteria are not yet computed for plug-in fits (`hyperparameters="optimize"`
+or the default). A runnable example lives at
+[`examples/inla_criteria/README.md`](examples/inla_criteria/README.md).
 
 ## Development installation
 

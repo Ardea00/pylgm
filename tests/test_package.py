@@ -91,6 +91,17 @@ def test_inla_example_reports_integrated_marginals():
     assert "hyperparameter_marginals" in completed.stdout
 
 
+def test_inla_criteria_example_reports_dic_waic():
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/inla_criteria/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "waic" in completed.stdout.lower()
+
+
 def test_installed_console_entrypoint_loads_and_reports_help() -> None:
     matches = tuple(entry_points(group="console_scripts", name="pylgm"))
 

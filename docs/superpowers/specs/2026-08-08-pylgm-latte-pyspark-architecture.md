@@ -179,12 +179,12 @@ since shipped on top of that: when the declared `Hyperparameter` also
 carries a `prior`, its native-scale log density penalizes the same marginal
 likelihood, and `result.diagnostics["hyperparameter_penalized"]` records it
 (no Jacobian correction for `transform`). This is still a point estimate,
-not a marginal. AR1, `result.predict(new_data)`, parameterized IR metadata,
-and advanced hyperparameter-integration features are explicitly deferred
-(model-assessment criteria—DIC/WAIC/CPO/PIT—and richer latent strategies
-beyond Gaussian, section 3c); the hyperparameter integration core (grid
-quadrature, section 3a) has since shipped. The target foundation is therefore
-not complete in 0.3.
+not a marginal. AR1, `result.predict(new_data)`, and parameterized IR
+metadata are explicitly deferred. The hyperparameter integration core (grid
+quadrature, section 3a) and model-assessment criteria (DIC/WAIC/CPO/PIT,
+section 3b) have since shipped; richer latent strategies beyond Gaussian
+(section 3c) remain deferred. The target foundation is therefore not
+complete in 0.3.
 
 ### 2. Non-Gaussian LGM
 
@@ -223,11 +223,20 @@ marginals via `result.latent_marginals(...)`, using the Gaussian latent
 strategy at every grid point (see the
 [project README](../../../README.md#inla-integration)).
 
+**3b. Model-assessment criteria — shipped.** Every integrated fit
+(`result.criteria`, an attached `ModelCriteria`) reports DIC, WAIC (each with
+an effective-parameter count), per-observation CPO via the leave-one-out
+harmonic-mean identity with a `cpo_failures` reliability flag, a
+`log_cpo_sum` leave-one-out log score, and per-observation PIT, for both the
+exact-Gaussian and Laplace engines (see the
+[project README](../../../README.md#model-assessment-criteria)). Still
+deferred within 3b: a randomized PIT for discrete-response likelihoods (the
+shipped `pit` is the non-randomized `P(Y <= y)`), and criteria for plug-in
+fits (`hyperparameters="optimize"` or the default) rather than only
+integrated ones.
+
 Still deferred:
 
-- **3b. Model-assessment criteria** — DIC, WAIC, CPO, PIT, and explicit
-  approximation-quality diagnostics beyond the existing grid/bound
-  diagnostics (`inla_grid_points`, `inla_active_bounds`, and similar);
 - **3c. Richer latent strategies** — the simplified- and full-Laplace
   corrections to the latent marginals that give INLA its name; 3a uses only
   the Gaussian approximation (exact-Gaussian posterior or Laplace mode) at
@@ -336,9 +345,9 @@ mathematical correctness.
 - `result.predict(new_data)`;
 - parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
-- INLA integration (was a non-goal of the first refactor; the integration core
-  has since shipped as sub-slice 3a with model-assessment criteria and richer
-  latent strategies remaining);
+- INLA integration (was a non-goal of the first refactor; the integration
+  core and model-assessment criteria have since shipped as sub-slices 3a and
+  3b, with richer latent strategies (3c) remaining);
 - spatial effects and SPDE meshes;
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
