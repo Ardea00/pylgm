@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 from itertools import product
 
@@ -9,6 +10,40 @@ from pylgm.exceptions import NumericalError, OptimizationError
 from pylgm.inference import LaplaceResult, fit_gaussian
 from pylgm.inference.result import GaussianMarginals, INLAResult, ModelCriteria
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
+
+_SN_C = (4.0 - math.pi) * math.sqrt(2.0) / math.pi ** 1.5
+_SN_R_MAX = 5.0  # cap on |a/omega| for robustness (|skew| ~ 0.99)
+
+
+def _solve_omega(r: np.ndarray) -> np.ndarray:
+    # solve omega^2 (1 - 2 delta(omega)^2 / pi) = 1, delta = r*omega/sqrt(1+r^2 omega^2)
+    # monotone increasing in omega on (0, inf); bisection (vectorized).
+    lo = np.zeros_like(r)
+    hi = np.full_like(r, 1e6)
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        a = r * mid
+        delta = a / np.sqrt(1.0 + a * a)
+        val = mid * mid * (1.0 - 2.0 * delta * delta / math.pi) - 1.0
+        hi = np.where(val > 0.0, mid, hi)
+        lo = np.where(val > 0.0, lo, mid)
+    return 0.5 * (lo + hi)
+
+
+def _fit_skew_normal(gamma1, gamma3):
+    """Appendix-B skew-normal fit (Rue-Martino-Chopin 2009): standardized
+    skew-normal (mean=gamma1, variance=1) whose log-density cubic coefficient
+    matches gamma3 via RMC eq 32."""
+    gamma1 = np.asarray(gamma1, dtype=float)
+    gamma3 = np.asarray(gamma3, dtype=float)
+    r = np.sign(gamma3) * (np.abs(gamma3) / _SN_C) ** (1.0 / 3.0)
+    clamped = np.abs(r) > _SN_R_MAX
+    r = np.clip(r, -_SN_R_MAX, _SN_R_MAX)
+    omega = np.where(r == 0.0, 1.0, _solve_omega(r))
+    a = r * omega
+    delta = a / np.sqrt(1.0 + a * a)
+    xi = gamma1 - omega * delta * math.sqrt(2.0 / math.pi)
+    return xi, omega, a, clamped
 
 
 def _finite_difference_hessian(

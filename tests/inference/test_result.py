@@ -6,7 +6,13 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from pylgm.inference import GaussianResult, fit_gaussian
-from pylgm.inference.result import GaussianMarginals, INLAResult, LaplaceResult, ModelCriteria
+from pylgm.inference.result import (
+    GaussianMarginals,
+    INLAResult,
+    LaplaceResult,
+    ModelCriteria,
+    SkewNormalMarginals,
+)
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -511,3 +517,21 @@ def test_model_criteria_is_immutable():
         crit.pit[0] = 9.0
     np.testing.assert_allclose(crit.cpo, [0.5, 0.6])
     np.testing.assert_allclose(crit.pit, [0.3, 0.4])
+
+
+def test_skew_normal_marginals_gaussian_reduction():
+    # single grid point, shape 0 -> Normal(loc, scale)
+    m = SkewNormalMarginals(weights=np.array([[1.0]]), location=np.array([[0.5]]),
+                            scale=np.array([[2.0]]), shape=np.array([[0.0]]))
+    np.testing.assert_allclose(m.mean, [0.5])
+    np.testing.assert_allclose(m.variance, [4.0])
+    from scipy.stats import norm
+    np.testing.assert_allclose(m.quantile(0.975), [0.5 + norm.ppf(0.975) * 2.0], atol=1e-6)
+
+
+def test_skew_normal_marginals_quantile_cdf_roundtrip_and_skew():
+    m = SkewNormalMarginals(weights=np.array([[1.0]]), location=np.array([[0.0]]),
+                            scale=np.array([[1.0]]), shape=np.array([[4.0]]))
+    q = m.quantile(0.3)
+    np.testing.assert_allclose(m.cdf(q)[0], 0.3, atol=1e-4)
+    assert m.skewness[0] > 0  # positive shape -> right skew

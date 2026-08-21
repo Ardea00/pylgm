@@ -5,6 +5,7 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
+from scipy.special import owens_t
 from scipy.stats import norm
 
 
@@ -226,6 +227,114 @@ class GaussianMarginals:
         if not isinstance(probability, (int, float, np.number)) or not 0 < probability < 1:
             raise ValueError("probability must satisfy 0 < probability < 1")
         return _readonly_array(self._mean + norm.ppf(probability) * np.sqrt(self._variance))
+
+
+def _skew_normal_marginal_array(value: np.ndarray, name: str) -> np.ndarray:
+    result = np.asarray(value, dtype=float)
+    if result.ndim != 2:
+        raise ValueError(f"{name} must be two-dimensional (n_components, n_grid)")
+    if not np.isfinite(result).all():
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+@dataclass(frozen=True, init=False)
+class SkewNormalMarginals:
+    """Grid-mixture-of-skew-normals summaries for one or more posterior quantities.
+
+    For each component (row), the marginal is a weighted mixture, over the grid
+    (columns), of skew-normal densities parameterized by ``location``/``scale``/
+    ``shape``; ``weights`` sum to 1 across the grid for each component. Reduces
+    to a Gaussian mixture when ``shape == 0`` everywhere.
+    """
+
+    _weights: np.ndarray = field(repr=False)
+    _location: np.ndarray = field(repr=False)
+    _scale: np.ndarray = field(repr=False)
+    _shape: np.ndarray = field(repr=False)
+
+    def __init__(
+        self,
+        weights: np.ndarray,
+        location: np.ndarray,
+        scale: np.ndarray,
+        shape: np.ndarray,
+    ) -> None:
+        weights = _skew_normal_marginal_array(weights, "weights")
+        location = _skew_normal_marginal_array(location, "location")
+        scale = _skew_normal_marginal_array(scale, "scale")
+        shape = _skew_normal_marginal_array(shape, "shape")
+        if not (weights.shape == location.shape == scale.shape == shape.shape):
+            raise ValueError("weights, location, scale, shape must have matching shapes")
+        if np.any(weights < 0):
+            raise ValueError("weights must be non-negative")
+        if not np.allclose(weights.sum(axis=1), 1.0):
+            raise ValueError("weights must sum to 1 across the grid for each component")
+        if np.any(scale <= 0):
+            raise ValueError("scale must be positive")
+        object.__setattr__(self, "_weights", _readonly_array(weights))
+        object.__setattr__(self, "_location", _readonly_array(location))
+        object.__setattr__(self, "_scale", _readonly_array(scale))
+        object.__setattr__(self, "_shape", _readonly_array(shape))
+
+    def _component_moments(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        delta = self._shape / np.sqrt(1.0 + self._shape ** 2)
+        mu = self._location + self._scale * delta * np.sqrt(2.0 / np.pi)
+        v = self._scale ** 2 * (1.0 - 2.0 * delta ** 2 / np.pi)
+        mu3 = self._scale ** 3 * (4.0 - np.pi) / 2.0 * (delta * np.sqrt(2.0 / np.pi)) ** 3
+        return mu, v, mu3
+
+    @property
+    def mean(self) -> np.ndarray:
+        mu, _, _ = self._component_moments()
+        return _readonly_array(np.sum(self._weights * mu, axis=1))
+
+    @property
+    def variance(self) -> np.ndarray:
+        mu, v, _ = self._component_moments()
+        mean = np.sum(self._weights * mu, axis=1)
+        return _readonly_array(np.sum(self._weights * (v + mu ** 2), axis=1) - mean ** 2)
+
+    @property
+    def std(self) -> np.ndarray:
+        return _readonly_array(np.sqrt(self.variance))
+
+    @property
+    def skewness(self) -> np.ndarray:
+        mu, v, mu3 = self._component_moments()
+        mean = np.sum(self._weights * mu, axis=1)
+        std = np.sqrt(np.sum(self._weights * (v + mu ** 2), axis=1) - mean ** 2)
+        centered = mu - mean[:, np.newaxis]
+        numerator = np.sum(
+            self._weights * (mu3 + 3.0 * centered * v + centered ** 3), axis=1
+        )
+        return _readonly_array(numerator / std ** 3)
+
+    def pdf(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float).reshape(-1, 1)
+        z = (x - self._location) / self._scale
+        density = (2.0 / self._scale) * norm.pdf(z) * norm.cdf(self._shape * z)
+        return _readonly_array(np.sum(self._weights * density, axis=1))
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float).reshape(-1, 1)
+        z = (x - self._location) / self._scale
+        component_cdf = norm.cdf(z) - 2.0 * owens_t(z, self._shape)
+        return _readonly_array(np.sum(self._weights * component_cdf, axis=1))
+
+    def quantile(self, probability: float) -> np.ndarray:
+        if not isinstance(probability, (int, float, np.number)) or not 0 < probability < 1:
+            raise ValueError("probability must satisfy 0 < probability < 1")
+        mean = self.mean
+        std = self.std
+        lo = mean - 50.0 * std - 1.0
+        hi = mean + 50.0 * std + 1.0
+        for _ in range(100):
+            mid = 0.5 * (lo + hi)
+            below = self.cdf(mid) < probability
+            lo = np.where(below, mid, lo)
+            hi = np.where(below, hi, mid)
+        return _readonly_array(0.5 * (lo + hi))
 
 
 @dataclass(frozen=True, init=False)
