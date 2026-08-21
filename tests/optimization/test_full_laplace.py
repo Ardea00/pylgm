@@ -1,11 +1,13 @@
 import numpy as np
+import pytest
 from scipy.sparse import csr_matrix, eye
 
+from pylgm.exceptions import NumericalError
 from pylgm.ir.family import CompiledFamily, ScalableBlock
 from pylgm.ir.model import LatentBlock
 from pylgm.likelihoods import CompiledGaussian, CompiledPoisson
 from pylgm.inference import fit_gaussian, fit_laplace
-from pylgm.optimization.inla import _full_laplace_marginals, _simplified_laplace_marginals
+from pylgm.optimization.inla import _full_laplace_marginals, _simplified_laplace_marginals, _logdet_spd
 from pylgm.inference.result import SkewNormalMarginals
 
 
@@ -81,3 +83,10 @@ def test_full_laplace_beats_or_matches_sla_vs_true_marginal():
     assert full_skew_err <= sla_skew_err + 1e-3     # full LA at least as good as SLA on skew
     assert full_skew_err < gauss_skew_err            # and better than the Gaussian strategy
     np.testing.assert_allclose(tab.mean[0], tm, atol=2e-2)
+
+
+def test_logdet_spd_raises_on_non_pd_matrix():
+    # non-positive-definite matrix should raise NumericalError
+    non_pd = np.array([[1.0, 2.0], [2.0, 1.0]])  # has negative eigenvalue
+    with pytest.raises(NumericalError, match="must be positive definite"):
+        _logdet_spd(non_pd)

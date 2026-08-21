@@ -107,7 +107,10 @@ def _simplified_laplace_marginals(design, offset, y, grid):
 
 
 def _logdet_spd(matrix):
-    factor = cho_factor(matrix, lower=True, check_finite=True)
+    try:
+        factor = cho_factor(matrix, lower=True, check_finite=True)
+    except (np.linalg.LinAlgError, ValueError) as error:
+        raise NumericalError("full-Laplace P_{-i} must be positive definite") from error
     return 2.0 * np.sum(np.log(np.diag(factor[0])))
 
 
@@ -135,6 +138,7 @@ def _full_laplace_marginals(design, offset, y, grid, precision, *,
     for i in range(p):
         # common per-latent grid from the mixture spread
         mu_bar = sum(w * f.mean[i] for w, f, _ in points)
+        # use max per-θ std (not average) so the common grid covers the widest mixture component without truncating its tails
         sig_max = max(np.sqrt(max(f.covariance[i, i], 0.0)) for _, f, _ in points)
         gx = np.linspace(mu_bar - grid_radius * sig_max, mu_bar + grid_radius * sig_max, grid_points)
         mixed = np.zeros(grid_points)
@@ -157,8 +161,8 @@ def _full_laplace_marginals(design, offset, y, grid, precision, *,
                 wgt = likelihood.working_weights(eta, y)
                 info = Q + (X.T * wgt) @ X
                 info_mi = np.delete(np.delete(info, i, axis=0), i, axis=1)
-                log_gg = 0.5 * _logdet_spd(info_mi) if p > 1 else 0.0
-                log_la = joint - log_gg
+                half_logdet = 0.5 * _logdet_spd(info_mi) if p > 1 else 0.0
+                log_la = joint - half_logdet
                 log_g = -0.5 * std_nodes[a] ** 2 - np.log(sigma_i) - 0.5 * np.log(2 * np.pi)
                 delta[a] = log_la - log_g
             spline = CubicSpline(abscissae, delta, extrapolate=False)
