@@ -1,12 +1,19 @@
 from pylgm.inference.gaussian import fit_gaussian, preflight_dense_reference
 from pylgm.inference.laplace import fit_laplace
-from pylgm.inference.result import GaussianMarginals, GaussianResult, INLAResult, LaplaceResult
+from pylgm.inference.result import (
+    GaussianMarginals,
+    GaussianResult,
+    INLAResult,
+    LaplaceResult,
+    ModelCriteria,
+)
 
 __all__ = [
     "GaussianMarginals",
     "GaussianResult",
     "INLAResult",
     "LaplaceResult",
+    "ModelCriteria",
     "fit_gaussian",
     "fit_laplace",
     "preflight_dense_reference",

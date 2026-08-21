@@ -334,6 +334,48 @@ class GaussianResult:
         return linear_combinations_from(self._mean, self._covariance, weights)
 
 
+@dataclass(frozen=True, init=False)
+class ModelCriteria:
+    """DIC, WAIC, CPO, and PIT model-assessment criteria."""
+
+    dic: float
+    dic_effective_parameters: float
+    waic: float
+    waic_effective_parameters: float
+    _cpo: np.ndarray = field(repr=False)
+    _pit: np.ndarray = field(repr=False)
+    cpo_failures: int
+    log_cpo_sum: float
+
+    def __init__(
+        self,
+        dic: float,
+        dic_effective_parameters: float,
+        waic: float,
+        waic_effective_parameters: float,
+        cpo: np.ndarray,
+        pit: np.ndarray,
+        cpo_failures: int,
+        log_cpo_sum: float,
+    ) -> None:
+        object.__setattr__(self, "dic", float(dic))
+        object.__setattr__(self, "dic_effective_parameters", float(dic_effective_parameters))
+        object.__setattr__(self, "waic", float(waic))
+        object.__setattr__(self, "waic_effective_parameters", float(waic_effective_parameters))
+        object.__setattr__(self, "_cpo", _readonly_array(cpo))
+        object.__setattr__(self, "_pit", _readonly_array(pit))
+        object.__setattr__(self, "cpo_failures", int(cpo_failures))
+        object.__setattr__(self, "log_cpo_sum", float(log_cpo_sum))
+
+    @property
+    def cpo(self) -> np.ndarray:
+        return _readonly_array(self._cpo)
+
+    @property
+    def pit(self) -> np.ndarray:
+        return _readonly_array(self._pit)
+
+
 def _validate_prediction_keys(
     prediction_keys: pd.DataFrame | None, predictive_mean: np.ndarray
 ) -> None:

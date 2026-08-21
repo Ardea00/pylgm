@@ -6,7 +6,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from pylgm.inference import GaussianResult, fit_gaussian
-from pylgm.inference.result import GaussianMarginals, INLAResult, LaplaceResult
+from pylgm.inference.result import GaussianMarginals, INLAResult, LaplaceResult, ModelCriteria
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -482,3 +482,24 @@ def test_inla_result_carries_fitted_mean_and_is_immutable():
         exposed[0] = 9.0
     np.testing.assert_allclose(result.fitted_mean, [1.6, 1.6])
     assert result.hyperparameters is None
+
+
+def test_model_criteria_is_immutable():
+    crit = ModelCriteria(
+        dic=10.0,
+        dic_effective_parameters=2.0,
+        waic=11.0,
+        waic_effective_parameters=2.5,
+        cpo=np.array([0.5, 0.6]),
+        pit=np.array([0.3, 0.4]),
+        cpo_failures=0,
+        log_cpo_sum=-1.2,
+    )
+    assert crit.dic == 10.0
+    assert crit.cpo_failures == 0
+    with pytest.raises(ValueError):
+        crit.cpo[0] = 9.0
+    with pytest.raises(ValueError):
+        crit.pit[0] = 9.0
+    np.testing.assert_allclose(crit.cpo, [0.5, 0.6])
+    np.testing.assert_allclose(crit.pit, [0.3, 0.4])

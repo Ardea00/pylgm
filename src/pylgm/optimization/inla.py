@@ -2,11 +2,12 @@ from collections.abc import Callable
 from itertools import product
 
 import numpy as np
+from numpy.polynomial.hermite import hermgauss
 from scipy.special import logsumexp
 
 from pylgm.exceptions import NumericalError, OptimizationError
 from pylgm.inference import LaplaceResult, fit_gaussian
-from pylgm.inference.result import GaussianMarginals, INLAResult
+from pylgm.inference.result import GaussianMarginals, INLAResult, ModelCriteria
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 
 
@@ -188,3 +189,84 @@ def integrate_inla(
         fitted_mean=fitted_acc, link_name=link_name,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
     )
+
+
+def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):
+    dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, dtype=float)
+    offset = np.asarray(offset, dtype=float)
+    y = np.asarray(y, dtype=float)
+    nodes, gh = hermgauss(n_nodes)
+    gh = gh / np.sqrt(np.pi)
+    log_gh = np.log(gh)
+    n = y.size
+
+    pd_sum = np.zeros(n)     # Sum_k w_k E[p]
+    elog = np.zeros(n)       # Sum_k w_k E[log p]
+    elog2 = np.zeros(n)      # Sum_k w_k E[(log p)^2]
+    mbar = np.zeros(n)
+    # 1/p can be enormous in the tails (a diffuse latent posterior combined with a
+    # tight likelihood), so accumulate the reciprocal terms in log space instead of
+    # exponentiating -logp directly: exp(-logp) overflows float64 long before the
+    # harmonic-mean estimator itself becomes numerically meaningless.
+    log_inv_terms = []        # per grid point: log(weight) + log(gh_j) - logp_ij
+    log_cdf_inv_terms = []    # ... + log(cdf_ij)
+    points = list(grid)
+
+    for weight, fit, likelihood in points:
+        m = offset + np.asarray(dense @ fit.mean).reshape(-1)
+        v = np.clip(np.einsum("ij,jk,ik->i", dense, np.asarray(fit.covariance), dense), 0.0, None)
+        mbar += weight * m
+        eta = m[:, None] + np.sqrt(2.0 * v)[:, None] * nodes[None, :]     # (n, n_nodes)
+        logp = np.stack([likelihood.pointwise_log_density(eta[:, j], y) for j in range(n_nodes)], axis=1)
+        cdf = np.stack([likelihood.cdf(eta[:, j], y) for j in range(n_nodes)], axis=1)
+        p = np.exp(logp)
+        pd_sum += weight * (gh * p).sum(axis=1)
+        elog += weight * (gh * logp).sum(axis=1)
+        elog2 += weight * (gh * logp ** 2).sum(axis=1)
+
+        base = np.log(weight) + log_gh[None, :] - logp   # (n, n_nodes)
+        log_inv_terms.append(base)
+        with np.errstate(divide="ignore"):
+            log_cdf = np.log(cdf)   # -inf where cdf == 0; contributes 0 after exp
+        log_cdf_inv_terms.append(base + log_cdf)
+
+    lppd = np.log(pd_sum)
+    var_logp = np.clip(elog2 - elog ** 2, 0.0, None)
+    waic = float(-2.0 * np.sum(lppd - var_logp))
+    p_waic = float(var_logp.sum())
+
+    d_bar = float(-2.0 * elog.sum())
+    d_mean = 0.0
+    for weight, _, likelihood in points:
+        d_mean += weight * float(likelihood.pointwise_log_density(mbar, y).sum())
+    d_mean = -2.0 * d_mean
+    p_d = d_bar - d_mean
+    dic = d_bar + p_d
+
+    all_inv = np.concatenate(log_inv_terms, axis=1)          # (n, n_nodes * n_grid_points)
+    all_cdf_inv = np.concatenate(log_cdf_inv_terms, axis=1)
+    log_einv = logsumexp(all_inv, axis=1)
+    log_ecdf_over_p = logsumexp(all_cdf_inv, axis=1)
+
+    # Reliability of the harmonic-mean CPO estimator: with normalized weights
+    # w_j = term_j / einv (summing to 1 across the (grid point, node) pairs), the
+    # concentration 1/ESS = sum_j w_j^2 measures how few quadrature points carry the
+    # mass. A single dominant node's own weight is an unreliable proxy for this when
+    # Gauss-Hermite's symmetric node pairs tie exactly (as happens whenever the
+    # posterior mean coincides with the observation): that check silently ignores the
+    # tied partner and undercounts the true concentration. Summing squared normalized
+    # weights picks up every tied contributor and is what actually flags a degenerate
+    # quadrature (e.g. a diffuse latent posterior against a tight likelihood).
+    log_concentration = logsumexp(2.0 * all_inv, axis=1) - 2.0 * log_einv
+    concentration = np.exp(log_concentration)
+
+    cpo = np.exp(-log_einv)
+    pit = np.exp(log_ecdf_over_p - log_einv)
+    cpo_failures = int(np.sum(concentration > cpo_failure_threshold))
+    log_cpo_sum = float(np.sum(-log_einv))
+
+    for name, value in (("waic", waic), ("dic", dic), ("cpo", cpo), ("pit", pit)):
+        if not np.isfinite(value).all():
+            raise NumericalError(f"INLA criteria produced non-finite {name}")
+
+    return ModelCriteria(dic, p_d, waic, p_waic, cpo, pit, cpo_failures, log_cpo_sum)
