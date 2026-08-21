@@ -438,6 +438,13 @@ def test_readonly_hyperparameters_rejects_non_finite_value():
         _gaussian_result_with_hyperparameters({"p": float("inf")})
 
 
+def _default_criteria():
+    return ModelCriteria(
+        dic=1.0, dic_effective_parameters=1.0, waic=1.0, waic_effective_parameters=1.0,
+        cpo=np.array([0.5, 0.5]), pit=np.array([0.5, 0.5]), cpo_failures=0, log_cpo_sum=0.0,
+    )
+
+
 def _inla(**overrides):
     kwargs = dict(
         labels=("g:a",),
@@ -447,6 +454,7 @@ def _inla(**overrides):
         predictive_mean=np.array([0.5, 0.5]),
         predictive_variance=np.array([0.3, 0.3]),
         hyperparameter_marginals={"p": GaussianMarginals(np.array([1.5]), np.array([0.4]))},
+        criteria=_default_criteria(),
         block_slices={"g": slice(0, 1)},
         diagnostics={"inla_grid_points": 7},
     )

@@ -86,7 +86,7 @@ def integrate_inla(
         s_value = float(conditional.log_marginal_likelihood)
         if penalty is not None:
             s_value += float(penalty(theta))
-        return s_value, conditional, theta
+        return s_value, conditional, theta, compiled
 
     eb = optimize_empirical_bayes(
         family, bounds, initial=initial, fit=conditional_fit, penalty=penalty,
@@ -109,14 +109,15 @@ def integrate_inla(
     grid = in_domain
 
     points = [evaluate(u) for u in grid]
-    s_values = np.array([s for s, _, _ in points])
+    s_values = np.array([s for s, _, _, _ in points])
     s_max = float(s_values.max())
-    kept = [(u, s, cond, theta) for u, (s, cond, theta) in zip(grid, points, strict=True)
+    kept = [(u, s, cond, theta, compiled)
+            for u, (s, cond, theta, compiled) in zip(grid, points, strict=True)
             if s >= s_max - log_density_drop]
     if not kept:
         raise NumericalError("INLA grid retained no points above the density threshold")
 
-    log_weights = np.array([s + float(np.sum(u)) for (u, s, _, _) in kept])
+    log_weights = np.array([s + float(np.sum(u)) for (u, s, _, _, _) in kept])
     weights = np.exp(log_weights - logsumexp(log_weights))
 
     reference = kept[0][2]
@@ -131,7 +132,7 @@ def integrate_inla(
     theta_mean = {name: 0.0 for name in names}
     theta_sq = {name: 0.0 for name in names}
 
-    for (_, _, cond, theta), w in zip(kept, weights, strict=True):
+    for (_, _, cond, theta, _), w in zip(kept, weights, strict=True):
         m = cond.mean
         pm = cond.predictive_mean
         mean_acc += w * m
@@ -181,11 +182,20 @@ def integrate_inla(
     if not np.isfinite(integrated_lml):
         raise NumericalError("INLA produced non-finite log marginal likelihood")
 
+    observed = kept[0][4].observed
+    design_obs = kept[0][4].design[observed]
+    offset_obs = kept[0][4].offset[observed]
+    y_obs = kept[0][4].y[observed]
+    criteria_grid = [(w, cond, compiled.likelihood)
+                     for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
+    criteria = _model_criteria(design_obs, offset_obs, y_obs, criteria_grid)
+
     return INLAResult(
         labels=reference.labels,
         mean=mean, covariance=covariance, log_marginal_likelihood=integrated_lml,
         predictive_mean=predictive_mean, predictive_variance=predictive_variance,
         hyperparameter_marginals=hyper_marginals,
+        criteria=criteria,
         fitted_mean=fitted_acc, link_name=link_name,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
     )

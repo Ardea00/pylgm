@@ -458,6 +458,39 @@ def test_integrate_requires_a_hyperparameter():
         model.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
 
 
+def test_inla_result_exposes_model_criteria_both_engines():
+    import numpy as np
+    import pandas as pd
+    from pylgm import Fixed, Gaussian, IID, LGM, Poisson, Hyperparameter
+    from pylgm.inference.result import ModelCriteria
+
+    rng = np.random.default_rng(0)
+    regions = [f"r{i}" for i in range(30)]
+    effects = {r: rng.normal() for r in regions}
+    rows = [{"region": r, "t": t, "y": effects[r] + rng.normal()}
+            for t in range(6) for r in regions]
+    frame = pd.DataFrame(rows)
+    gauss = LGM("y", Gaussian(1.0),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    result = gauss.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+    crit = result.criteria
+    assert isinstance(crit, ModelCriteria)
+    assert np.isfinite(crit.dic) and np.isfinite(crit.waic)
+    n_obs = len(frame)
+    assert crit.cpo.shape == (n_obs,) and crit.pit.shape == (n_obs,)
+    assert np.all((crit.pit >= 0) & (crit.pit <= 1))
+
+    counts = frame.assign(y=(frame["y"].abs() * 3).round())
+    pois = LGM("y", Poisson(),
+               Fixed("1") + IID("region", index="region",
+                                precision=Hyperparameter("p", initial=1.0)),
+               panel=("region",), time="t")
+    pres = pois.fit(counts, engine="laplace", hyperparameters="integrate")
+    assert np.isfinite(pres.criteria.waic)
+
+
 def test_fit_optimize_default_unchanged():
     frame = _region_panel()
     model = LGM("y", Gaussian(0.5),

@@ -62,6 +62,7 @@ def _rebuild_result(
         )
         return INLAResult(
             hyperparameter_marginals=result.hyperparameter_marginals(),
+            criteria=result.criteria,
             fitted_mean=fitted_mean,
             link_name=result.link_name,
             **common,

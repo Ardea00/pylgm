@@ -534,6 +534,7 @@ class INLAResult:
     _predictive_mean: np.ndarray = field(repr=False)
     _predictive_variance: np.ndarray = field(repr=False)
     _hyperparameter_marginals: Mapping[str, GaussianMarginals] = field(repr=False)
+    _criteria: "ModelCriteria" = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
     _prediction_keys: pd.DataFrame | None = field(repr=False)
@@ -551,6 +552,7 @@ class INLAResult:
         predictive_variance: np.ndarray,
         hyperparameter_marginals: Mapping[str, GaussianMarginals],
         *,
+        criteria: "ModelCriteria",
         fitted_mean: np.ndarray | None = None,
         link_name: str | None = None,
         block_slices: Mapping[str, slice] | None = None,
@@ -562,6 +564,8 @@ class INLAResult:
             raise TypeError("block_slices must be a mapping")
         if diagnostics is not None and not isinstance(diagnostics, Mapping):
             raise TypeError("diagnostics must be a mapping")
+        if not isinstance(criteria, ModelCriteria):
+            raise TypeError("criteria must be a ModelCriteria")
         _validate_prediction_keys(prediction_keys, predictive_mean)
         covariance = np.asarray(covariance)
         if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
@@ -581,6 +585,7 @@ class INLAResult:
             "_hyperparameter_marginals",
             _readonly_hyperparameter_marginals(hyperparameter_marginals),
         )
+        object.__setattr__(self, "_criteria", criteria)
         object.__setattr__(
             self,
             "_fitted_mean",
@@ -649,6 +654,10 @@ class INLAResult:
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
         return self._hyperparameter_marginals
+
+    @property
+    def criteria(self) -> "ModelCriteria":
+        return self._criteria
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
         return linear_combinations_from(self._mean, self._covariance, weights)
