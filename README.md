@@ -251,11 +251,68 @@ existing fits are unaffected unless it is passed explicitly.
 
 **Scope:** this is the *simplified*-Laplace correction to the latent
 marginals, not INLA's full-Laplace strategy (which additionally corrects the
-denominator via a Laplace approximation re-fit per latent component) — full
-Laplace is not implemented. Validation is against a brute-force true-marginal
-oracle for small, tractable models, not against R-INLA output; R-INLA parity
-fixtures are future work. A runnable example lives at
+denominator via a Laplace approximation re-fit per latent component) —
+see the next section for that. Validation is against a brute-force
+true-marginal oracle for small, tractable models, not against R-INLA output;
+R-INLA parity fixtures are future work. A runnable example lives at
 [`examples/inla_sla/README.md`](examples/inla_sla/README.md).
+
+### Full-Laplace latent marginals
+
+Passing `latent_strategy="laplace"` (which, like `"simplified_laplace"`,
+requires `hyperparameters="integrate"`) applies INLA's **full-Laplace**
+correction: in addition to the numerator (skewness) correction the
+simplified strategy applies, it re-fits a Laplace approximation to the
+conditional posterior's denominator at each point of each latent
+component's own grid, following Rue, Martino & Chopin (2009), §3.2.2 (the
+numerator/denominator ratio, RMC eqs 12-13) and eq. 16-17 (the cubic-spline
+correction and mixture-of-Gaussians tail fallback used when the raw ratio is
+not itself a well-behaved density). The result is a `TabulatedMarginals` — a
+numerically tabulated density per component, mixed across the hyperparameter
+grid the same way the other two strategies are — instead of a closed-form
+`GaussianMarginals`/`SkewNormalMarginals`:
+
+```python
+result = model.fit(
+    frame, engine="laplace", hyperparameters="integrate",
+    latent_strategy="laplace",
+)
+region = result.latent_marginals("region")  # TabulatedMarginals
+region.mean       # per-component mean (numerical integral over the tabulated grid)
+region.std        # per-component sd
+region.skewness   # per-component skewness (third numerical moment)
+region.quantile(0.025)  # per-component quantile (asymmetric interval when skewed)
+region.pdf(x)     # tabulated density evaluated (interpolated) at x
+region.cdf(x)     # tabulated CDF evaluated at x
+```
+
+This is the **most accurate, and most expensive**, of the three latent
+strategies: it is exact per hyperparameter grid point for a Gaussian
+likelihood (the Laplace approximation to a Gaussian conditional posterior is
+exact, so the denominator correction reduces to the identity), and for
+non-Gaussian likelihoods it captures the full third- and higher-order shape
+the simplified strategy only partially corrects for. It costs one additional
+per-component Newton-Raphson re-optimization at each hyperparameter grid
+point, on top of what the simplified strategy already does.
+
+**Scope:** `latent_strategy="laplace"` supports **unconstrained models
+only** — a model with any `RW`/intrinsic (constrained) effect raises
+`UnsupportedEngineError` at fit time; use `latent_strategy="gaussian"` or
+`"simplified_laplace"` for models with constrained effects. Validation is
+against a brute-force true-marginal oracle (Gaussian vs. simplified-Laplace
+vs. full-Laplace vs. numerically integrated truth) for small, tractable
+models, not against R-INLA output; R-INLA parity fixtures remain future
+work, as for the simplified strategy. `latent_strategy` still defaults to
+`"gaussian"`, so existing fits are unaffected unless `"laplace"` is passed
+explicitly. A runnable example, including a side-by-side contrast of all
+three strategies' skewness and 95% intervals on the same fit, lives at
+[`examples/inla_full_laplace/README.md`](examples/inla_full_laplace/README.md).
+
+**The three-tier latent-strategy ladder**, in increasing accuracy and cost:
+`"gaussian"` (default; exact for a Gaussian likelihood, a local
+approximation otherwise) -> `"simplified_laplace"` (adds a numerator
+skewness correction) -> `"laplace"` (adds the denominator correction too,
+unconstrained models only).
 
 ## Model-assessment criteria
 

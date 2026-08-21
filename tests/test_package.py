@@ -102,6 +102,17 @@ def test_inla_sla_example_reports_skewness():
     assert "skewness" in completed.stdout.lower()
 
 
+def test_inla_full_laplace_example_reports_quantile():
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/inla_full_laplace/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "quantile" in completed.stdout.lower()
+
+
 def test_inla_criteria_example_reports_dic_waic():
     root = Path(__file__).parents[1]
     env = {**os.environ, "PYTHONPATH": str(root / "src")}

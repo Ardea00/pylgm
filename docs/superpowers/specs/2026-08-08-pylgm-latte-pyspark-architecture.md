@@ -183,9 +183,10 @@ not a marginal. AR1, `result.predict(new_data)`, and parameterized IR
 metadata are explicitly deferred. The hyperparameter integration core (grid
 quadrature, section 3a) and model-assessment criteria (DIC/WAIC/CPO/PIT,
 section 3b) have since shipped; the simplified-Laplace latent strategy
-(section 3c) has since shipped as well, with full Laplace and the other 3c
-follow-ups still deferred. The target foundation is therefore not complete
-in 0.3.
+(section 3c) has since shipped as well, and full-Laplace latent marginals
+for unconstrained models (section 3d) have since shipped on top of that,
+with constrained-effect full Laplace and the other 3c/3d follow-ups still
+deferred. The target foundation is therefore not complete in 0.3.
 
 ### 2. Non-Gaussian LGM
 
@@ -207,8 +208,9 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - Binomial(n) likelihood;
 - non-canonical links;
 - exposures and observation weights;
-- full-Laplace and other latent-strategy refinements for INLA integration
-  (section 3c below; the simplified-Laplace strategy has since shipped);
+- other latent-strategy refinements for INLA integration (sections 3c/3d
+  below; the simplified-Laplace and unconstrained full-Laplace strategies
+  have since shipped);
 - spatial effects.
 
 ### 3. INLA-style inference
@@ -251,17 +253,55 @@ requested (see the
 Validated against a brute-force true-marginal oracle for small,
 non-Gaussian models, not against R-INLA.
 
+Still deferred within 3c: **η-marginal simplified-Laplace** — 3c corrects
+the coefficient marginals returned by `latent_marginals`, not the
+linear-predictor (η) marginals. The additional per-latent-component
+denominator correction (full Laplace) has since shipped for unconstrained
+models — see 3d below.
+
+**3d. Full-Laplace latent marginals — shipped (unconstrained).** Passing
+`latent_strategy="laplace"` to `LGM.fit` (also requiring
+`hyperparameters="integrate"`) applies INLA's full-Laplace correction on
+top of the 3c numerator correction: a per-latent-component denominator
+re-fit (RMC 2009 eqs 12-13), the cubic-spline correction and
+mixture-of-Gaussians tail fallback (eqs 16-17) for grid points where the
+raw numerator/denominator ratio is not itself a well-behaved density, mixed
+across the hyperparameter grid the same way the Gaussian and
+simplified-Laplace marginals are. It returns a `TabulatedMarginals` — a
+numerically tabulated density per component (mean/std/skewness/quantile/pdf/
+cdf) — and is exact per grid point for a Gaussian likelihood, since the
+Laplace approximation to a Gaussian conditional posterior is exact. It is
+the most accurate, and most expensive, of the three latent strategies (see
+the [project README](../../../README.md#full-laplace-latent-marginals)).
+Validated the same way as 3c: a brute-force true-marginal oracle
+(Gaussian vs. simplified-Laplace vs. full-Laplace vs. numerically integrated
+truth), not R-INLA.
+
+**Scope: unconstrained models only.** A model with any `RW`/intrinsic
+(constrained) effect raises `UnsupportedEngineError` when
+`latent_strategy="laplace"` is requested; `"gaussian"` and
+`"simplified_laplace"` remain available for constrained models.
+
 Still deferred:
 
-- **Full Laplace** — the additional per-latent-component denominator
-  correction (RMC eq 10 / cubic-spline eq 17) and the thick-tail spline
-  fallback; 3c ships only the simplified-Laplace numerator correction.
-- **η-marginal simplified-Laplace** — 3c corrects the coefficient marginals
-  returned by `latent_marginals`, not the linear-predictor (η) marginals.
-- **Region-of-interest pruning** (RMC eq 15) — 3c computes the correction
+- **Constrained-effect full Laplace** — extending the eqs 12-13/16-17
+  correction to models with `RW`/intrinsic constraints; 3d ships the
+  unconstrained case only.
+- **Region-of-interest pruning** (RMC eq 15) — 3c/3d compute the correction
   over every coefficient rather than pruning to a region of interest.
+- **Sparse determinant updates** — 3d's per-component denominator
+  re-optimization recomputes each determinant directly rather than via
+  sparse rank-one/low-rank updates, a scalability concern for larger latent
+  fields.
+- **η-marginals** — see 3c above; still coefficient-only, not
+  linear-predictor marginals, for either the simplified- or full-Laplace
+  strategy.
 - **R-INLA parity fixtures** — validation remains against a brute-force
   true-marginal oracle, not reproduced R-INLA output.
+- **Result-type unification** — `latent_marginals` currently returns one of
+  three distinct types (`GaussianMarginals`, `SkewNormalMarginals`,
+  `TabulatedMarginals`) depending on `latent_strategy`, rather than a single
+  common marginal interface.
 - Other recorded INLA follow-ups: integrand-mode grid recentering,
   randomized discrete PIT, robust discrete CPO, and model-assessment
   criteria for non-integrated fits.
@@ -370,9 +410,10 @@ mathematical correctness.
 - parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
 - INLA integration (was a non-goal of the first refactor; the integration
-  core, model-assessment criteria, and the simplified-Laplace latent
-  strategy have since shipped as sub-slices 3a, 3b, and 3c, with full
-  Laplace and the other 3c follow-ups remaining);
+  core, model-assessment criteria, and the simplified- and unconstrained
+  full-Laplace latent strategies have since shipped as sub-slices 3a, 3b,
+  3c, and 3d, with constrained-effect full Laplace and the other 3c/3d
+  follow-ups remaining);
 - spatial effects and SPDE meshes;
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
