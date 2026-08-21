@@ -45,6 +45,9 @@ class CompiledGaussian:
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return np.full(np.asarray(eta).shape, 1.0 / self.variance, dtype=float)
 
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.zeros(np.asarray(eta, dtype=float).shape)
+
     def response_mean(self, eta: np.ndarray) -> np.ndarray:
         return np.asarray(eta, dtype=float)
 
@@ -108,6 +111,9 @@ class CompiledPoisson:
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return self.link.inverse(eta)
 
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return -np.exp(np.asarray(eta, dtype=float))
+
     def response_mean(self, eta: np.ndarray) -> np.ndarray:
         return self.link.inverse(eta)
 
@@ -149,6 +155,10 @@ class CompiledBernoulli:
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         p = self.link.inverse(eta)
         return p * (1.0 - p)
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        p = self.link.inverse(np.asarray(eta, dtype=float))
+        return -p * (1.0 - p) * (1.0 - 2.0 * p)
 
     def response_mean(self, eta: np.ndarray) -> np.ndarray:
         return self.link.inverse(eta)

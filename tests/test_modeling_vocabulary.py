@@ -196,3 +196,19 @@ def test_cdf_matches_scipy():
     yb = np.array([1.0, 0.0, 1.0])
     expected = np.where(yb >= 1, 1.0, 1.0 - 1.0 / (1.0 + np.exp(-eta)))
     np.testing.assert_allclose(b.cdf(eta, yb), expected)
+
+
+def test_third_derivative_values_and_finite_difference():
+    from pylgm.likelihoods import CompiledPoisson, CompiledBernoulli
+    eta = np.array([0.2, -0.6, 1.1])
+    y = np.zeros(3)
+    np.testing.assert_allclose(CompiledGaussian(1.7).third_derivative(eta, y), np.zeros(3))
+    np.testing.assert_allclose(CompiledPoisson().third_derivative(eta, y), -np.exp(eta))
+    p = 1.0 / (1.0 + np.exp(-eta))
+    np.testing.assert_allclose(CompiledBernoulli().third_derivative(eta, y),
+                               -p * (1 - p) * (1 - 2 * p))
+    # cross-check: d3 log p = -d/deta working_weights, via central finite difference
+    for like in (CompiledPoisson(), CompiledBernoulli()):
+        h = 1e-4
+        fd = -(like.working_weights(eta + h, y) - like.working_weights(eta - h, y)) / (2 * h)
+        np.testing.assert_allclose(like.third_derivative(eta, y), fd, atol=1e-5)
