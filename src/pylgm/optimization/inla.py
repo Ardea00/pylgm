@@ -46,6 +46,57 @@ def _fit_skew_normal(gamma1, gamma3):
     return xi, omega, a, clamped
 
 
+def _simplified_laplace_marginals(design, offset, y, grid):
+    """RMC (2009) simplified-Laplace skew-normal latent marginals.
+
+    Per grid point (weight, conditional_fit, likelihood): computes the location
+    (gamma1) and skewness (gamma3) corrections from the conditional Gaussian fit's
+    mean/covariance and the likelihood's third derivative, fits a standardized
+    skew-normal (`_fit_skew_normal`), and transforms into x_i coordinates.
+
+    Returns (location, scale, shape, weights, clamped_count), each of the first
+    four arrays shape (p, n_grid).
+    """
+    dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
+    offset = np.asarray(offset, float)
+    y = np.asarray(y, float)
+    points = list(grid)
+    p = points[0][1].mean.shape[0]
+    n_grid = len(points)
+    location = np.zeros((p, n_grid))
+    scale = np.zeros((p, n_grid))
+    shape = np.zeros((p, n_grid))
+    weights = np.zeros((p, n_grid))
+    clamped_count = 0
+    for k, (w, fit, likelihood) in enumerate(points):
+        m = np.asarray(fit.mean, float)
+        cov = np.asarray(fit.covariance, float)
+        sigma = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        eta_mean = offset + dense @ m
+        d3 = np.asarray(likelihood.third_derivative(eta_mean, y), float)   # (n,)
+        cx_eta = cov @ dense.T                                             # (p, n) cov(x_i, eta_j)
+        eta_var = np.clip(np.einsum("ij,jk,ik->i", dense, cov, dense), 0.0, None)  # (n,)
+        sigma_eta = np.sqrt(eta_var)
+        safe_si = np.where(sigma > 0, sigma, 1.0)
+        # gamma3_i = (1/sigma_i^3) sum_j d3_j cov(x_i,eta_j)^3
+        gamma3 = (cx_eta ** 3 @ d3) / safe_si ** 3
+        # a_ij = cov / (sigma_i sigma_eta_j); gamma1_i = (1/(2 sigma_i)) sum_j sigma_eta_j^2 (1-a_ij^2) d3_j cov
+        safe_se = np.where(sigma_eta > 0, sigma_eta, 1.0)
+        a_ij = cx_eta / (safe_si[:, None] * safe_se[None, :])
+        term = (sigma_eta ** 2)[None, :] * (1.0 - a_ij ** 2) * d3[None, :] * cx_eta
+        gamma1 = term.sum(axis=1) / (2.0 * safe_si)
+        # degenerate sigma_i -> no correction
+        gamma1 = np.where(sigma > 0, gamma1, 0.0)
+        gamma3 = np.where(sigma > 0, gamma3, 0.0)
+        xi, omega, sn_a, clamped = _fit_skew_normal(gamma1, gamma3)
+        clamped_count += int(clamped.sum())
+        location[:, k] = m + sigma * xi
+        scale[:, k] = sigma * omega
+        shape[:, k] = sn_a
+        weights[:, k] = w
+    return location, scale, shape, weights, clamped_count
+
+
 def _finite_difference_hessian(
     func: Callable[[np.ndarray], float], center: np.ndarray, step: float = 1e-3
 ) -> np.ndarray:
