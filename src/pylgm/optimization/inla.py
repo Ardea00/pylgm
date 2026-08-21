@@ -248,21 +248,16 @@ def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshol
     log_einv = logsumexp(all_inv, axis=1)
     log_ecdf_over_p = logsumexp(all_cdf_inv, axis=1)
 
-    # Reliability of the harmonic-mean CPO estimator: with normalized weights
-    # w_j = term_j / einv (summing to 1 across the (grid point, node) pairs), the
-    # concentration 1/ESS = sum_j w_j^2 measures how few quadrature points carry the
-    # mass. A single dominant node's own weight is an unreliable proxy for this when
-    # Gauss-Hermite's symmetric node pairs tie exactly (as happens whenever the
-    # posterior mean coincides with the observation): that check silently ignores the
-    # tied partner and undercounts the true concentration. Summing squared normalized
-    # weights picks up every tied contributor and is what actually flags a degenerate
-    # quadrature (e.g. a diffuse latent posterior against a tight likelihood).
-    log_concentration = logsumexp(2.0 * all_inv, axis=1) - 2.0 * log_einv
-    concentration = np.exp(log_concentration)
+    # Reliability of the harmonic-mean CPO estimator: flag observation i when the
+    # single largest (grid point, quadrature node) contribution to E[1/p_i] exceeds
+    # cpo_failure_threshold times the total E[1/p_i] (all in log space to avoid
+    # overflow from exp(-logp)).
+    max_log_contrib = all_inv.max(axis=1)
+    cpo_failure_mask = max_log_contrib > (np.log(cpo_failure_threshold) + log_einv)
 
     cpo = np.exp(-log_einv)
     pit = np.exp(log_ecdf_over_p - log_einv)
-    cpo_failures = int(np.sum(concentration > cpo_failure_threshold))
+    cpo_failures = int(np.sum(cpo_failure_mask))
     log_cpo_sum = float(np.sum(-log_einv))
 
     for name, value in (("waic", waic), ("dic", dic), ("cpo", cpo), ("pit", pit)):

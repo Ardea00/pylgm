@@ -54,7 +54,48 @@ def test_single_grid_gaussian_matches_closed_forms():
 def test_cpo_failure_flag_on_diffuse_latent():
     design = csr_matrix(np.eye(1))
     offset = np.zeros(1)
-    y = np.array([0.0])
+    # y is nudged slightly off the posterior mean (0.0) so the two dominant
+    # Gauss-Hermite nodes don't land in an exact symmetric tie (at y == mean the
+    # max-contribution fraction is capped at exactly 0.5 by symmetry and can never
+    # exceed the strict "> threshold" rule).
+    y = np.array([0.01])
     fit = _Fit(np.array([0.0]), np.array([[4.0]]))  # v=4 >> sigma^2=0.25 -> 1/p heavy tail
     crit = _model_criteria(design, offset, y, [(1.0, fit, CompiledGaussian(0.5))], n_nodes=64)
+    assert crit.cpo_failures >= 1
+
+
+def test_cpo_failure_flag_max_contribution_vs_concentration():
+    # Distinguishes the spec's literal max-single-contribution rule from a
+    # Herfindahl/inverse-ESS concentration statistic (sum of squared normalized
+    # weights). A moderately diffuse latent (v=1.0) with y offset from the
+    # posterior mean m=0 makes the reciprocal-density peak asymmetric: one
+    # non-tied quadrature node holds ~55-65% of E[1/p], comfortably over the 0.5
+    # threshold, while the concentration statistic for the same weights sits
+    # around ~0.3-0.4 (< 0.5) because mass is spread over more than just the top
+    # node. The max-rule must flag this observation; a concentration-rule would not.
+    design = csr_matrix(np.eye(1))
+    offset = np.zeros(1)
+    y = np.array([0.85])
+    fit = _Fit(np.array([0.0]), np.array([[1.0]]))
+    like = CompiledGaussian(1.0)
+    crit = _model_criteria(design, offset, y, [(1.0, fit, like)], n_nodes=64)
+
+    # Recompute the per-node reciprocal contributions independently to verify the
+    # fixture actually produces a single dominant, non-tied node.
+    from numpy.polynomial.hermite import hermgauss
+    from scipy.special import logsumexp
+    nodes, gh = hermgauss(64)
+    gh = gh / np.sqrt(np.pi)
+    log_gh = np.log(gh)
+    eta = 0.0 + np.sqrt(2.0 * 1.0) * nodes
+    logp = like.pointwise_log_density(eta, np.full_like(eta, y[0]))
+    base = log_gh - logp
+    log_einv = logsumexp(base)
+    frac = np.exp(base - log_einv)
+    max_frac = frac.max()
+    concentration = float(np.sum(frac ** 2))
+    print(f"max-contribution fraction={max_frac:.4f}, concentration={concentration:.4f}")
+
+    assert 0.5 < max_frac < 0.7, max_frac
+    assert concentration < 0.5, concentration  # a concentration/ESS rule would NOT flag this
     assert crit.cpo_failures >= 1
