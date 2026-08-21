@@ -266,8 +266,8 @@ simplified strategy applies, it re-fits a Laplace approximation to the
 conditional posterior's denominator at each point of each latent
 component's own grid, following Rue, Martino & Chopin (2009), §3.2.2 (the
 numerator/denominator ratio, RMC eqs 12-13) and eq. 16-17 (the cubic-spline
-correction and mixture-of-Gaussians tail fallback used when the raw ratio is
-not itself a well-behaved density). The result is a `TabulatedMarginals` — a
+correction, with constant tail extrapolation beyond the outer abscissae, used
+when the raw ratio is not itself a well-behaved density). The result is a `TabulatedMarginals` — a
 numerically tabulated density per component, mixed across the hyperparameter
 grid the same way the other two strategies are — instead of a closed-form
 `GaussianMarginals`/`SkewNormalMarginals`:
@@ -291,9 +291,12 @@ strategies: it is exact per hyperparameter grid point for a Gaussian
 likelihood (the Laplace approximation to a Gaussian conditional posterior is
 exact, so the denominator correction reduces to the identity), and for
 non-Gaussian likelihoods it captures the full third- and higher-order shape
-the simplified strategy only partially corrects for. It costs one additional
-per-component Newton-Raphson re-optimization at each hyperparameter grid
-point, on top of what the simplified strategy already does.
+the simplified strategy only partially corrects for. It does not re-optimize
+per component: the conditional-mean configuration at each Gauss-Hermite
+abscissa is the RMC eq. 13 closed-form (a rank-one update of the modal
+configuration), so the added cost is one dense (p-1)x(p-1) determinant per
+abscissa per latent component per hyperparameter grid point, on top of what
+the simplified strategy already does.
 
 **Scope:** `latent_strategy="laplace"` supports **unconstrained models
 only** — a model with any `RW`/intrinsic (constrained) effect raises

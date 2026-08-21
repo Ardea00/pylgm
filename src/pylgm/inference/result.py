@@ -914,7 +914,9 @@ class INLAResult:
     def converged(self) -> bool:
         return True
 
-    def latent_marginals(self, block: str | None = None) -> "GaussianMarginals | SkewNormalMarginals":
+    def latent_marginals(
+        self, block: str | None = None
+    ) -> "GaussianMarginals | SkewNormalMarginals | TabulatedMarginals":
         if self._latent_marginal_table is not None:
             if block is None:
                 selection = slice(None)

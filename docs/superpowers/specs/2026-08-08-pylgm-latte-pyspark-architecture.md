@@ -263,9 +263,11 @@ models — see 3d below.
 `latent_strategy="laplace"` to `LGM.fit` (also requiring
 `hyperparameters="integrate"`) applies INLA's full-Laplace correction on
 top of the 3c numerator correction: a per-latent-component denominator
-re-fit (RMC 2009 eqs 12-13), the cubic-spline correction and
-mixture-of-Gaussians tail fallback (eqs 16-17) for grid points where the
-raw numerator/denominator ratio is not itself a well-behaved density, mixed
+re-fit via the RMC eq. 13 closed-form conditional mean (no per-component
+re-optimization), the cubic-spline correction with constant tail
+extrapolation (eqs 16-17) for grid points where the
+raw numerator/denominator ratio is not itself a well-behaved density (a
+thick-tail mixture-of-Gaussians fallback remains deferred), mixed
 across the hyperparameter grid the same way the Gaussian and
 simplified-Laplace marginals are. It returns a `TabulatedMarginals` — a
 numerically tabulated density per component (mean/std/skewness/quantile/pdf/

@@ -114,7 +114,7 @@ def _logdet_spd(matrix):
     return 2.0 * np.sum(np.log(np.diag(factor[0])))
 
 
-def _full_laplace_marginals(design, offset, y, grid, precision, *,
+def _full_laplace_marginals(design, offset, y, grid, *,
                             n_abscissae=7, grid_points=201, grid_radius=8.0):
     """RMC (2009) full-Laplace tabulated latent marginals (eqs 12/13/16/17).
 
@@ -124,11 +124,15 @@ def _full_laplace_marginals(design, offset, y, grid, precision, *,
     pi~_GG Laplace-approximation determinant (eq 12), and a cubic-spline correction
     against the base Gaussian (eq 17). Mixed over the theta-grid into a
     TabulatedMarginals.
+
+    Each `grid` entry is `(weight, conditional_fit, likelihood, precision)` — the
+    prior precision Q is theta-dependent (CompiledFamily.materialize scales block
+    precisions per hyperparameter), so it travels with its own grid point rather
+    than being shared across the whole grid.
     """
     X = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
     offset = np.asarray(offset, float)
     y = np.asarray(y, float)
-    Q = precision.toarray() if hasattr(precision, "toarray") else np.asarray(precision, float)
     points = list(grid)
     p = points[0][1].mean.shape[0]
     std_nodes = np.polynomial.hermite.hermgauss(n_abscissae)[0] * np.sqrt(2.0)  # ~N(0,1) abscissae
@@ -137,15 +141,16 @@ def _full_laplace_marginals(design, offset, y, grid, precision, *,
     dens_out = np.zeros((p, grid_points))
     for i in range(p):
         # common per-latent grid from the mixture spread
-        mu_bar = sum(w * f.mean[i] for w, f, _ in points)
+        mu_bar = sum(w * f.mean[i] for w, f, _, _ in points)
         # use max per-θ std (not average) so the common grid covers the widest mixture component without truncating its tails
-        sig_max = max(np.sqrt(max(f.covariance[i, i], 0.0)) for _, f, _ in points)
+        sig_max = max(np.sqrt(max(f.covariance[i, i], 0.0)) for _, f, _, _ in points)
         gx = np.linspace(mu_bar - grid_radius * sig_max, mu_bar + grid_radius * sig_max, grid_points)
         mixed = np.zeros(grid_points)
         keep = [c for c in range(p) if c != i]
-        for w, fit, likelihood in points:
+        for w, fit, likelihood, precision in points:
             m = np.asarray(fit.mean, float)
             cov = np.asarray(fit.covariance, float)
+            Q_k = precision.toarray() if hasattr(precision, "toarray") else np.asarray(precision, float)
             sigma_i = np.sqrt(max(cov[i, i], 0.0))
             if sigma_i <= 0.0:
                 continue
@@ -157,9 +162,9 @@ def _full_laplace_marginals(design, offset, y, grid, precision, *,
                 x[i] = xi
                 eta = offset + X @ x
                 loglik = float(likelihood.pointwise_log_density(eta, y).sum())
-                joint = -0.5 * float(x @ Q @ x) + loglik
+                joint = -0.5 * float(x @ Q_k @ x) + loglik
                 wgt = likelihood.working_weights(eta, y)
-                info = Q + (X.T * wgt) @ X
+                info = Q_k + (X.T * wgt) @ X
                 info_mi = np.delete(np.delete(info, i, axis=0), i, axis=1)
                 half_logdet = 0.5 * _logdet_spd(info_mi) if p > 1 else 0.0
                 log_la = joint - half_logdet
@@ -391,9 +396,11 @@ def integrate_inla(
                 "full Laplace does not support constrained (RW) effects; "
                 "use latent_strategy='gaussian' or 'simplified_laplace'"
             )
-        latent_marginal_table = _full_laplace_marginals(
-            design_obs, offset_obs, y_obs, theta_grid, kept[0][4].precision,
-        )
+        laplace_grid = [
+            (w, cond, compiled.likelihood, compiled.precision)
+            for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)
+        ]
+        latent_marginal_table = _full_laplace_marginals(design_obs, offset_obs, y_obs, laplace_grid)
 
     return INLAResult(
         labels=reference.labels,

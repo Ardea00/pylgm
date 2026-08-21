@@ -28,12 +28,51 @@ def test_full_laplace_gaussian_likelihood_is_exact_gaussian():
     compiled = fam.materialize({})
     fit = fit_gaussian(compiled)
     Q = np.eye(2) * prior_prec
-    tab = _full_laplace_marginals(Xs, np.zeros(n), y, [(1.0, fit, CompiledGaussian(1.0))],
-                                  Q, n_abscissae=7)
+    tab = _full_laplace_marginals(Xs, np.zeros(n), y, [(1.0, fit, CompiledGaussian(1.0), Q)],
+                                  n_abscissae=7)
     # exact-Gaussian: tabulated mean/variance match the Gaussian marginal
     np.testing.assert_allclose(tab.mean, fit.mean, atol=5e-3)
     np.testing.assert_allclose(tab.variance, np.diag(fit.covariance), rtol=5e-2)
     np.testing.assert_allclose(tab.skewness, [0.0, 0.0], atol=2e-2)
+
+
+def test_full_laplace_multi_grid_uses_per_theta_precision():
+    # Two theta-grid points with DIFFERENT prior precisions Q1 != Q2, each with its
+    # own self-consistent Gaussian scaffold fit. Since the Gaussian likelihood makes
+    # full-Laplace exact per grid point (see test above), the correct mixed
+    # mean/variance is the closed-form grid-weighted mixture of the two per-theta
+    # Gaussian marginals. If the engine reused a single Q for both grid points (the
+    # bug this guards against), grid point 2's tabulated marginal would no longer be
+    # an exact Gaussian(fit2.mean, fit2.covariance) and this would fail.
+    n = 6
+    X = np.column_stack([np.ones(n), np.linspace(-1, 1, n)])
+    y = np.array([0.4, -0.3, 0.8, 0.1, -0.6, 0.2])
+    Xs = csr_matrix(X)
+    like = CompiledGaussian(1.0)
+
+    def scaffold(prior_prec):
+        block = LatentBlock("b", ("i", "s"), Xs, eye(2, format="csr") * prior_prec,
+                            np.empty((0, 2), dtype=float))
+        fam = CompiledFamily(y=y, observed=np.array([True] * n), offset=np.zeros(n),
+                             blocks=(ScalableBlock(block, None, 1.0),), parameter_names=(),
+                             likelihood_factory=lambda r: CompiledGaussian(1.0))
+        compiled = fam.materialize({})
+        fit = fit_gaussian(compiled)
+        return fit, np.eye(2) * prior_prec
+
+    fit1, Q1 = scaffold(0.5)
+    fit2, Q2 = scaffold(4.0)
+    w1, w2 = 0.3, 0.7
+    grid = [(w1, fit1, like, Q1), (w2, fit2, like, Q2)]
+    tab = _full_laplace_marginals(Xs, np.zeros(n), y, grid, n_abscissae=9)
+
+    v1, v2 = np.diag(fit1.covariance), np.diag(fit2.covariance)
+    expected_mean = w1 * fit1.mean + w2 * fit2.mean
+    expected_var = w1 * (v1 + fit1.mean ** 2) + w2 * (v2 + fit2.mean ** 2) - expected_mean ** 2
+
+    np.testing.assert_allclose(tab.mean, expected_mean, atol=1e-2)
+    np.testing.assert_allclose(tab.variance, expected_var, rtol=8e-2)
+    assert np.all(np.abs(tab.skewness) < 0.15)
 
 
 def test_full_laplace_beats_or_matches_sla_vs_true_marginal():
@@ -56,7 +95,7 @@ def test_full_laplace_beats_or_matches_sla_vs_true_marginal():
     Q = np.eye(2) * prior_prec
     like = CompiledPoisson()
 
-    tab = _full_laplace_marginals(Xs, np.zeros(n), y, [(1.0, fit, like)], Q, n_abscissae=9)
+    tab = _full_laplace_marginals(Xs, np.zeros(n), y, [(1.0, fit, like, Q)], n_abscissae=9)
     loc, scale, shape, w, _ = _simplified_laplace_marginals(Xs, np.zeros(n), y, [(1.0, fit, like)])
     sla = SkewNormalMarginals(weights=w, location=loc, scale=scale, shape=shape)
 
