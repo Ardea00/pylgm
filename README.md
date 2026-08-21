@@ -232,7 +232,8 @@ result = model.fit(
 region = result.latent_marginals("region")  # SkewNormalMarginals
 region.mean       # per-component mean
 region.std        # per-component sd
-region.skewness   # per-component skewness (0 for a Gaussian likelihood)
+region.skewness   # per-component skewness (0 per grid point for a Gaussian
+                  # likelihood, but the grid-mixed value is generally nonzero)
 region.quantile(0.025)  # per-component quantile (asymmetric interval when skewed)
 ```
 
@@ -240,10 +241,13 @@ This is faithful to the simplified-Laplace approximation of Rue, Martino &
 Chopin (2009), *Approximate Bayesian Inference for Latent Gaussian Models by
 Using Integrated Nested Laplace Approximations*, §3.2.3 and Appendix B — the
 skew-normal fit uses the same location/scale/skewness matching described
-there. It is exact (`skewness == 0` everywhere) for a Gaussian likelihood,
-since the Gaussian conditional posterior has no third-derivative correction
-to apply. `latent_strategy` defaults to `"gaussian"`, so existing fits are
-unaffected unless it is passed explicitly.
+there. For a Gaussian likelihood the per-grid-point SLA correction is zero
+(each conditional marginal is exactly Gaussian, since the Gaussian
+conditional posterior has no third-derivative correction to apply); the
+integrated marginal still carries hyperparameter-mixture skewness, as any
+INLA grid mixture does, so it is not identical to the symmetric
+Gaussian-strategy summary. `latent_strategy` defaults to `"gaussian"`, so
+existing fits are unaffected unless it is passed explicitly.
 
 **Scope:** this is the *simplified*-Laplace correction to the latent
 marginals, not INLA's full-Laplace strategy (which additionally corrects the

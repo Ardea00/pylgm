@@ -7,6 +7,7 @@ from pylgm.ir.family import ScalableBlock
 from pylgm.ir.model import LatentBlock
 from pylgm.likelihoods import CompiledGaussian, CompiledPoisson
 from pylgm.inference import fit_laplace
+from pylgm.inference.result import SkewNormalMarginals
 from pylgm.optimization.inla import _simplified_laplace_marginals
 
 
@@ -26,6 +27,25 @@ def test_sla_gaussian_likelihood_is_exact_gaussian():
     np.testing.assert_allclose(shape, 0.0, atol=1e-12)   # d3=0 -> no skew
     np.testing.assert_allclose(loc[:, 0], fit.mean)
     np.testing.assert_allclose(scale[:, 0], np.sqrt(np.diag(fit.covariance)))
+
+
+def test_sla_degenerate_coordinate_gets_floored_positive_scale():
+    # A rank-deficient / constrained conditional covariance can clip a coordinate's
+    # diagonal to exactly 0 (sigma_i == 0). The correction is already zeroed there
+    # (see the `sigma > 0` guards on gamma1/gamma3), but naively setting
+    # scale = sigma * omega leaves that coordinate's scale at exactly 0, which
+    # SkewNormalMarginals rejects. It must be floored to a small positive value
+    # instead, yielding a valid near-point-mass marginal.
+    design = csr_matrix(np.eye(2))
+    offset = np.zeros(2)
+    y = np.array([0.3, -0.4])
+    fit = _Fit([0.2, -0.1], np.diag([0.3, 0.0]))  # coordinate 1 is genuinely degenerate
+    loc, scale, shape, w, _ = _simplified_laplace_marginals(
+        design, offset, y, [(1.0, fit, CompiledGaussian(1.0))])
+    assert scale[1, 0] > 0.0
+    assert shape[1, 0] == 0.0
+    sla = SkewNormalMarginals(weights=w, location=loc, scale=scale, shape=shape)
+    assert np.isfinite(sla.mean).all()
 
 
 def test_sla_poisson_matches_true_marginal_better_than_gaussian():

@@ -587,6 +587,31 @@ def test_sla_latent_strategy_returns_skew_marginals_both_engines():
     assert isinstance(gauss.latent_marginals("region"), GaussianMarginals)
 
 
+def test_sla_gaussian_exact_gaussian_integrated_mean_variance_matches_gaussian_strategy():
+    # Per grid point, a Gaussian likelihood's SLA correction is exactly zero (d3=0),
+    # so each conditional marginal is exactly Gaussian and the SLA and Gaussian
+    # strategies share the same underlying grid mixture -> integrated mean/variance
+    # must match to tight tolerance. The *integrated* marginal is a grid-weighted
+    # mixture of Gaussians with theta-varying means, which is itself skewed in
+    # general -- this test intentionally does NOT assert skewness == 0.
+    frame = _region_panel()
+    model = LGM("y", Gaussian(0.5),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    sla = model.fit(frame, engine="exact_gaussian", hyperparameters="integrate",
+                    latent_strategy="simplified_laplace")
+    gauss = model.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+    assert sla.diagnostics["inla_grid_points"] >= 3  # genuine multi-grid mixture
+    assert "skew_clamped" in sla.diagnostics
+
+    sla_marg = sla.latent_marginals("region")
+    gauss_marg = gauss.latent_marginals("region")
+    np.testing.assert_allclose(sla_marg.mean, gauss_marg.mean, atol=1e-8, rtol=1e-6)
+    np.testing.assert_allclose(sla_marg.variance, gauss_marg.variance, atol=1e-8, rtol=1e-6)
+    assert np.isfinite(sla_marg.skewness).all()
+
+
 def test_sla_requires_integration_and_valid_strategy():
     from pylgm import Fixed, Gaussian, IID, LGM, Hyperparameter
     frame = pd.DataFrame({"region": ["a", "b"] * 10, "t": list(range(20)),

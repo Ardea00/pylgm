@@ -17,7 +17,8 @@ from pylgm.inference.result import (
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 
 _SN_C = (4.0 - math.pi) * math.sqrt(2.0) / math.pi ** 1.5
-_SN_R_MAX = 5.0  # cap on |a/omega| for robustness (|skew| ~ 0.99)
+_SN_R_MAX = 5.0  # cap on |a/omega| for robustness (|skew| ~ 0.937 at r=5, shy of the ~0.995 supremum)
+_SCALE_FLOOR = 1e-12  # degenerate (sigma_i == 0) coordinate: near-point-mass marginal
 
 
 def _solve_omega(r: np.ndarray) -> np.ndarray:
@@ -96,7 +97,7 @@ def _simplified_laplace_marginals(design, offset, y, grid):
         xi, omega, sn_a, clamped = _fit_skew_normal(gamma1, gamma3)
         clamped_count += int(clamped.sum())
         location[:, k] = m + sigma * xi
-        scale[:, k] = sigma * omega
+        scale[:, k] = np.where(sigma > 0.0, sigma * omega, _SCALE_FLOOR)
         shape[:, k] = sn_a
         weights[:, k] = w
     return location, scale, shape, weights, clamped_count
@@ -279,9 +280,9 @@ def integrate_inla(
     design_obs = full_design[observed]
     offset_obs = kept[0][4].offset[observed]
     y_obs = kept[0][4].y[observed]
-    criteria_grid = [(w, cond, compiled.likelihood)
-                     for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
-    crit = _model_criteria(design_obs, offset_obs, y_obs, criteria_grid)
+    theta_grid = [(w, cond, compiled.likelihood)
+                  for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
+    crit = _model_criteria(design_obs, offset_obs, y_obs, theta_grid)
 
     # crit.cpo/pit are computed in canonical order over observed rows only (length
     # n_observed); scatter them into full-length canonical arrays aligned with every
@@ -299,12 +300,11 @@ def integrate_inla(
 
     latent_marginal_table = None
     if latent_strategy == "simplified_laplace":
-        sla_grid = [(w, cond, compiled.likelihood)
-                    for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
-        location, scale, shape, sla_weights, _ = _simplified_laplace_marginals(
-            design_obs, offset_obs, y_obs, sla_grid,
+        location, scale, shape, sla_weights, clamped_count = _simplified_laplace_marginals(
+            design_obs, offset_obs, y_obs, theta_grid,
         )
         latent_marginal_table = SkewNormalMarginals(sla_weights, location, scale, shape)
+        diagnostics["skew_clamped"] = int(clamped_count)
 
     return INLAResult(
         labels=reference.labels,

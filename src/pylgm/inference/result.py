@@ -794,7 +794,13 @@ class INLAResult:
 
     def latent_marginals(self, block: str | None = None) -> "GaussianMarginals | SkewNormalMarginals":
         if self._latent_marginal_table is not None:
-            selection = slice(None) if block is None else self.block_slices[block]
+            if block is None:
+                selection = slice(None)
+            else:
+                try:
+                    selection = self.block_slices[block]
+                except KeyError as error:
+                    raise KeyError(f"unknown latent block {block!r}") from error
             return self._latent_marginal_table.select(selection)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 

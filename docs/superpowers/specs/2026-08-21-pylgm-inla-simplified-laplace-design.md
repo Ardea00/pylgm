@@ -63,8 +63,12 @@ If `γ³_i` implies a larger magnitude, clamp `r` to the achievable maximum and
 flag the marginal (a per-marginal `skew_clamped` diagnostic count). Documented as
 a known limit of the skew-normal representation.
 
-**Gaussian likelihood is exact:** `d³_j = 0 ⇒ γ¹_i = γ³_i = 0 ⇒ a = 0, ω = 1,
-ξ = 0 ⇒ SN = N(μ_i, σ_i²)` — the SLA reduces exactly to the Gaussian marginal.
+**Gaussian likelihood: per-grid-point correction is zero:** `d³_j = 0 ⇒ γ¹_i = γ³_i = 0
+⇒ a = 0, ω = 1, ξ = 0 ⇒ SN = N(μ_i, σ_i²)` — at each grid point the SLA reduces
+exactly to the Gaussian marginal. This does *not* make the integrated (grid-mixed)
+marginal Gaussian: a weighted mixture of Gaussians with θ-varying means is itself
+skewed in general, so the *integrated* SLA marginal still carries hyperparameter-
+mixture skewness for a Gaussian likelihood, same as any INLA grid mixture.
 
 **Integrated marginal:** `π(x_i | y) ≈ Σ_k w_k SN(ξ'_{ik}, ω'_{ik}, a_{ik})` — a
 grid-weighted mixture of skew-normals (weights `w_k` from 3a).
@@ -120,8 +124,11 @@ m.quantile(0.025); m.quantile(0.975)       # skew-aware quantiles
 - `latent_strategy="simplified_laplace"` requires `hyperparameters="integrate"`
   (SLA is a latent-marginal strategy within the integration); combining it with
   `hyperparameters="optimize"` raises `ValueError`.
-- Works for both engines; for a Gaussian likelihood the SLA marginals equal the
-  Gaussian marginals (exact), so the strategy is a no-op there.
+- Works for both engines; for a Gaussian likelihood the *per-grid-point* SLA
+  correction is zero (each conditional marginal is exactly Gaussian), but the
+  *integrated* marginal still carries hyperparameter-mixture skewness like any
+  INLA grid mixture, so it is not identical to the symmetric Gaussian-strategy
+  summary — the strategy is not a no-op at the integrated-marginal level.
 
 ## Architecture
 
