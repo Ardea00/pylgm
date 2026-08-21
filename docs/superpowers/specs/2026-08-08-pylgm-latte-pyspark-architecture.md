@@ -182,9 +182,10 @@ likelihood, and `result.diagnostics["hyperparameter_penalized"]` records it
 not a marginal. AR1, `result.predict(new_data)`, and parameterized IR
 metadata are explicitly deferred. The hyperparameter integration core (grid
 quadrature, section 3a) and model-assessment criteria (DIC/WAIC/CPO/PIT,
-section 3b) have since shipped; richer latent strategies beyond Gaussian
-(section 3c) remain deferred. The target foundation is therefore not
-complete in 0.3.
+section 3b) have since shipped; the simplified-Laplace latent strategy
+(section 3c) has since shipped as well, with full Laplace and the other 3c
+follow-ups still deferred. The target foundation is therefore not complete
+in 0.3.
 
 ### 2. Non-Gaussian LGM
 
@@ -206,7 +207,8 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - Binomial(n) likelihood;
 - non-canonical links;
 - exposures and observation weights;
-- richer latent strategies for INLA integration (section 3c below);
+- full-Laplace and other latent-strategy refinements for INLA integration
+  (section 3c below; the simplified-Laplace strategy has since shipped);
 - spatial effects.
 
 ### 3. INLA-style inference
@@ -235,12 +237,34 @@ shipped `pit` is the non-randomized `P(Y <= y)`), and criteria for plug-in
 fits (`hyperparameters="optimize"` or the default) rather than only
 integrated ones.
 
+**3c. Simplified-Laplace latent marginals — shipped (partial).** Passing
+`latent_strategy="simplified_laplace"` to `LGM.fit` (requiring
+`hyperparameters="integrate"`) applies INLA's simplified-Laplace
+skewness correction to the latent marginals at every hyperparameter grid
+point, following Rue, Martino & Chopin (2009) §3.2.3 and Appendix B: a
+skew-normal fit per grid point, mixed across the grid the same way the
+Gaussian marginals are, returned as a `SkewNormalMarginals`
+(mean/std/skewness/quantile). It is exact (skewness zero) for a Gaussian
+likelihood, and defaults to the unchanged Gaussian latent strategy when not
+requested (see the
+[project README](../../../README.md#simplified-laplace-latent-marginals)).
+Validated against a brute-force true-marginal oracle for small,
+non-Gaussian models, not against R-INLA.
+
 Still deferred:
 
-- **3c. Richer latent strategies** — the simplified- and full-Laplace
-  corrections to the latent marginals that give INLA its name; 3a uses only
-  the Gaussian approximation (exact-Gaussian posterior or Laplace mode) at
-  each grid point.
+- **Full Laplace** — the additional per-latent-component denominator
+  correction (RMC eq 10 / cubic-spline eq 17) and the thick-tail spline
+  fallback; 3c ships only the simplified-Laplace numerator correction.
+- **η-marginal simplified-Laplace** — 3c corrects the coefficient marginals
+  returned by `latent_marginals`, not the linear-predictor (η) marginals.
+- **Region-of-interest pruning** (RMC eq 15) — 3c computes the correction
+  over every coefficient rather than pruning to a region of interest.
+- **R-INLA parity fixtures** — validation remains against a brute-force
+  true-marginal oracle, not reproduced R-INLA output.
+- Other recorded INLA follow-ups: integrand-mode grid recentering,
+  randomized discrete PIT, robust discrete CPO, and model-assessment
+  criteria for non-integrated fits.
 
 ### 4. Spatial effects
 
@@ -346,8 +370,9 @@ mathematical correctness.
 - parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
 - INLA integration (was a non-goal of the first refactor; the integration
-  core and model-assessment criteria have since shipped as sub-slices 3a and
-  3b, with richer latent strategies (3c) remaining);
+  core, model-assessment criteria, and the simplified-Laplace latent
+  strategy have since shipped as sub-slices 3a, 3b, and 3c, with full
+  Laplace and the other 3c follow-ups remaining);
 - spatial effects and SPDE meshes;
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;

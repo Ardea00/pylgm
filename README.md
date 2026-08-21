@@ -207,6 +207,52 @@ any) hit a bound at the mode, so this degradation is visible rather than
 silent. A runnable example lives at
 [`examples/inla/README.md`](examples/inla/README.md).
 
+### Simplified-Laplace latent marginals
+
+By default (`latent_strategy="gaussian"`), latent marginals — from either
+`hyperparameters="optimize"` or `hyperparameters="integrate"` — are Gaussian
+summaries (mean/sd) of the conditional latent posterior, which is exact for
+a Gaussian likelihood but only a local approximation for non-Gaussian ones
+(Poisson, Bernoulli): it discards any skewness the true conditional marginal
+has.
+
+Passing `latent_strategy="simplified_laplace"` (which requires
+`hyperparameters="integrate"`) instead applies **INLA's simplified-Laplace
+correction** at every hyperparameter grid point: a third-order (skewness)
+correction to the Gaussian latent approximation, fit as a skew-normal per
+grid point and mixed across the grid the same way the Gaussian marginals
+are. The result is a `SkewNormalMarginals` — `mean`, `std`, `skewness`, and
+`quantile(p)` — instead of a `GaussianMarginals`:
+
+```python
+result = model.fit(
+    frame, engine="laplace", hyperparameters="integrate",
+    latent_strategy="simplified_laplace",
+)
+region = result.latent_marginals("region")  # SkewNormalMarginals
+region.mean       # per-component mean
+region.std        # per-component sd
+region.skewness   # per-component skewness (0 for a Gaussian likelihood)
+region.quantile(0.025)  # per-component quantile (asymmetric interval when skewed)
+```
+
+This is faithful to the simplified-Laplace approximation of Rue, Martino &
+Chopin (2009), *Approximate Bayesian Inference for Latent Gaussian Models by
+Using Integrated Nested Laplace Approximations*, §3.2.3 and Appendix B — the
+skew-normal fit uses the same location/scale/skewness matching described
+there. It is exact (`skewness == 0` everywhere) for a Gaussian likelihood,
+since the Gaussian conditional posterior has no third-derivative correction
+to apply. `latent_strategy` defaults to `"gaussian"`, so existing fits are
+unaffected unless it is passed explicitly.
+
+**Scope:** this is the *simplified*-Laplace correction to the latent
+marginals, not INLA's full-Laplace strategy (which additionally corrects the
+denominator via a Laplace approximation re-fit per latent component) — full
+Laplace is not implemented. Validation is against a brute-force true-marginal
+oracle for small, tractable models, not against R-INLA output; R-INLA parity
+fixtures are future work. A runnable example lives at
+[`examples/inla_sla/README.md`](examples/inla_sla/README.md).
+
 ## Model-assessment criteria
 
 Every integrated fit (`hyperparameters="integrate"`, either the
