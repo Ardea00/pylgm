@@ -7,6 +7,7 @@ from pylgm.inference.result import (
     LaplaceResult,
     ModelCriteria,
     SkewNormalMarginals,
+    TabulatedMarginals,
 )
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "LaplaceResult",
     "ModelCriteria",
     "SkewNormalMarginals",
+    "TabulatedMarginals",
     "fit_gaussian",
     "fit_laplace",
     "preflight_dense_reference",

@@ -4,6 +4,7 @@ from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
+from scipy.integrate import cumulative_trapezoid
 from scipy.sparse import csr_matrix
 from scipy.special import owens_t
 from scipy.stats import norm
@@ -342,6 +343,125 @@ class SkewNormalMarginals:
             self._weights[selection], self._location[selection],
             self._scale[selection], self._shape[selection],
         )
+
+
+def _tabulated_marginal_array(value: np.ndarray, name: str) -> np.ndarray:
+    result = np.asarray(value, dtype=float)
+    if result.ndim != 2:
+        raise ValueError(f"{name} must be two-dimensional (n_components, n_grid)")
+    if not np.isfinite(result).all():
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+@dataclass(frozen=True, init=False)
+class TabulatedMarginals:
+    """Numerical density marginals from grid evaluations for posterior quantities.
+
+    For each component (row), the marginal is represented as a density tabulated
+    on a fixed x-grid. The density is normalized to unit integral on construction.
+    """
+
+    _x: np.ndarray = field(repr=False)
+    _density: np.ndarray = field(repr=False)
+
+    def __init__(self, x: np.ndarray, density: np.ndarray) -> None:
+        x = _tabulated_marginal_array(x, "x")
+        density = _tabulated_marginal_array(density, "density")
+        if x.shape != density.shape:
+            raise ValueError("x and density must have matching shapes")
+        if x.shape[0] == 0 or x.shape[1] == 0:
+            raise ValueError("x and density must have at least one component and one grid point")
+
+        # Check x strictly increasing per row
+        for i in range(x.shape[0]):
+            diffs = np.diff(x[i])
+            if not np.all(diffs > 0):
+                raise ValueError(f"x row {i} must be strictly increasing")
+
+        # Check density >= 0 and not all-zero per row
+        if np.any(density < 0):
+            raise ValueError("density must be non-negative")
+        if np.any(~np.isfinite(density)):
+            raise ValueError("density must be finite")
+
+        # Normalize each density row
+        normalized_density = density.copy()
+        for i in range(x.shape[0]):
+            integral = np.trapz(density[i], x[i])
+            if integral == 0:
+                raise ValueError(f"density row {i} cannot be all-zero")
+            normalized_density[i] = density[i] / integral
+
+        object.__setattr__(self, "_x", _readonly_array(x))
+        object.__setattr__(self, "_density", _readonly_array(normalized_density))
+
+    @property
+    def x(self) -> np.ndarray:
+        return _readonly_array(self._x)
+
+    @property
+    def density(self) -> np.ndarray:
+        return _readonly_array(self._density)
+
+    @property
+    def mean(self) -> np.ndarray:
+        result = np.zeros(self._x.shape[0])
+        for i in range(self._x.shape[0]):
+            result[i] = np.trapz(self._x[i] * self._density[i], self._x[i])
+        return _readonly_array(result)
+
+    @property
+    def variance(self) -> np.ndarray:
+        mean = self.mean
+        result = np.zeros(self._x.shape[0])
+        for i in range(self._x.shape[0]):
+            centered_sq = (self._x[i] - mean[i]) ** 2
+            result[i] = np.trapz(centered_sq * self._density[i], self._x[i])
+        return _readonly_array(result)
+
+    @property
+    def std(self) -> np.ndarray:
+        return _readonly_array(np.sqrt(self.variance))
+
+    @property
+    def skewness(self) -> np.ndarray:
+        mean = self.mean
+        std = self.std
+        result = np.zeros(self._x.shape[0])
+        for i in range(self._x.shape[0]):
+            centered_cubed = (self._x[i] - mean[i]) ** 3
+            mu3 = np.trapz(centered_cubed * self._density[i], self._x[i])
+            result[i] = mu3 / (std[i] ** 3)
+        return _readonly_array(result)
+
+    def pdf(self, x0: np.ndarray) -> np.ndarray:
+        x0 = np.asarray(x0, dtype=float).reshape(-1, 1)
+        result = np.zeros((self._density.shape[0], x0.shape[0]))
+        for i in range(self._density.shape[0]):
+            result[i] = np.interp(x0.reshape(-1), self._x[i], self._density[i], left=0.0, right=0.0)
+        return _readonly_array(result)
+
+    def cdf(self, x0: np.ndarray) -> np.ndarray:
+        x0 = np.asarray(x0, dtype=float).reshape(-1)
+        result = np.zeros((self._density.shape[0], len(x0)))
+        for i in range(self._density.shape[0]):
+            cdf_values = cumulative_trapezoid(self._density[i], self._x[i], initial=0.0)
+            result[i] = np.interp(x0, self._x[i], cdf_values, left=0.0, right=1.0)
+        return _readonly_array(result)
+
+    def quantile(self, p: float) -> np.ndarray:
+        if not isinstance(p, (int, float, np.number)) or not 0 < p < 1:
+            raise ValueError("probability must satisfy 0 < p < 1")
+        result = np.zeros(self._density.shape[0])
+        for i in range(self._density.shape[0]):
+            cdf_values = cumulative_trapezoid(self._density[i], self._x[i], initial=0.0)
+            result[i] = np.interp(p, cdf_values, self._x[i])
+        return _readonly_array(result)
+
+    def select(self, selection: slice) -> "TabulatedMarginals":
+        """Return the component-subset marginals for the given slice of the component axis."""
+        return TabulatedMarginals(self._x[selection], self._density[selection])
 
 
 @dataclass(frozen=True, init=False)
