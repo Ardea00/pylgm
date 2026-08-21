@@ -4,6 +4,8 @@ from itertools import product
 
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
+from scipy.interpolate import CubicSpline
+from scipy.linalg import cho_factor
 from scipy.special import logsumexp
 
 from pylgm.exceptions import NumericalError, OptimizationError
@@ -13,6 +15,7 @@ from pylgm.inference.result import (
     INLAResult,
     ModelCriteria,
     SkewNormalMarginals,
+    TabulatedMarginals,
 )
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 
@@ -101,6 +104,79 @@ def _simplified_laplace_marginals(design, offset, y, grid):
         shape[:, k] = sn_a
         weights[:, k] = w
     return location, scale, shape, weights, clamped_count
+
+
+def _logdet_spd(matrix):
+    factor = cho_factor(matrix, lower=True, check_finite=True)
+    return 2.0 * np.sum(np.log(np.diag(factor[0])))
+
+
+def _full_laplace_marginals(design, offset, y, grid, precision, *,
+                            n_abscissae=7, grid_points=201, grid_radius=8.0):
+    """RMC (2009) full-Laplace tabulated latent marginals (eqs 12/13/16/17).
+
+    Unconstrained models only (caller guards). Per latent i, per theta grid point,
+    per Gauss-Hermite abscissa x_i, computes the conditional-mean configuration
+    (eq 13), the full-Laplace log-density log pi~_LA via the joint density and the
+    pi~_GG Laplace-approximation determinant (eq 12), and a cubic-spline correction
+    against the base Gaussian (eq 17). Mixed over the theta-grid into a
+    TabulatedMarginals.
+    """
+    X = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
+    offset = np.asarray(offset, float)
+    y = np.asarray(y, float)
+    Q = precision.toarray() if hasattr(precision, "toarray") else np.asarray(precision, float)
+    points = list(grid)
+    p = points[0][1].mean.shape[0]
+    std_nodes = np.polynomial.hermite.hermgauss(n_abscissae)[0] * np.sqrt(2.0)  # ~N(0,1) abscissae
+
+    x_out = np.zeros((p, grid_points))
+    dens_out = np.zeros((p, grid_points))
+    for i in range(p):
+        # common per-latent grid from the mixture spread
+        mu_bar = sum(w * f.mean[i] for w, f, _ in points)
+        sig_max = max(np.sqrt(max(f.covariance[i, i], 0.0)) for _, f, _ in points)
+        gx = np.linspace(mu_bar - grid_radius * sig_max, mu_bar + grid_radius * sig_max, grid_points)
+        mixed = np.zeros(grid_points)
+        keep = [c for c in range(p) if c != i]
+        for w, fit, likelihood in points:
+            m = np.asarray(fit.mean, float)
+            cov = np.asarray(fit.covariance, float)
+            sigma_i = np.sqrt(max(cov[i, i], 0.0))
+            if sigma_i <= 0.0:
+                continue
+            abscissae = m[i] + sigma_i * std_nodes
+            delta = np.empty(n_abscissae)
+            for a, xi in enumerate(abscissae):
+                x = m.copy()
+                x[keep] = m[keep] + cov[keep, i] / cov[i, i] * (xi - m[i])   # eq 13 conditional mean
+                x[i] = xi
+                eta = offset + X @ x
+                loglik = float(likelihood.pointwise_log_density(eta, y).sum())
+                joint = -0.5 * float(x @ Q @ x) + loglik
+                wgt = likelihood.working_weights(eta, y)
+                info = Q + (X.T * wgt) @ X
+                info_mi = np.delete(np.delete(info, i, axis=0), i, axis=1)
+                log_gg = 0.5 * _logdet_spd(info_mi) if p > 1 else 0.0
+                log_la = joint - log_gg
+                log_g = -0.5 * std_nodes[a] ** 2 - np.log(sigma_i) - 0.5 * np.log(2 * np.pi)
+                delta[a] = log_la - log_g
+            spline = CubicSpline(abscissae, delta, extrapolate=False)
+            s = spline(gx)
+            s[gx < abscissae[0]] = delta[0]      # constant tail extrapolation
+            s[gx > abscissae[-1]] = delta[-1]
+            log_dens = -0.5 * ((gx - m[i]) / sigma_i) ** 2 - np.log(sigma_i) - 0.5 * np.log(2 * np.pi) + s
+            dens = np.exp(log_dens - log_dens.max())
+            area = np.trapz(dens, gx)
+            if not np.isfinite(area) or area <= 0:
+                raise NumericalError("full-Laplace density normalization failed")
+            mixed += w * (dens / area)
+        total = np.trapz(mixed, gx)
+        if not np.isfinite(total) or total <= 0:
+            raise NumericalError("full-Laplace mixture normalization failed")
+        x_out[i] = gx
+        dens_out[i] = mixed / total
+    return TabulatedMarginals(x_out, dens_out)
 
 
 def _finite_difference_hessian(
