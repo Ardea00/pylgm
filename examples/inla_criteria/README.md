@@ -52,5 +52,13 @@ no separate call needed to compute it.
   conservative (not exactly uniform even for a correctly specified model);
   the randomized version is not yet implemented.
 
+**Discrete-response caveat:** for Poisson/Bernoulli responses, the
+harmonic-mean CPO/PIT estimator integrates a heavy/divergent-tailed `E[1/p]`
+against the Gaussian eta-approximation, so both the CPO/PIT values and
+`cpo_failures` are sensitive to the Gauss-Hermite quadrature node count;
+`cpo_failures` is a lower bound on unreliable observations, not a guarantee
+that the rest are trustworthy. Better tail handling (randomized PIT, robust
+leave-one-out) is deferred.
+
 See the ["Model-assessment criteria" section](../../README.md#model-assessment-criteria)
 of the project README for the full contract.

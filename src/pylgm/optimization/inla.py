@@ -182,13 +182,28 @@ def integrate_inla(
     if not np.isfinite(integrated_lml):
         raise NumericalError("INLA produced non-finite log marginal likelihood")
 
+    full_design = kept[0][4].design
     observed = kept[0][4].observed
-    design_obs = kept[0][4].design[observed]
+    design_obs = full_design[observed]
     offset_obs = kept[0][4].offset[observed]
     y_obs = kept[0][4].y[observed]
     criteria_grid = [(w, cond, compiled.likelihood)
                      for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
-    criteria = _model_criteria(design_obs, offset_obs, y_obs, criteria_grid)
+    crit = _model_criteria(design_obs, offset_obs, y_obs, criteria_grid)
+
+    # crit.cpo/pit are computed in canonical order over observed rows only (length
+    # n_observed); scatter them into full-length canonical arrays aligned with every
+    # row (NaN at unobserved/prediction-target rows) so they can be reordered like
+    # predictive_mean/predictive_variance below.
+    cpo_full = np.full(observed.size, np.nan)
+    pit_full = np.full(observed.size, np.nan)
+    cpo_full[observed] = crit.cpo
+    pit_full[observed] = crit.pit
+    criteria = ModelCriteria(
+        crit.dic, crit.dic_effective_parameters,
+        crit.waic, crit.waic_effective_parameters,
+        cpo_full, pit_full, crit.cpo_failures, crit.log_cpo_sum,
+    )
 
     return INLAResult(
         labels=reference.labels,

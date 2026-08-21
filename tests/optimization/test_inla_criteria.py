@@ -1,5 +1,7 @@
 import numpy as np
+from numpy.polynomial.hermite import hermgauss
 from scipy.sparse import csr_matrix
+from scipy.special import logsumexp
 from scipy.stats import norm
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.optimization.inla import _model_criteria
@@ -38,7 +40,6 @@ def test_single_grid_gaussian_matches_closed_forms():
     np.testing.assert_allclose(crit.dic, d_bar + (d_bar - d_mean), rtol=1e-6)
 
     # CPO/PIT vs independent fine Gauss-Hermite (harmonic / reweighted definitions)
-    from numpy.polynomial.hermite import hermgauss
     nodes, w = hermgauss(200)
     w = w / np.sqrt(np.pi)
     for i in range(2):
@@ -82,8 +83,6 @@ def test_cpo_failure_flag_max_contribution_vs_concentration():
 
     # Recompute the per-node reciprocal contributions independently to verify the
     # fixture actually produces a single dominant, non-tied node.
-    from numpy.polynomial.hermite import hermgauss
-    from scipy.special import logsumexp
     nodes, gh = hermgauss(64)
     gh = gh / np.sqrt(np.pi)
     log_gh = np.log(gh)

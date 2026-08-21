@@ -60,9 +60,13 @@ def _rebuild_result(
             if caller_order is not None and result.fitted_mean is not None
             else result.fitted_mean
         )
+        criteria = (
+            result.criteria.reordered(caller_order)
+            if caller_order is not None else result.criteria
+        )
         return INLAResult(
             hyperparameter_marginals=result.hyperparameter_marginals(),
-            criteria=result.criteria,
+            criteria=criteria,
             fitted_mean=fitted_mean,
             link_name=result.link_name,
             **common,

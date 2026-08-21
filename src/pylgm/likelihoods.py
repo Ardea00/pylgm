@@ -51,12 +51,12 @@ class CompiledGaussian:
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
         return np.asarray(eta_mean, dtype=float)
 
-    def pointwise_log_density(self, eta, y):
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
         return -0.5 * (np.log(2 * np.pi * self.variance) + (y - eta) ** 2 / self.variance)
 
-    def cdf(self, eta, y):
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
         return 0.5 * (1.0 + erf((y - eta) / (np.sqrt(self.variance) * np.sqrt(2.0))))
@@ -114,12 +114,12 @@ class CompiledPoisson:
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
         return self.link.inverse(np.asarray(eta_mean, dtype=float) + 0.5 * np.asarray(eta_variance, dtype=float))
 
-    def pointwise_log_density(self, eta, y):
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
         return y * eta - np.exp(eta) - gammaln(y + 1.0)
 
-    def cdf(self, eta, y):
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
         return gammaincc(np.floor(y) + 1.0, np.exp(eta))
@@ -156,12 +156,12 @@ class CompiledBernoulli:
     def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
         return self.link.inverse(np.asarray(eta_mean, dtype=float))  # point estimate; variance ignored
 
-    def pointwise_log_density(self, eta, y):
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
         return y * eta - np.logaddexp(0.0, eta)
 
-    def cdf(self, eta, y):
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
         y = np.asarray(y, dtype=float)
         return np.where(y >= 1.0, 1.0, 1.0 - self.link.inverse(eta))

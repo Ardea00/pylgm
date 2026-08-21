@@ -7,7 +7,7 @@ from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
-from pylgm.inference.result import INLAResult, LaplaceResult
+from pylgm.inference.result import INLAResult, LaplaceResult, ModelCriteria
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.parameters import Hyperparameter
 from pylgm.model import _align_predictions_with_source_rows
@@ -459,11 +459,6 @@ def test_integrate_requires_a_hyperparameter():
 
 
 def test_inla_result_exposes_model_criteria_both_engines():
-    import numpy as np
-    import pandas as pd
-    from pylgm import Fixed, Gaussian, IID, LGM, Poisson, Hyperparameter
-    from pylgm.inference.result import ModelCriteria
-
     rng = np.random.default_rng(0)
     regions = [f"r{i}" for i in range(30)]
     effects = {r: rng.normal() for r in regions}
@@ -507,3 +502,64 @@ def test_invalid_hyperparameters_mode_rejected():
     model = LGM("y", Gaussian(1.0), Fixed("1"), panel=("region",), time="t")
     with pytest.raises(ValueError, match="hyperparameters"):
         model.fit(frame, engine="exact_gaussian", hyperparameters="nonsense")
+
+
+def test_criteria_cpo_pit_are_row_aligned_with_caller_order():
+    # cpo/pit are computed internally in CanonicalPanel (sorted) order but must be
+    # realigned to caller row order just like predictive_mean/predictive_variance,
+    # since result.criteria.cpo[i] is documented to describe the same observation
+    # as result.predictive_mean[i].
+    base = _region_panel()
+    sort_order = base.sort_values(["region", "t"]).index.to_numpy()
+    sorted_frame = base.iloc[sort_order].reset_index(drop=True)
+    rng = np.random.default_rng(7)
+    shuffled_index = rng.permutation(len(base))
+    shuffled_frame = base.iloc[shuffled_index].reset_index(drop=True)
+
+    model = LGM("y", Gaussian(0.5),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+
+    sorted_result = model.fit(sorted_frame, engine="exact_gaussian", hyperparameters="integrate")
+    shuffled_result = model.fit(shuffled_frame, engine="exact_gaussian", hyperparameters="integrate")
+
+    assert shuffled_result.criteria.cpo.shape[0] == len(shuffled_frame)
+    assert shuffled_result.criteria.pit.shape[0] == len(shuffled_frame)
+    assert shuffled_result.criteria.cpo.shape[0] == shuffled_result.predictive_mean.shape[0]
+
+    # Scatter the shuffled fit's cpo/pit back into base's original row positions
+    # (recovered_cpo[shuffled_index[k]] = shuffled_result.cpo[k]), then apply the
+    # same region/t sort used to build sorted_frame: the two fits operate on the
+    # same 80 observations, so once both are viewed in that common canonical row
+    # order they must match exactly (INLA fitting itself is caller-order-independent;
+    # only the final realignment differs).
+    recovered_cpo = np.empty_like(shuffled_result.criteria.cpo)
+    recovered_cpo[shuffled_index] = shuffled_result.criteria.cpo
+    recovered_pit = np.empty_like(shuffled_result.criteria.pit)
+    recovered_pit[shuffled_index] = shuffled_result.criteria.pit
+
+    np.testing.assert_allclose(recovered_cpo[sort_order], sorted_result.criteria.cpo)
+    np.testing.assert_allclose(recovered_pit[sort_order], sorted_result.criteria.pit)
+
+
+def test_criteria_cpo_pit_have_nan_at_unobserved_rows():
+    frame = _region_panel().reset_index(drop=True)
+    unobserved_positions = [0, 5, 17]
+    frame.loc[unobserved_positions, "y"] = np.nan
+
+    model = LGM("y", Gaussian(0.5),
+                Fixed("1") + IID("region", index="region",
+                                 precision=Hyperparameter("p", initial=1.0)),
+                panel=("region",), time="t")
+    result = model.fit(frame, engine="exact_gaussian", hyperparameters="integrate")
+
+    cpo = result.criteria.cpo
+    pit = result.criteria.pit
+    assert cpo.shape[0] == len(frame) == pit.shape[0]
+
+    observed_mask = frame["y"].notna().to_numpy()
+    assert np.all(np.isnan(cpo[~observed_mask]))
+    assert np.all(np.isnan(pit[~observed_mask]))
+    assert np.all(np.isfinite(cpo[observed_mask]))
+    assert np.all(np.isfinite(pit[observed_mask]))

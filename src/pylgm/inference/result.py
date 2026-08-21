@@ -336,7 +336,14 @@ class GaussianResult:
 
 @dataclass(frozen=True, init=False)
 class ModelCriteria:
-    """DIC, WAIC, CPO, and PIT model-assessment criteria."""
+    """DIC, WAIC, CPO, and PIT model-assessment criteria.
+
+    For discrete-response likelihoods (e.g. Poisson, Bernoulli), the harmonic-mean
+    CPO/PIT estimator integrates ``E[1/p]`` against a heavy/divergent tail under the
+    Gaussian eta-approximation, so both the CPO/PIT values and ``cpo_failures`` are
+    sensitive to the Gauss-Hermite quadrature node count; ``cpo_failures`` is a lower
+    bound on unreliable observations, not a guarantee that the rest are trustworthy.
+    """
 
     dic: float
     dic_effective_parameters: float
@@ -374,6 +381,15 @@ class ModelCriteria:
     @property
     def pit(self) -> np.ndarray:
         return _readonly_array(self._pit)
+
+    def reordered(self, order: np.ndarray) -> "ModelCriteria":
+        """Return a new ModelCriteria with cpo/pit permuted by ``order``; scalars unchanged."""
+        return ModelCriteria(
+            self.dic, self.dic_effective_parameters,
+            self.waic, self.waic_effective_parameters,
+            self._cpo[order], self._pit[order],
+            self.cpo_failures, self.log_cpo_sum,
+        )
 
 
 def _validate_prediction_keys(
@@ -534,7 +550,7 @@ class INLAResult:
     _predictive_mean: np.ndarray = field(repr=False)
     _predictive_variance: np.ndarray = field(repr=False)
     _hyperparameter_marginals: Mapping[str, GaussianMarginals] = field(repr=False)
-    _criteria: "ModelCriteria" = field(repr=False)
+    _criteria: ModelCriteria = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
     _prediction_keys: pd.DataFrame | None = field(repr=False)
@@ -552,7 +568,7 @@ class INLAResult:
         predictive_variance: np.ndarray,
         hyperparameter_marginals: Mapping[str, GaussianMarginals],
         *,
-        criteria: "ModelCriteria",
+        criteria: ModelCriteria,
         fitted_mean: np.ndarray | None = None,
         link_name: str | None = None,
         block_slices: Mapping[str, slice] | None = None,
@@ -656,7 +672,7 @@ class INLAResult:
         return self._hyperparameter_marginals
 
     @property
-    def criteria(self) -> "ModelCriteria":
+    def criteria(self) -> ModelCriteria:
         return self._criteria
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:

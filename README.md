@@ -244,6 +244,12 @@ criteria.log_cpo_sum                # sum of log CPO, a leave-one-out log score
   For discrete-response likelihoods, `pit` is the non-randomized `P(Y <= y)`
   rather than the randomized PIT, so it is conservative even for a correctly
   specified model.
+- For discrete-response likelihoods (Poisson, Bernoulli), the harmonic-mean
+  CPO/PIT estimator integrates a heavy/divergent-tailed `E[1/p]` against the
+  Gaussian eta-approximation, so the CPO/PIT reliability flag (`cpo_failures`)
+  is dependent on the quadrature node count and is only a *lower bound* on
+  unreliable observations, not a guarantee that the rest are trustworthy;
+  better tail handling (randomized PIT, robust leave-one-out) is deferred.
 
 Criteria are not yet computed for plug-in fits (`hyperparameters="optimize"`
 or the default). A runnable example lives at
