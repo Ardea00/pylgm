@@ -24,6 +24,9 @@ def _scaled_structure(w: csr_matrix, scale: bool) -> np.ndarray:
         )
     if not scale:
         return r
+    # ponytail: dense pinv per component, O(n_c^3); fine for the dense reference
+    # regime (hundreds of regions). Use a sparse eigensolver if graphs grow to
+    # thousands of nodes per component.
     scaled = r.copy()
     for component in range(n_components):
         index = np.where(membership == component)[0]
