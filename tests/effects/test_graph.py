@@ -73,3 +73,10 @@ def test_load_graph_file_rejects_out_of_range(tmp_path):
     path.write_text("2\n1 1 5\n2 1 1\n")
     with pytest.raises(ValueError):
         load_graph_file(path)
+
+
+def test_load_graph_file_rejects_negative_degree(tmp_path):
+    path = tmp_path / "g.graph"
+    path.write_text("2\n1 -1\n2 0\n")
+    with pytest.raises(ValueError, match="non-negative"):
+        load_graph_file(path)

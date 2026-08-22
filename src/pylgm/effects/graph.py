@@ -88,6 +88,8 @@ def load_graph_file(path: str | os.PathLike) -> dict[str, list[str]]:
         if not 1 <= node <= count:
             raise ValueError(f"graph file node id {node} out of range 1..{count}")
         degree = take_int("neighbour count")
+        if degree < 0:
+            raise ValueError(f"graph file neighbour count must be non-negative, got {degree}")
         neighbours = []
         for _ in range(degree):
             neighbour = take_int("neighbour id")
