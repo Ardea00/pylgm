@@ -20,18 +20,28 @@ def _spatial_frame(n=12, rho_true=0.95, seed=0):
     return pd.DataFrame({"region": [str(i) for i in range(n)], "y": y})
 
 
-def test_rho_estimated_by_empirical_bayes():
-    frame = _spatial_frame()
-    graph = _chain(12)
+def _estimate_rho(rho_true, seed):
+    frame = _spatial_frame(rho_true=rho_true, seed=seed)
     rho = Hyperparameter("region.rho", initial=0.0, transform="logit")
     tau = Hyperparameter("region.precision", initial=1.0, prior=PCPrecision(upper_sd=1.0, alpha=0.01))
     model = LGM(response="y",
-                predictor=Fixed("1") + ProperCAR("region", index="region", graph=graph, rho=rho, precision=tau),
+                predictor=Fixed("1")
+                + ProperCAR("region", index="region", graph=_chain(12), rho=rho, precision=tau),
                 likelihood=Gaussian(sigma=0.1))
-    result = model.fit(frame)
-    est = result.hyperparameters["region.rho"]
-    assert -1.0 < est < 1.0
-    assert est > 0.3           # recovers positive spatial dependence
+    return model.fit(frame).hyperparameters["region.rho"]
+
+
+def test_rho_estimated_by_empirical_bayes():
+    # A single realization at n=12 is weakly identified (a lucky seed can give a
+    # high estimate even for an independent truth), so average a few seeds and
+    # assert the estimate TRACKS the simulated dependence: strong-vs-weak must
+    # separate. This is what makes the test discriminating rather than a
+    # coin-flip threshold on one draw.
+    seeds = (0, 1, 2, 3, 4)
+    strong = [_estimate_rho(0.95, s) for s in seeds]
+    weak = [_estimate_rho(0.0, s) for s in seeds]
+    assert all(-1.0 < e < 1.0 for e in strong + weak)
+    assert np.mean(strong) > np.mean(weak) + 0.3
 
 
 def test_rho_integrated_by_inla():

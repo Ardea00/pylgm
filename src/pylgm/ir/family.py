@@ -29,30 +29,20 @@ def _ordinary_finite(value: object, name: str) -> float:
     return float(value)
 
 
-def _unconstrained_parametric_names(
-    block_values: tuple["ScalableBlock | ParametricBlock", ...],
-) -> frozenset[str]:
-    """Parametric-block parameters that are not required to stay positive.
-
-    A ``ParametricBlock`` parameter that isn't a ``*.precision`` (e.g. a proper
-    CAR ``rho``) can validly take any finite value in its bounded interval,
-    including zero or negative — unlike sigma and scalable-block precisions,
-    which must stay strictly positive.
-    """
-    return frozenset(
-        name
-        for item in block_values
-        if isinstance(item, ParametricBlock)
-        for name in item.parameters
-        if not name.endswith(".precision")
-    )
-
-
 def _validate_parameter_mapping(
     values: Mapping[str, float],
     parameter_names: tuple[str, ...],
-    unconstrained: frozenset[str] = frozenset(),
+    parameter_bounds: Mapping[str, object] = MappingProxyType({}),
 ) -> dict[str, float]:
+    """Validate supplied hyperparameter values against their declared domains.
+
+    A parameter's *transform* is the authority on its natural domain: a log
+    transform admits only positive values, a bounded (logit) transform admits
+    any value strictly inside its interval — so a proper-CAR ``rho`` may be zero
+    or negative. Parameters without a declared bound fall back to strict
+    positivity, which is the historical behaviour for sigma and block
+    precisions.
+    """
     if not isinstance(values, Mapping):
         raise ModelValidationError("optimized values must be a mapping")
     supplied = set(values)
@@ -67,11 +57,16 @@ def _validate_parameter_mapping(
     result = {}
     for name in parameter_names:
         label = f"optimized parameter {name!r}"
-        result[name] = (
-            _ordinary_finite(values[name], label)
-            if name in unconstrained
-            else _ordinary_positive(values[name], label)
-        )
+        transform = getattr(parameter_bounds.get(name), "transform", None)
+        if transform is None:
+            result[name] = _ordinary_positive(values[name], label)
+            continue
+        value = _ordinary_finite(values[name], label)
+        if not transform.contains(value):
+            raise ModelValidationError(
+                f"{label} must lie in the domain of its transform; got {value}"
+            )
+        result[name] = value
     return result
 
 
@@ -241,7 +236,6 @@ class CompiledGaussianFamily:
     parameter_names: tuple[str, ...]
     initial: Hyperparameters
     parameter_bounds: Mapping[str, object]
-    _unconstrained_names: frozenset[str] = field(repr=False, default_factory=frozenset)
 
     def __init__(
         self,
@@ -334,7 +328,6 @@ class CompiledGaussianFamily:
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "initial", initial)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
-        object.__setattr__(self, "_unconstrained_names", _unconstrained_parametric_names(block_values))
 
     @property
     def y(self) -> np.ndarray:
@@ -356,7 +349,7 @@ class CompiledGaussianFamily:
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(
-            values, self.parameter_names, self._unconstrained_names
+            values, self.parameter_names, self.parameter_bounds
         )
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = CompiledGaussian(resolved.get("sigma", self.initial.sigma))
@@ -385,7 +378,6 @@ class CompiledFamily:
     parameter_names: tuple[str, ...]
     likelihood_factory: Callable[[Mapping[str, float]], object] = field(repr=False)
     parameter_bounds: Mapping[str, object]
-    _unconstrained_names: frozenset[str] = field(repr=False, default_factory=frozenset)
 
     def __init__(
         self,
@@ -452,11 +444,10 @@ class CompiledFamily:
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "likelihood_factory", likelihood_factory)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
-        object.__setattr__(self, "_unconstrained_names", _unconstrained_parametric_names(block_values))
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(
-            values, self.parameter_names, self._unconstrained_names
+            values, self.parameter_names, self.parameter_bounds
         )
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = self.likelihood_factory(resolved)
