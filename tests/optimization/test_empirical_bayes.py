@@ -257,7 +257,7 @@ def test_distinct_natural_bounds_that_collapse_in_log_space_are_rejected() -> No
     assert lower < upper
     assert np.log(lower) == np.log(upper)
 
-    with pytest.raises(OptimizationError, match="collapse.*log space"):
+    with pytest.raises(OptimizationError, match="collapse.*internal space"):
         optimize_empirical_bayes(
             zero_latent_family(np.array([lower])),
             {

@@ -177,7 +177,8 @@ def optimize_empirical_bayes(
     )
     if collapsed:
         raise OptimizationError(
-            f"natural bounds for parameters {collapsed!r} collapse in log space"
+            f"natural bounds for parameters {collapsed!r} collapse in the transform's "
+            "internal space"
         )
     start = np.asarray(
         [t.to_internal(initial_values[name]) for t, name in zip(transforms, names, strict=True)]
