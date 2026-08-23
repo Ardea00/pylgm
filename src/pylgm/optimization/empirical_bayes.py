@@ -254,7 +254,26 @@ def optimize_empirical_bayes(
         )
     elapsed_seconds = perf_counter() - started
 
-    if not bool(solution.success):
+    # L-BFGS-B reports status 2 (ABNORMAL_TERMINATION_IN_LNSRCH) when the line
+    # search can no longer make progress. On an ill-conditioned direction — a
+    # bounded (logit) hyperparameter, say — that routinely happens *at* the
+    # optimum, because `_transform_objective`'s log1p compression pushes the
+    # remaining change below ftol/gtol. Treat it as converged when the returned
+    # point is usable and no worse than the start, and record it; anything else
+    # is still a hard failure.
+    line_search_stalled = not bool(solution.success) and int(getattr(solution, "status", -1)) == 2
+    if line_search_stalled:
+        candidate = np.asarray(solution.x, dtype=float)
+        usable = (
+            candidate.shape == start.shape
+            and np.isfinite(candidate).all()
+            and not np.any(candidate < lower)
+            and not np.any(candidate > upper)
+            and objective(candidate) <= objective(start)
+        )
+        if not usable:
+            line_search_stalled = False
+    if not bool(solution.success) and not line_search_stalled:
         message = str(getattr(solution, "message", "unknown optimizer failure"))
         fail(f"empirical-Bayes optimization did not converge: {message}")
 
@@ -279,6 +298,12 @@ def optimize_empirical_bayes(
         for name, value, low, high in zip(names, final_vector, lower, upper, strict=True)
         if min(abs(value - low), abs(value - high)) <= _log_bound_tolerance(low, high)
     )
+    if line_search_stalled:
+        failures.append(
+            "line search stalled at the optimum "
+            f"({str(getattr(solution, 'message', 'ABNORMAL')).strip()}); "
+            "accepted the returned point"
+        )
     diagnostics = OptimizationDiagnostics(
         converged=True,
         objective=final_evaluation.raw_objective,

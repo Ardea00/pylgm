@@ -877,7 +877,12 @@ class _ScalarFamily:
     def materialize(self, values):
         return values[self._name]
 
-    # optimize_empirical_bayes calls fit(model); we inject a fit that reads the value.
+
+class _QuadraticFit:
+    """Injected fit whose log marginal likelihood peaks at ``target``."""
+
+    def __init__(self, value, target):
+        self.log_marginal_likelihood = -((value - target) ** 2)
 
 
 def test_optimizer_recovers_bounded_optimum():
@@ -903,3 +908,53 @@ def test_optimization_bounds_defaults_to_log_and_validates():
     # Logit bounds must sit inside the interval:
     with pytest.raises(ValueError):
         OptimizationBounds(0.0, -1.0, 0.9, transform=LogitTransform(-1.0, 1.0))
+
+
+def test_line_search_stall_at_the_optimum_is_accepted(monkeypatch) -> None:
+    # L-BFGS-B reports status 2 (ABNORMAL_TERMINATION_IN_LNSRCH) when the line
+    # search cannot progress, which on an ill-conditioned direction happens AT
+    # the optimum. A usable in-box point that is no worse than the start must be
+    # accepted and recorded, not turned into a hard OptimizationError.
+    import scipy.optimize
+
+    real_minimize = scipy.optimize.minimize
+
+    def stalling_minimize(*args, **kwargs):
+        solution = real_minimize(*args, **kwargs)
+        solution.success = False
+        solution.status = 2
+        solution.message = "ABNORMAL_TERMINATION_IN_LNSRCH"
+        return solution
+
+    monkeypatch.setattr(scipy.optimize, "minimize", stalling_minimize)
+
+    family = _ScalarFamily("tau", 1.5)
+    bounds = {"tau": OptimizationBounds(1.0, 0.1, 10.0)}
+    result = optimize_empirical_bayes(
+        family, bounds, fit=lambda model, **kwargs: _QuadraticFit(model, 1.5)
+    )
+    assert result.diagnostics.converged
+    assert any("line search stalled" in note for note in result.diagnostics.numerical_failures)
+
+
+def test_line_search_stall_at_an_unusable_point_still_fails(monkeypatch) -> None:
+    import scipy.optimize
+
+    real_minimize = scipy.optimize.minimize
+
+    def bad_stalling_minimize(*args, **kwargs):
+        solution = real_minimize(*args, **kwargs)
+        solution.success = False
+        solution.status = 2
+        solution.message = "ABNORMAL_TERMINATION_IN_LNSRCH"
+        solution.x = np.array([np.nan])
+        return solution
+
+    monkeypatch.setattr(scipy.optimize, "minimize", bad_stalling_minimize)
+
+    family = _ScalarFamily("tau", 1.5)
+    bounds = {"tau": OptimizationBounds(1.0, 0.1, 10.0)}
+    with pytest.raises(OptimizationError, match="did not converge"):
+        optimize_empirical_bayes(
+            family, bounds, fit=lambda model, **kwargs: _QuadraticFit(model, 1.5)
+        )
