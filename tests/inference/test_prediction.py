@@ -76,3 +76,31 @@ def test_prediction_arrays_are_read_only():
     prediction = predict_from(context, np.ones(context.width), np.eye(context.width), frame)
     with pytest.raises(ValueError):
         prediction.predictive_mean[0] = 5.0
+
+
+def test_fixed_categorical_uses_the_fitted_encoding_not_a_fresh_one():
+    # The load-bearing detail of predict(): the fitted formulaic ModelSpec must
+    # be reused. Re-running model_matrix on a new frame that contains only a
+    # SUBSET of the fitted levels silently yields fewer columns and a different
+    # encoding, so this fails loudly if that regression is ever reintroduced.
+    fit_frame = pd.DataFrame({"grp": ["a", "b", "c", "a"], "region": ["a", "b", "a", "b"]})
+    spec = model_matrix("1 + grp", fit_frame).model_spec
+    assert len(spec.column_names) == 3  # Intercept, grp[T.b], grp[T.c]
+
+    context = PredictionContext(
+        entries=(("fixed", spec), ("structured", ("region", "region", ("a", "b")))),
+        likelihood=CompiledGaussian(0.5),
+        offset=None,
+        width=5,
+    )
+    only_a = pd.DataFrame({"grp": ["a"], "region": ["a"]})
+
+    # the wrong way would produce a single Intercept column
+    assert len(model_matrix("1 + grp", only_a).model_spec.column_names) == 1
+
+    prediction = predict_from(
+        context, np.ones(context.width), np.eye(context.width), only_a
+    )
+    assert prediction.predictive_mean.shape == (1,)
+    # baseline level "a" -> [1, 0, 0] for the fixed part, plus region "a"
+    assert prediction.predictive_mean[0] == pytest.approx(2.0)
