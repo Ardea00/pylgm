@@ -4,7 +4,29 @@ import os
 from collections.abc import Mapping, Sequence
 
 import numpy as np
+import pandas as pd
 from scipy.sparse import csr_matrix
+
+
+def design_from_graph(
+    nodes: tuple[str, ...], frame: pd.DataFrame, index: str
+) -> csr_matrix:
+    """One-hot design mapping each observed row to its graph-node column.
+
+    The latent domain is the graph ``nodes`` (canonical order); every observed
+    value must be one of them, else a ``ValueError`` names the missing regions.
+    Shared by the spatial-effect builders (Besag, proper CAR).
+    """
+    position = {node: column for column, node in enumerate(nodes)}
+    observed = [str(value) for value in frame[index]]
+    missing = sorted({value for value in observed if value not in position})
+    if missing:
+        raise ValueError(f"observed region(s) {missing!r} are not in the graph")
+    rows = np.arange(len(observed))
+    columns = np.array([position[value] for value in observed])
+    return csr_matrix(
+        (np.ones(len(observed)), (rows, columns)), shape=(len(observed), len(nodes))
+    )
 
 
 def normalize_graph(

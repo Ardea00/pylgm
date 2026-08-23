@@ -7,7 +7,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix, diags
 from scipy.sparse.csgraph import connected_components
 
-from pylgm.effects.graph import normalize_graph
+from pylgm.effects.graph import design_from_graph, normalize_graph
 from pylgm.ir.model import LatentBlock
 
 
@@ -56,17 +56,8 @@ def build_besag(
     scale: bool = True,
 ) -> LatentBlock:
     nodes, w = normalize_graph(graph)
-    position = {node: column for column, node in enumerate(nodes)}
-    observed = [str(value) for value in frame[index]]
-    missing = sorted({value for value in observed if value not in position})
-    if missing:
-        raise ValueError(f"observed region(s) {missing!r} are not in the graph")
+    design = design_from_graph(nodes, frame, index)
     structure = _scaled_structure(w, nodes, scale)
     precision_matrix = csr_matrix(precision * structure)
     constraints = _component_constraints(w)
-    rows = np.arange(len(observed))
-    columns = np.array([position[value] for value in observed])
-    design = csr_matrix(
-        (np.ones(len(observed)), (rows, columns)), shape=(len(observed), len(nodes))
-    )
     return LatentBlock(name, nodes, design, precision_matrix, constraints)

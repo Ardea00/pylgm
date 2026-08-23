@@ -80,3 +80,15 @@ def test_load_graph_file_rejects_negative_degree(tmp_path):
     path.write_text("2\n1 -1\n2 0\n")
     with pytest.raises(ValueError, match="non-negative"):
         load_graph_file(path)
+
+
+def test_design_from_graph_one_hot_and_missing():
+    import pandas as pd
+    from pylgm.effects.graph import design_from_graph
+
+    nodes = ("A", "B", "C")
+    frame = pd.DataFrame({"region": ["C", "A", "A"]})
+    design = design_from_graph(nodes, frame, "region").toarray()
+    assert (design == [[0, 0, 1], [1, 0, 0], [1, 0, 0]]).all()
+    with pytest.raises(ValueError, match="not in the graph"):
+        design_from_graph(nodes, pd.DataFrame({"region": ["A", "Z"]}), "region")
