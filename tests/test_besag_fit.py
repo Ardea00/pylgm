@@ -111,3 +111,45 @@ def test_composes_with_iid():
     assert noise_marginals.mean.shape == (6,)
     assert np.all(np.isfinite(besag_marginals.mean))
     assert np.all(np.isfinite(noise_marginals.mean))
+
+
+def test_fits_graph_with_unobserved_regions():
+    # Graph has 8 nodes; data only observes "0".."5". The two unobserved nodes
+    # ("6","7") must still get finite, prior-smoothed latent estimates — the
+    # README-advertised "predict at unobserved regions" behaviour.
+    graph = {
+        str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= 7]
+        for i in range(8)
+    }
+    frame, _ = _gaussian_frame()  # observes regions "0".."5"
+    model = LGM(
+        response="y",
+        predictor=Fixed("1") + Besag("region", index="region", graph=graph, precision=1.0),
+        likelihood=Gaussian(sigma=0.1),
+    )
+    result = model.fit(frame)
+
+    marginals = result.latent_marginals("region")
+    assert marginals.mean.shape == (8,)
+    assert np.all(np.isfinite(marginals.mean))
+
+
+def test_fits_disconnected_island_graph():
+    # Two islands: {"0","1","2"} and {"3","4","5"}. Each connected component
+    # gets its own sum-to-zero constraint; the fit must succeed and smooth
+    # within each island.
+    graph = {
+        "0": ["1"], "1": ["0", "2"], "2": ["1"],
+        "3": ["4"], "4": ["3", "5"], "5": ["4"],
+    }
+    frame, _ = _gaussian_frame()
+    model = LGM(
+        response="y",
+        predictor=Fixed("1") + Besag("region", index="region", graph=graph, precision=1.0),
+        likelihood=Gaussian(sigma=0.1),
+    )
+    result = model.fit(frame)
+
+    marginals = result.latent_marginals("region")
+    assert marginals.mean.shape == (6,)
+    assert np.all(np.isfinite(marginals.mean))

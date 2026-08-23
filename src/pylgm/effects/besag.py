@@ -11,16 +11,16 @@ from pylgm.effects.graph import normalize_graph
 from pylgm.ir.model import LatentBlock
 
 
-def _scaled_structure(w: csr_matrix, scale: bool) -> np.ndarray:
+def _scaled_structure(w: csr_matrix, nodes: tuple[str, ...], scale: bool) -> np.ndarray:
     """Return the (optionally Sørbye-Rue scaled) ICAR structure matrix ``R*``."""
     degree = np.asarray(w.sum(axis=1)).ravel()
     r = (diags(degree) - w).toarray()
     n_components, membership = connected_components(w, directed=False)
-    singletons = [i for i in range(len(degree)) if degree[i] == 0]
-    if singletons:
+    isolated = [nodes[i] for i in range(len(degree)) if degree[i] == 0]
+    if isolated:
         raise ValueError(
             "regions have no neighbours (isolated ICAR nodes are undefined; "
-            f"model them as an IID effect instead): index positions {singletons}"
+            f"model them as an IID effect instead): {isolated!r}"
         )
     if not scale:
         return r
@@ -61,7 +61,7 @@ def build_besag(
     missing = sorted({value for value in observed if value not in position})
     if missing:
         raise ValueError(f"observed region(s) {missing!r} are not in the graph")
-    structure = _scaled_structure(w, scale)
+    structure = _scaled_structure(w, nodes, scale)
     precision_matrix = csr_matrix(precision * structure)
     constraints = _component_constraints(w)
     rows = np.arange(len(observed))

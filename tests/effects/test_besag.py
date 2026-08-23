@@ -55,7 +55,7 @@ def test_scale_false_leaves_raw_laplacian():
 
 def test_isolated_node_raises():
     graph = {"A": ["B"], "B": ["A"], "C": []}
-    with pytest.raises(ValueError, match="no neighbours"):
+    with pytest.raises(ValueError, match="'C'"):
         build_besag(_frame(["A", "B", "C"]), "region", "region", graph, 1.0)
 
 
