@@ -20,7 +20,8 @@ def _positive_real(value: object, name: str) -> float:
 
 @dataclass(frozen=True)
 class Hyperparameter:
-    """A named, positive model parameter and its optional prior.
+    """A named model parameter and its optional prior (positive-only under the
+    default ``log`` transform; ``logit``/``identity`` allow any finite value).
 
     A declared ``Hyperparameter`` is estimated by type-II maximum likelihood
     (empirical Bayes) in ``LGM.fit``, optimizing over ``[lower, upper]`` starting
