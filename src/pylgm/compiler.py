@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+from formulaic import model_matrix
 from formulaic.errors import FormulaicError
 from scipy.sparse import block_diag, csr_matrix, diags, hstack
 
@@ -34,6 +35,7 @@ from pylgm.ir import (
     ParametricBlock,
     ScalableBlock,
 )
+from pylgm.inference.prediction import PredictionContext
 from pylgm.ir.model import LatentBlock, _block_constraints
 from pylgm.likelihoods import Bernoulli, CompiledGaussian, Gaussian, Poisson
 from pylgm.optimization.empirical_bayes import OptimizationBounds
@@ -546,4 +548,38 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         likelihood_factory=factory,
         parameter_bounds=parameter_bounds,
         parameter_priors=parameter_priors,
+    )
+
+
+def build_prediction_context(
+    model: "LGM", panel: CanonicalPanel, compiled: CompiledLGM
+) -> PredictionContext:
+    """Capture what ``result.predict(new_data)`` needs to rebuild a design.
+
+    Structured labels come from the already-compiled blocks so the (sometimes
+    expensive) effect builders are not run twice; only each fixed effect's
+    formulaic spec is recomputed, which is what reproduces the fitted
+    categorical encoding on new rows.
+    """
+    blocks = {block.name: block for block in compiled.blocks}
+    entries: list[tuple[str, object]] = []
+    implied_labels: list[str] = []
+    for effect in model.predictor.effects:
+        block = blocks[effect.name]
+        if isinstance(effect, Fixed):
+            spec = model_matrix(effect.formula, panel.frame).model_spec
+            entries.append(("fixed", spec))
+        else:
+            entries.append(("structured", (effect.name, effect.index, block.labels)))
+        implied_labels.extend(f"{block.name}:{label}" for label in block.labels)
+    if tuple(implied_labels) != compiled.labels:
+        raise CompilationError(
+            "prediction context entry order does not match the compiled block "
+            "order; this would silently misalign predict() designs"
+        )
+    return PredictionContext(
+        entries=tuple(entries),
+        likelihood=compiled.likelihood,
+        offset=model.offset,
+        width=compiled.design.shape[1],
     )

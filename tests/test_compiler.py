@@ -486,3 +486,36 @@ def test_unrecognized_effect_is_rejected_not_compiled_as_a_random_walk():
         compile_lgm(model, panel)
     with pytest.raises(CompilationError, match="unsupported effect type"):
         compile_family(model, panel)
+
+
+def test_build_prediction_context_matches_the_compiled_blocks():
+    import pandas as pd
+
+    from pylgm import Fixed, Gaussian, IID, LGM, RW1
+    from pylgm.compiler import build_prediction_context, compile_lgm
+    from pylgm.data import CanonicalPanel
+
+    frame = pd.DataFrame({
+        "y": [0.1, 0.2, 0.3, 0.4],
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "region": ["a", "b", "a", "b"],
+        "t": [0, 1, 2, 3],
+    })
+    model = LGM(
+        response="y",
+        predictor=Fixed("1 + x") + IID("region", index="region") + RW1("trend", index="t"),
+        likelihood=Gaussian(sigma=0.5),
+    )
+    panel = CanonicalPanel(frame, np.array([True] * 4), ("region",), "y")
+    compiled = compile_lgm(model, panel)
+    context = build_prediction_context(model, panel, compiled)
+
+    assert context.width == compiled.design.shape[1]
+    kinds = [kind for kind, _ in context.entries]
+    assert kinds == ["fixed", "structured", "structured"]
+    # structured entries carry the compiled labels, in compiled block order
+    structured = [payload for kind, payload in context.entries if kind == "structured"]
+    assert structured[0][:2] == ("region", "region")
+    assert structured[0][2] == compiled.blocks[1].labels
+    assert structured[1][:2] == ("trend", "t")
+    assert structured[1][2] == compiled.blocks[2].labels
