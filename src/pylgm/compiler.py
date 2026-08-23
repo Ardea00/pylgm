@@ -9,17 +9,20 @@ from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import (
     Besag,
+    BYM2,
     Fixed,
     IID,
     ProperCAR,
     RW1,
     build_besag,
+    build_bym2,
     build_fixed,
     build_iid,
     build_proper_car,
     build_random_walk,
     normalize_graph,
 )
+from pylgm.effects.bym2 import bym2_precision, bym2_spectrum
 from pylgm.effects.proper_car import car_rho_interval
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
 from pylgm.ir import (
@@ -207,6 +210,13 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.index, dict(effect.graph), effect.rho, precision
                 )
                 precisions[effect.name] = precision
+            elif isinstance(effect, BYM2):
+                precision = _resolved_precision(effect.precision)
+                phi = _resolved_precision(effect.phi) if isinstance(effect.phi, Hyperparameter) else effect.phi
+                block = build_bym2(
+                    frame, effect.name, effect.index, dict(effect.graph), precision, phi
+                )
+                precisions[effect.name] = precision
             else:
                 precision = _resolved_precision(effect.precision)
                 order = 1 if isinstance(effect, RW1) else 2
@@ -303,6 +313,8 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
             found.append((effect.name, precision))
         if isinstance(effect, ProperCAR) and isinstance(effect.rho, Hyperparameter):
             found.append((effect.name, effect.rho))
+        if isinstance(effect, BYM2) and isinstance(effect.phi, Hyperparameter):
+            found.append((effect.name, effect.phi))
     return found
 
 
@@ -339,6 +351,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     scalable: list[ScalableBlock | ParametricBlock] = []
     parameter_names: list[str] = []
     parameter_bounds: dict[str, OptimizationBounds] = {}
+    parameter_priors: dict[str, object] = {}
     for effect in model.predictor.effects:
         if isinstance(effect, Fixed):
             block = build_fixed(frame, effect.formula, effect.prior_precision)
@@ -422,6 +435,69 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 rho_initial, rho_lower, rho_upper, transform=LogitTransform(a, b)
             )
             continue
+        if isinstance(effect, BYM2):
+            phi_is_hp = isinstance(effect.phi, Hyperparameter)
+            if not phi_is_hp:
+                block = build_bym2(
+                    frame, effect.name, effect.index, dict(effect.graph), value, effect.phi
+                )
+                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+                if optimized:
+                    parameter_names.append(precision.name)
+                    parameter_bounds[precision.name] = _log_bounds(precision)
+                continue
+            # phi is a Hyperparameter -> a ParametricBlock over (tau, phi), bounded
+            # to (0, 1) via a Logit transform (BYM2 is unconstrained: no graph
+            # interval to resolve, unlike proper CAR's rho).
+            if effect.phi.transform != "logit":
+                raise CompilationError(
+                    f"BYM2 phi {effect.phi.name!r} must be declared with transform='logit' "
+                    f"(it mixes on (0, 1)); got transform={effect.phi.transform!r}"
+                )
+            vectors, values_ = bym2_spectrum(dict(effect.graph))
+            inset = 1e-6
+            phi_lower = inset if effect.phi.lower is None else max(effect.phi.lower, inset)
+            phi_upper = 1.0 - inset if effect.phi.upper is None else min(effect.phi.upper, 1.0 - inset)
+            if not phi_lower <= effect.phi.initial <= phi_upper:
+                raise CompilationError(
+                    f"initial value for BYM2 phi {effect.phi.name!r} must lie in "
+                    f"({phi_lower:.6g}, {phi_upper:.6g}); got {effect.phi.initial}"
+                )
+            template = build_bym2(
+                frame, effect.name, effect.index, dict(effect.graph),
+                value, float(effect.phi.initial),
+            )
+            tau_name = precision.name if optimized else None
+            tau_fixed = None if optimized else value
+            phi_name = effect.phi.name
+
+            def build(
+                values_map,
+                vectors=vectors,
+                spectrum=values_,
+                tau_name=tau_name,
+                tau_fixed=tau_fixed,
+                phi_name=phi_name,
+            ) -> csr_matrix:
+                tau = values_map[tau_name] if tau_name else tau_fixed
+                return bym2_precision(vectors, spectrum, tau, values_map[phi_name])
+
+            params = tuple(name for name in (tau_name, phi_name) if name)
+            scalable.append(ParametricBlock(template, params, build))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            parameter_names.append(phi_name)
+            parameter_bounds[phi_name] = OptimizationBounds(
+                float(effect.phi.initial), phi_lower, phi_upper,
+                transform=LogitTransform(0.0, 1.0),
+            )
+            if effect.phi.prior is not None and hasattr(effect.phi.prior, "bind"):
+                positive = values_[values_ > 1e-10]
+                parameter_priors[phi_name] = effect.phi.prior.bind(positive)
+            elif effect.phi.prior is not None:
+                parameter_priors[phi_name] = effect.phi.prior
+            continue
         if isinstance(effect, IID):
             block = build_iid(frame, effect.name, effect.index, value)
         else:
@@ -459,4 +535,5 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         parameter_names=tuple(parameter_names),
         likelihood_factory=factory,
         parameter_bounds=parameter_bounds,
+        parameter_priors=parameter_priors,
     )
