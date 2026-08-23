@@ -34,14 +34,13 @@ slice, is estimated by type-II ML rather than merely held fixed. Since the
 same slice's MAP-II follow-up, a `Hyperparameter`'s `prior` — when declared —
 is also consumed: its native-scale log density penalizes the marginal
 likelihood, turning the estimate into a MAP-II point estimate. The prior is
-still not copied into the materialized IR, and there is no Jacobian
-correction for `transform`. `PCPrecision` and `GaussianPrior` therefore
-already drive point estimation, but not yet integrated (marginal)
-hyperparameter inference.
+still not copied into the materialized IR, and it is applied on the
+hyperparameter's native scale with no Jacobian correction for `transform`.
+`PCPrecision` and `GaussianPrior` drive both point estimation and, under
+["INLA integration"](#inla-integration), the integrated (marginal) posterior.
 
-AR1 effects, `result.predict(new_data)`, parameterized IR metadata,
-INLA-style hyperparameter marginals, sparse production
-engines, and HMC are deferred to later slices. The spatial (CAR) effect
+AR1 effects, `result.predict(new_data)`, parameterized IR metadata, sparse
+production engines, and HMC are deferred to later slices. The spatial (CAR) effect
 family is landing incrementally: `Besag` (intrinsic CAR/ICAR) and `ProperCAR`
 (proper CAR, with its spatial-dependence parameter `ρ` either fixed or
 estimated) have shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect),
