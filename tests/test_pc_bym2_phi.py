@@ -62,3 +62,26 @@ def test_unbound_logpdf_raises():
 def test_invalid_calibration_rejected(kwargs):
     with pytest.raises(ValueError):
         PCBYM2Phi(**kwargs)
+
+
+def test_logpdf_is_stable_near_the_base_model():
+    # Forming t = 1 - phi + phi*gamma and taking log(t) loses all precision for
+    # tiny phi (two nearly equal O(1) numbers), silently corrupting the density
+    # right at the phi = 0 base model. log1p(phi*(gamma-1)) keeps it exact.
+    prior = PCBYM2Phi().bind(_gamma())
+    base = prior.logpdf(0.0)
+    for phi in (1e-9, 1e-10, 1e-13, 1e-15, 1e-16):
+        assert prior.logpdf(phi) == pytest.approx(base, abs=1e-6)
+
+
+def test_rate_solve_handles_alpha_just_above_the_attainable_floor():
+    # An alpha barely above d(upper)/d(1) is attainable and calibrates to an
+    # arbitrarily small rate, which a fixed lower bracket would miss.
+    gamma = _gamma()
+    reference = PCBYM2Phi().bind(gamma)
+    floor = reference.distance(0.5) / reference.distance(1.0)
+    for epsilon in (1e-8, 1e-10, 1e-12):
+        alpha = floor + epsilon * (1.0 - floor)
+        bound = PCBYM2Phi(upper=0.5, alpha=alpha).bind(gamma)
+        mass, _ = quad(lambda p: np.exp(bound.logpdf(p)), 0.0, 1.0, limit=400)
+        assert mass == pytest.approx(1.0, abs=1e-4)

@@ -123,7 +123,7 @@ class PCBYM2Phi:
         """Bind to the positive eigenvalues of ``pinv(R*)`` for a graph."""
         return _BoundPCBYM2Phi(np.asarray(gamma, dtype=float), self.upper, self.alpha)
 
-    def logpdf(self, value: float) -> float:  # pragma: no cover - guarded path
+    def logpdf(self, value: float) -> float:
         raise ValueError(
             "PCBYM2Phi must be bound to a graph before use; attach it to a BYM2 "
             "effect's phi hyperparameter so the compiler can bind it"
@@ -155,9 +155,16 @@ class _BoundPCBYM2Phi:
         self._rate = _solve_pc_rate(d_upper, d_one, self.alpha)
         self._log_norm = float(np.log1p(-np.exp(-self._rate * d_one)))
 
+    def _offsets(self, phi: float) -> "np.ndarray":
+        """``t - 1`` where ``t = 1 - phi + phi*gamma``, computed without cancellation."""
+        return phi * (self._gamma - 1.0)
+
     def _kld(self, phi: float) -> float:
-        t = 1.0 - phi + phi * self._gamma
-        return 0.5 * float(np.sum(phi * (self._gamma - 1.0) - np.log(t)))
+        # log1p(t - 1) rather than log(t): forming t and taking its log subtracts
+        # two nearly equal O(1) numbers for small phi, which destroys the KLD (and
+        # hence the density) near the phi = 0 base model.
+        offsets = self._offsets(phi)
+        return 0.5 * float(np.sum(offsets - np.log1p(offsets)))
 
     def distance(self, phi: float) -> float:
         return float(np.sqrt(max(2.0 * self._kld(phi), 0.0)))
@@ -166,8 +173,11 @@ class _BoundPCBYM2Phi:
         distance = self.distance(phi)
         if distance < 1e-8:
             return float(np.sqrt(self._shift / 2.0))
-        t = 1.0 - phi + phi * self._gamma
-        derivative = 0.5 * float(np.sum((self._gamma - 1.0) * (1.0 - 1.0 / t)))
+        offsets = self._offsets(phi)
+        # (gamma - 1) * (1 - 1/t) == (gamma - 1) * (t - 1)/t, stable near t = 1.
+        derivative = 0.5 * float(
+            np.sum((self._gamma - 1.0) * offsets / (1.0 + offsets))
+        )
         return derivative / distance
 
     def logpdf(self, value: float) -> float:
@@ -192,6 +202,9 @@ def _solve_pc_rate(d_upper: float, d_one: float, alpha: float) -> float:
             -np.expm1(-rate * d_upper) / -np.expm1(-rate * d_one)
         ) - alpha
 
+    # The objective rises from d_upper/d_one (as rate -> 0) to 1 (as rate -> inf),
+    # so bracket adaptively at BOTH ends: an alpha just above the attainable floor
+    # calibrates to an arbitrarily small rate, which a fixed lower bound misses.
     low, high = 1e-9, 1.0
     for _ in range(200):
         if objective(high) > 0.0:
@@ -199,4 +212,10 @@ def _solve_pc_rate(d_upper: float, d_one: float, alpha: float) -> float:
         high *= 2.0
     else:  # pragma: no cover - unreachable for an attainable alpha
         raise ValueError("could not bracket the BYM2 PC prior rate")
-    return float(brentq(objective, low, high, xtol=1e-12, rtol=1e-14))
+    for _ in range(400):
+        if objective(low) < 0.0:
+            break
+        low /= 2.0
+    else:  # pragma: no cover - unreachable for an attainable alpha
+        raise ValueError("could not bracket the BYM2 PC prior rate")
+    return float(brentq(objective, low, high, xtol=1e-300, rtol=1e-14))
