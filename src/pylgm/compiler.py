@@ -14,6 +14,7 @@ from pylgm.effects import (
     IID,
     ProperCAR,
     RW1,
+    RW2,
     build_besag,
     build_bym2,
     build_fixed,
@@ -217,13 +218,19 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.index, dict(effect.graph), precision, phi
                 )
                 precisions[effect.name] = precision
-            else:
+            elif isinstance(effect, (RW1, RW2)):
                 precision = _resolved_precision(effect.precision)
                 order = 1 if isinstance(effect, RW1) else 2
                 block = build_random_walk(
                     frame, effect.name, effect.index, precision, order
                 )
                 precisions[effect.name] = precision
+            else:
+                # An unrecognized effect must not fall through to the random-walk
+                # builder: that silently mis-compiles it as an RW2.
+                raise CompilationError(
+                    f"unsupported effect type: {type(effect).__name__}"
+                )
         except (
             DataContractError,
             FormulaicError,
@@ -500,9 +507,12 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             continue
         if isinstance(effect, IID):
             block = build_iid(frame, effect.name, effect.index, value)
-        else:
+        elif isinstance(effect, (RW1, RW2)):
             order = 1 if isinstance(effect, RW1) else 2
             block = build_random_walk(frame, effect.name, effect.index, value, order)
+        else:
+            # As in compile_lgm: never let an unrecognized effect become an RW2.
+            raise CompilationError(f"unsupported effect type: {type(effect).__name__}")
         scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
         if optimized:
             parameter_names.append(precision.name)

@@ -456,3 +456,33 @@ def test_compile_family_binds_declared_hyperparameters():
     assert compiled.y.shape[0] == 4
     region_block = next(block for block in compiled.blocks if block.name == "region")
     np.testing.assert_allclose(region_block.precision.toarray(), 2.0 * np.eye(2))
+
+
+def test_unrecognized_effect_is_rejected_not_compiled_as_a_random_walk():
+    # The dispatch chains used to end in a bare `else` that built ANY unhandled
+    # effect as an RW2. That silently mis-compiles a new effect type instead of
+    # failing -- it is exactly how BYM2 appeared to "work" before it was wired.
+    import pandas as pd
+
+    from pylgm import Fixed, Gaussian, Hyperparameter, LGM
+    from pylgm.compiler import compile_family, compile_lgm
+    from pylgm.effects.spec import Predictor, _ComposableEffect
+    from pylgm.exceptions import CompilationError
+
+    class _UnknownEffect(_ComposableEffect):
+        name = "mystery"
+        index = "region"
+        # a declared Hyperparameter so compile_family reaches its dispatch loop
+        precision = Hyperparameter("mystery.precision", initial=1.0)
+
+    frame = pd.DataFrame({"region": ["a", "b", "c"], "y": [0.1, 0.2, 0.3]})
+    model = LGM(response="y", predictor=Fixed("1"), likelihood=Gaussian(sigma=0.5))
+    panel = CanonicalPanel(frame, np.array([True, True, True]), ("region",), "y")
+    # bypass Predictor's closed membership check the way an unwired effect would
+    object.__setattr__(model, "predictor", Predictor.__new__(Predictor))
+    object.__setattr__(model.predictor, "effects", (Fixed("1"), _UnknownEffect()))
+
+    with pytest.raises(CompilationError, match="unsupported effect type"):
+        compile_lgm(model, panel)
+    with pytest.raises(CompilationError, match="unsupported effect type"):
+        compile_family(model, panel)
