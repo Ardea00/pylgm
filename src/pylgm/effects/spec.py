@@ -163,7 +163,38 @@ class ProperCAR(_ComposableEffect):
         object.__setattr__(self, "graph", canonical)
 
 
-EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag | ProperCAR
+@dataclass(frozen=True)
+class BYM2(_ComposableEffect):
+    """A BYM2 spatial latent effect: scaled ICAR + IID mixed by ``phi``."""
+
+    name: str
+    index: str
+    graph: Mapping
+    precision: float | Hyperparameter = 1.0
+    phi: float | Hyperparameter = 0.5
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.graph import normalize_graph
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        if not isinstance(self.phi, Hyperparameter):
+            phi = _finite_real(self.phi, "phi")
+            if not 0.0 < phi < 1.0:
+                raise ValueError("phi must lie strictly inside (0, 1)")
+            object.__setattr__(self, "phi", phi)
+        nodes, w = normalize_graph(self.graph)
+        canonical = tuple(
+            (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
+            for i, node in enumerate(nodes)
+        )
+        object.__setattr__(self, "graph", canonical)
+
+
+EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag | ProperCAR | BYM2
 
 
 @dataclass(frozen=True)
@@ -178,7 +209,7 @@ class Predictor:
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
         if any(
-            not isinstance(effect, (Fixed, IID, RW1, RW2, Besag, ProperCAR))
+            not isinstance(effect, (Fixed, IID, RW1, RW2, Besag, ProperCAR, BYM2))
             for effect in effects
         ):
             raise TypeError("effects must contain only effect specifications")
@@ -190,9 +221,9 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2, Besag, ProperCAR)):
+        if isinstance(other, (Fixed, IID, RW1, RW2, Besag, ProperCAR, BYM2)):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
 
-__all__ = ["Besag", "Fixed", "IID", "Predictor", "ProperCAR", "RW1", "RW2"]
+__all__ = ["Besag", "BYM2", "Fixed", "IID", "Predictor", "ProperCAR", "RW1", "RW2"]

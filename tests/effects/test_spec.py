@@ -147,3 +147,48 @@ def test_proper_car_composes_in_predictor():
     predictor = Fixed("1") + ProperCAR("region", index="region", graph=PATH_GRAPH, rho=0.5)
     assert isinstance(predictor, Predictor)
     assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "ProperCAR"]
+
+
+def test_bym2_defaults():
+    from pylgm.effects import BYM2
+
+    effect = BYM2("region", index="region", graph=PATH_GRAPH)
+    assert effect.name == "region"
+    assert effect.phi == 0.5
+    assert effect.precision == 1.0
+
+
+def test_bym2_accepts_hyperparameter_phi_and_precision():
+    from pylgm.effects import BYM2
+
+    phi = Hyperparameter("region.phi", initial=0.5, transform="logit")
+    tau = Hyperparameter("region.precision", initial=1.0)
+    effect = BYM2("region", index="region", graph=PATH_GRAPH, phi=phi, precision=tau)
+    assert effect.phi is phi
+    assert effect.precision is tau
+
+
+@pytest.mark.parametrize("phi", [-0.1, 0.0, 1.0, 1.5])
+def test_bym2_rejects_phi_outside_open_unit_interval(phi):
+    from pylgm.effects import BYM2
+
+    with pytest.raises(ValueError, match="phi"):
+        BYM2("region", index="region", graph=PATH_GRAPH, phi=phi)
+
+
+def test_bym2_is_frozen_hashable_and_roundtrips_graph():
+    from pylgm.effects import BYM2
+
+    effect = BYM2("region", index="region", graph=PATH_GRAPH)
+    assert hash(effect) == hash(BYM2("region", index="region", graph=PATH_GRAPH))
+    assert dict(effect.graph) == {"A": ("B",), "B": ("A", "C"), "C": ("B",)}
+    with pytest.raises(FrozenInstanceError):
+        effect.phi = 0.1
+
+
+def test_bym2_composes_in_predictor():
+    from pylgm.effects import BYM2, Predictor
+
+    predictor = Fixed("1") + BYM2("region", index="region", graph=PATH_GRAPH)
+    assert isinstance(predictor, Predictor)
+    assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "BYM2"]
