@@ -40,13 +40,20 @@ hyperparameter's native scale with no Jacobian correction for `transform`.
 ["INLA integration"](#inla-integration), the integrated (marginal) posterior.
 
 AR1 effects, `result.predict(new_data)`, parameterized IR metadata, sparse
-production engines, and HMC are deferred to later slices. The spatial (CAR) effect
-family is landing incrementally: `Besag` (intrinsic CAR/ICAR) and `ProperCAR`
-(proper CAR, with its spatial-dependence parameter `ρ` either fixed or
-estimated) have shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect),
-["Proper CAR spatial effect"](#proper-car-spatial-effect), and
-["Bounded hyperparameters"](#bounded-hyperparameters) below); BYM2 remains
-deferred. Optional PySpark input is now
+production engines, and HMC are deferred to later slices. The spatial (CAR)
+effect family is now complete for the dense reference regime: `Besag`
+(intrinsic CAR/ICAR), `ProperCAR` (proper CAR, with its spatial-dependence
+parameter `ρ` either fixed or estimated), and `BYM2` (the structured +
+unstructured convolution, with its mixing parameter `φ` either fixed or
+estimated) have all shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect),
+["Proper CAR spatial effect"](#proper-car-spatial-effect),
+["BYM2 spatial effect"](#bym2-spatial-effect), and
+["Bounded hyperparameters"](#bounded-hyperparameters) below). Remaining
+spatial follow-ups (the augmented 2n representation, config-file spatial
+effect types, graceful isolated-node handling, and sparse/large-graph
+scaling) are tracked in the
+[spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects).
+Optional PySpark input is now
 supported as a data boundary (see below). Pandas predictions in 0.3 cover
 the rows supplied to `LGM.fit`; their arrays follow the caller's original
 row order.
@@ -427,10 +434,10 @@ Because it is a constrained effect (like `RW1`/`RW2`), `latent_strategy="laplace
 (full Laplace) rejects it with `UnsupportedEngineError`, the same restriction
 already documented above for `RW`/intrinsic effects.
 
-**Not yet built:** BYM2, spatial autocorrelation diagnostics, PC-priors for
-spatial hyperparameters, and shapefile/GeoJSON graph construction. The YAML
-`ModelConfig` frontend also does not yet have a `besag` effect type — see
-the [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
+**Not yet built:** spatial autocorrelation diagnostics and shapefile/GeoJSON
+graph construction. The YAML `ModelConfig` frontend also does not yet have a
+`besag` effect type — see the
+[spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
 for what's next.
 
 ## Proper CAR spatial effect
@@ -513,8 +520,100 @@ effect's precision is no longer a scalar multiple of a fixed matrix, so it is
 carried as a parametric block that rebuilds `τ(D − ρW)` at each hyperparameter
 value; see ["Bounded hyperparameters"](#bounded-hyperparameters).
 
-**Not yet built:** BYM2, Sørbye–Rue scaling of the proper-CAR structure, and
+**Not yet built:** Sørbye–Rue scaling of the proper-CAR structure itself, and
 shapefile/GeoJSON graph construction — see the
+[spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
+for what's next.
+
+## BYM2 spatial effect
+
+`BYM2(name, index, graph, precision=1.0, phi=0.5)` declares Riebler et al.'s
+(2016) BYM2 convolution model: a marginal-precision reparameterization of the
+classic BYM structured-plus-unstructured mixture,
+
+```
+x = τ^(-1/2) · ( √(1-φ)·v + √φ·u* )
+```
+
+with `v ~ N(0, I)` unstructured noise and `u*` the **Sørbye–Rue-scaled**
+ICAR component (`Besag`'s scaling, always applied — there is no `scale` flag
+on `BYM2`). `τ` is the **marginal** precision of `x` (not the ICAR
+precision), and `φ ∈ (0, 1)` is the fraction of the marginal variance
+attributed to the spatially structured component: `φ → 0` behaves like plain
+IID noise, `φ → 1` like `Besag`/ICAR.
+
+Rather than the classical augmented `2n`-dimensional representation
+(structured and unstructured components stacked and reported separately),
+this is implemented in the **marginal, `n`-dimensional** parameterization:
+`Q = τ·[(1-φ)·I + φ·R*⁻]⁻¹`, built once per graph via an eigendecomposition
+of the scaled structure's generalized inverse and then reassembled cheaply at
+any `(τ, φ)`. Because this precision is full-rank, `BYM2` carries **no
+constraint at all** — unlike `Besag` (one sum-to-zero constraint per
+connected component). `graph` takes the same neighbour-dict or
+`load_graph_file(path)` input as `Besag`/`ProperCAR`, with the same isolated-
+node rejection and disconnected-graph support.
+
+```python
+import numpy as np
+import pandas as pd
+
+from pylgm import BYM2, Fixed, Gaussian, LGM
+
+# The same small connected chain graph over regions "0".."5" used above.
+graph = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= 5] for i in range(6)}
+
+frame = pd.DataFrame({"region": [str(i) for i in range(6)], "y": np.sin(np.arange(6) / 2.0)})
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + BYM2("region", index="region", graph=graph, precision=1.0, phi=0.5),
+    likelihood=Gaussian(sigma=0.1),
+)
+result = model.fit(frame)
+result.latent_marginals("region").mean  # posterior mean over the 6 regions
+```
+
+`precision` (τ) accepts a plain number or a `Hyperparameter`, exactly like
+the other structured effects. `phi` accepts either a **fixed float** in
+`(0, 1)` (shown above) or a `Hyperparameter(transform="logit")`, in which
+case φ is **estimated** by empirical Bayes and, under
+`hyperparameters="integrate"`, **integrated over jointly with τ** (INLA), the
+same way `ProperCAR`'s ρ is:
+
+```python
+from pylgm import BYM2, Fixed, Gaussian, Hyperparameter, LGM, PCBYM2Phi
+from pylgm.priors import PCPrecision
+
+phi = Hyperparameter("region.phi", initial=0.5, transform="logit", prior=PCBYM2Phi())
+tau = Hyperparameter("region.precision", initial=1.0, prior=PCPrecision(upper_sd=1.0, alpha=0.01))
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + BYM2("region", index="region", graph=graph, precision=tau, phi=phi),
+    likelihood=Gaussian(sigma=0.1),
+)
+
+eb = model.fit(frame)                                   # empirical Bayes
+eb.hyperparameters["region.phi"]                         # point estimate of phi
+
+post = model.fit(frame, hyperparameters="integrate")     # INLA over (tau, phi)
+post.hyperparameter_marginals()["region.phi"].mean        # phi marginal
+```
+
+`PCBYM2Phi(upper=0.5, alpha=2/3)` is Riebler et al.'s PC prior for φ,
+calibrated so that `P(φ < upper) = alpha`. Because its distance scale
+depends on the eigenvalues of the graph's scaled structure, it is declared
+**unbound** and the compiler **binds it to the effect's graph** when a `BYM2`
+`phi` hyperparameter references it; calling `.logpdf` on an unbound
+`PCBYM2Phi` raises. An `alpha` at or below the graph's attainable floor
+`d(upper)/d(1)` raises, naming the achievable range.
+
+Because `BYM2`'s precision is unconstrained, like `ProperCAR` it works under
+**all three latent strategies**, including full Laplace
+(`latent_strategy="laplace"`) — unlike `Besag`, which full Laplace rejects
+for carrying a sum-to-zero constraint.
+
+**Not yet built:** the augmented (2n) representation exposing the structured
+component `u*` separately, a config-file `bym2` effect type, graceful
+isolated-node handling, and sparse/large-graph scaling — see the
 [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
 for what's next.
 
@@ -526,7 +625,7 @@ parameter by its `transform`:
 | `transform` | Natural domain | Used for |
 | --- | --- | --- |
 | `"log"` (default) | `θ > 0` | `sigma`, effect precisions (τ) |
-| `"logit"` | a bounded interval `(a, b)` | `ProperCAR` `rho` |
+| `"logit"` | a bounded interval `(a, b)` | `ProperCAR` `rho`, `BYM2` `phi` |
 | `"identity"` | `θ > 0` | accepted, but **not** wired into inference (treated as `log`) |
 
 Both the empirical-Bayes optimizer and the INLA grid work in this internal

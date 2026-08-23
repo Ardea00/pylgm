@@ -211,9 +211,10 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - other latent-strategy refinements for INLA integration (sections 3c/3d
   below; the simplified-Laplace and unconstrained full-Laplace strategies
   have since shipped);
-- spatial effects (the `Besag`/ICAR and `ProperCAR` slices, including ρ
-  estimation, have since shipped under this engine too — see section 4 below;
-  BYM2 remains deferred).
+- spatial effects (the `Besag`/ICAR, `ProperCAR`, and `BYM2` slices,
+  including ρ and φ estimation, have since shipped under this engine too —
+  see section 4 below; the spatial CAR family is now complete for the dense
+  reference regime).
 
 ### 3. INLA-style inference
 
@@ -351,25 +352,54 @@ the precision per hyperparameter value, coexisting with `ScalableBlock`;
 compiled families now carry `parameter_bounds`. See the
 [project README](../../../README.md#bounded-hyperparameters).
 
-Still deferred, in order:
+**BYM2 — shipped.** `BYM2(name, index, graph, precision=1.0, phi=0.5)`
+declares Riebler et al.'s (2016) BYM2 convolution model in its **marginal
+(n-dimensional)** parameterization: `x = τ^(-1/2)·(√(1-φ)·v + √φ·u*)`, with
+`v ~ N(0, I)` and `u*` the Sørbye–Rue-scaled ICAR component (always scaled;
+`BYM2` has no `scale` flag). `τ` is the marginal precision of `x` and
+`φ ∈ (0, 1)` the fraction of marginal variance that is spatially structured.
+The precision `Q = τ·[(1-φ)·I + φ·R*⁻]⁻¹` is assembled from a one-time
+eigendecomposition of the scaled structure's generalized inverse and is
+full-rank, so — like `ProperCAR` and unlike `Besag` — `BYM2` carries **no
+constraint** and works under **all three latent strategies**, including full
+Laplace. `phi` accepts a plain float in `(0, 1)` or a
+`Hyperparameter(transform="logit")`, estimated (and, under
+`hyperparameters="integrate"`, integrated) jointly with τ on the fixed
+interval `(0, 1)` (a `1e-6` inset, not graph-derived, unlike ρ's interval).
+`PCBYM2Phi(upper=0.5, alpha=2/3)` supplies Riebler et al.'s PC prior for φ,
+calibrated as `P(φ < upper) = alpha`; because its distance scale depends on
+the graph's spectrum, it is declared unbound and the compiler binds it to
+the effect's graph. This completes the CAR family (Besag/ICAR → proper CAR,
+including ρ estimation → BYM2) for the dense reference regime. See the
+[project README](../../../README.md#bym2-spatial-effect).
 
-- **BYM2 (next).** The structured-plus-unstructured convolution model:
-  a scaled-ICAR spatial component plus an unstructured IID component, mixed
-  by `φ`, with PC priors recommended for both `φ` and the marginal precision
-  (Riebler et al. 2016) — the natural target once bounded-hyperparameter
-  inference lands, completing the CAR family.
+**Spatial CAR family: complete for the dense reference regime.** Besag/ICAR,
+proper CAR (with ρ estimation), and BYM2 (with φ estimation) all ship as of
+this slice. Still deferred, in order:
+
+- **The augmented (2n) representation.** All three effects above are
+  implemented as marginal/collapsed precisions; the classical augmented
+  representation that stacks structured and unstructured components and
+  reports BYM2's `u*` as a separately-retrievable latent component is not
+  built.
+- **Config-file `besag`/`proper_car`/`bym2` effect types.** The
+  YAML/`ModelConfig` frontend has no schema for supplying a graph, so all
+  three spatial effects are Python-API-only for now (`Fixed`/`IID`/`RW1`/`RW2`
+  are already YAML-declarable). This needs a graph-in-config schema (inline
+  neighbour list, or a `graph_file` path) before `ModelConfig`/
+  `_structured_blocks` can dispatch to the spatial builders.
 - **Graph construction through either data adapter** — `load_graph_file` and
   the neighbour-dict input both go through the Pandas-side compiler only;
   a PySpark-side path is not built.
-- **Config-file `besag` effect type.** The YAML/`ModelConfig` frontend has
-  no schema for supplying a graph, so `Besag` is Python-API-only for now
-  (`Fixed`/`IID`/`RW1`/`RW2` are already YAML-declarable). This needs a
-  graph-in-config schema (inline neighbour list, or a `graph_file` path)
-  before `ModelConfig`/`_structured_blocks` can dispatch to `build_besag`.
 - **Graceful isolated-node handling.** An isolated (zero-neighbour) node
   currently raises a directed error at declaration time (model it as `IID`
   instead) rather than being handled automatically, e.g. by silently folding
-  it into an implicit unstructured term.
+  it into an implicit unstructured term. This applies to `Besag` and `BYM2`
+  alike.
+- **Sparse/large-graph scaling.** `Besag`, `ProperCAR`, and `BYM2` all use
+  dense linear algebra (dense structure matrices, and, for `BYM2`, a dense
+  `O(n^3)` eigendecomposition at compile time); none of the three has a
+  sparse or large-graph path.
 - optional Matérn-SPDE support.
 
 ### 5. HMC-Laplace
@@ -475,8 +505,9 @@ mathematical correctness.
   3c, and 3d, with constrained-effect full Laplace and the other 3c/3d
   follow-ups remaining);
 - spatial effects and SPDE meshes (was a non-goal of the first refactor;
-  `Besag`/ICAR and `ProperCAR` (including ρ estimation) have since shipped as
-  their own sub-slices — see section 4 above; BYM2 and SPDE remain deferred);
+  `Besag`/ICAR, `ProperCAR` (including ρ estimation), and `BYM2` (including φ
+  estimation) have since shipped as their own sub-slices, completing the CAR
+  family — see section 4 above; SPDE remains deferred);
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
 - a new forecasting evaluation framework.
