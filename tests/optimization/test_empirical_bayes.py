@@ -25,6 +25,7 @@ from pylgm.optimization import (
     optimize_empirical_bayes,
 )
 from pylgm.optimization import empirical_bayes
+from pylgm.optimization.transforms import LogitTransform, LogTransform
 
 
 def zero_latent_family(y: np.ndarray) -> CompiledGaussianFamily:
@@ -855,3 +856,42 @@ def test_penalty_shifts_the_optimum():
         family, bounds, penalty=lambda values: 5.0 * np.log(values["g_prec"]),
     )
     assert penalized.parameters["g_prec"] > plain.parameters["g_prec"]
+
+
+class _ScalarFamily:
+    """Family whose 'log marginal likelihood' peaks at a known natural value."""
+
+    def __init__(self, name, target):
+        self.parameter_names = (name,)
+        self._name = name
+        self._target = target
+
+    def materialize(self, values):
+        return values[self._name]
+
+    # optimize_empirical_bayes calls fit(model); we inject a fit that reads the value.
+
+
+def test_optimizer_recovers_bounded_optimum():
+    name = "rho"
+    target = 0.6
+
+    class _Fit:
+        def __init__(self, value):
+            # concave in value, peak at target, within (-1, 1)
+            self.log_marginal_likelihood = -((value - target) ** 2)
+
+    fam = _ScalarFamily(name, target)
+    bounds = {name: OptimizationBounds(0.0, -0.99, 0.99, transform=LogitTransform(-1.0, 1.0))}
+    result = optimize_empirical_bayes(fam, bounds, fit=lambda m, **k: _Fit(m))
+    assert np.isclose(result.parameters[name], target, atol=1e-3)
+
+
+def test_optimization_bounds_defaults_to_log_and_validates():
+    b = OptimizationBounds(1.0, 0.1, 10.0)
+    assert isinstance(b.transform, LogTransform)
+    with pytest.raises(ValueError):
+        OptimizationBounds(1.0, -0.1, 10.0)  # negative lower invalid under Log
+    # Logit bounds must sit inside the interval:
+    with pytest.raises(ValueError):
+        OptimizationBounds(0.0, -1.0, 0.9, transform=LogitTransform(-1.0, 1.0))

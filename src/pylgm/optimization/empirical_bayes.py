@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 
 import numpy as np
@@ -8,6 +8,7 @@ import scipy.optimize
 from pylgm.exceptions import InferenceError, NumericalError, OptimizationError
 from pylgm.inference import GaussianResult, LaplaceResult, fit_gaussian
 from pylgm.optimization.result import EmpiricalBayesResult, OptimizationDiagnostics
+from pylgm.optimization.transforms import LogTransform, Transform
 
 
 def _transform_objective(raw_objective: float) -> float:
@@ -20,14 +21,14 @@ _INVALID_OBJECTIVE = _transform_objective(float(np.finfo(float).max)) + 1.0
 _LOG_BOUND_ATOL = 1e-8
 
 
-def _ordinary_positive(value: object, name: str) -> float:
+def _ordinary_number(value: object, name: str) -> float:
     if type(value) not in (int, float):
         raise ValueError(f"{name} must be an ordinary finite positive number")
     try:
         result = float(value)
     except (OverflowError, ValueError) as error:
         raise ValueError(f"{name} must be an ordinary finite positive number") from error
-    if not np.isfinite(result) or result <= 0:
+    if not np.isfinite(result):
         raise ValueError(f"{name} must be an ordinary finite positive number")
     return result
 
@@ -37,15 +38,26 @@ class OptimizationBounds:
     initial: float
     lower: float
     upper: float
+    transform: Transform = field(default_factory=LogTransform)
 
     def __post_init__(self) -> None:
-        initial = _ordinary_positive(self.initial, "initial")
-        lower = _ordinary_positive(self.lower, "lower")
-        upper = _ordinary_positive(self.upper, "upper")
+        initial = _ordinary_number(self.initial, "initial")
+        lower = _ordinary_number(self.lower, "lower")
+        upper = _ordinary_number(self.upper, "upper")
+        if not self.transform.contains(lower) or not self.transform.contains(upper):
+            raise ValueError(
+                "lower and upper must be an ordinary finite positive number "
+                "within the transform's natural domain"
+            )
         if lower >= upper or not lower <= initial <= upper:
             raise ValueError(
                 "parameter bounds must satisfy lower <= initial <= upper with lower < upper"
             )
+        # NOTE: whether lower/upper collapse to the same *internal* value (e.g. two
+        # distinct naturals that round-trip to one float in log-space) is checked by
+        # optimize_empirical_bayes, which raises a typed OptimizationError for it —
+        # not here, so bounds that are merely constructed (not yet optimized) don't
+        # raise a bare ValueError for that case.
         object.__setattr__(self, "initial", initial)
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
@@ -88,8 +100,10 @@ def _validate_problem(
         raise ValueError("warm-start initial must contain exactly the bounded parameters")
     start: dict[str, float] = {}
     for name in names:
-        value = _ordinary_positive(initial[name], f"initial value for {name!r}")
         parameter_bounds = bounds[name]
+        value = float(initial[name])
+        if not np.isfinite(value):
+            raise ValueError(f"initial value for {name!r} must be finite")
         if not parameter_bounds.lower <= value <= parameter_bounds.upper:
             raise ValueError(f"initial value for {name!r} must lie within its bounds")
         start[name] = value
@@ -98,34 +112,36 @@ def _validate_problem(
 
 def _parameter_values(
     names: tuple[str, ...],
-    log_parameters: tuple[float, ...],
+    internal_parameters: tuple[float, ...],
+    transforms: list[Transform],
     lower: np.ndarray,
     upper: np.ndarray,
-    log_lower: np.ndarray,
-    log_upper: np.ndarray,
+    internal_lower: np.ndarray,
+    internal_upper: np.ndarray,
 ) -> dict[str, float]:
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        transformed = np.exp(np.asarray(log_parameters, dtype=float))
-    transformed = np.clip(transformed, lower, upper)
-    for index, value in enumerate(log_parameters):
-        low = log_lower[index]
-        high = log_upper[index]
-        if value == low:
-            transformed[index] = lower[index]
-            continue
-        if value == high:
-            transformed[index] = upper[index]
-            continue
-        tolerance = _log_bound_tolerance(low, high)
-        low_distance = abs(value - low)
-        high_distance = abs(value - high)
-        if low_distance < high_distance and low_distance <= tolerance:
-            transformed[index] = lower[index]
-        elif high_distance < low_distance and high_distance <= tolerance:
-            transformed[index] = upper[index]
-    if not np.isfinite(transformed).all() or np.any(transformed <= 0):
-        raise NumericalError("log-transformed parameters must be finite and positive")
-    return {name: float(value) for name, value in zip(names, transformed, strict=True)}
+    values = {}
+    for index, name in enumerate(names):
+        u = float(internal_parameters[index])
+        low, high = internal_lower[index], internal_upper[index]
+        if u <= low:
+            theta = lower[index]
+        elif u >= high:
+            theta = upper[index]
+        else:
+            tolerance = _log_bound_tolerance(low, high)
+            if abs(u - low) <= tolerance and abs(u - low) < abs(u - high):
+                theta = lower[index]
+            elif abs(u - high) <= tolerance and abs(u - high) < abs(u - low):
+                theta = upper[index]
+            else:
+                theta = transforms[index].from_internal(u)
+        if not np.isfinite(theta) or not transforms[index].contains(theta):
+            # allow the exact closed bounds (contains is open); clip to them
+            theta = float(np.clip(theta, lower[index], upper[index]))
+            if not np.isfinite(theta):
+                raise NumericalError("transformed parameters must be finite")
+        values[name] = float(theta)
+    return values
 
 
 def _log_bound_tolerance(lower: float, upper: float) -> float:
@@ -147,8 +163,15 @@ def optimize_empirical_bayes(
     if fit is None:
         fit = fit_gaussian
     names, initial_values = _validate_problem(family, bounds, initial)
-    lower = np.log([bounds[name].lower for name in names])
-    upper = np.log([bounds[name].upper for name in names])
+    transforms = [bounds[name].transform for name in names]
+    natural_lower = np.asarray([bounds[name].lower for name in names])
+    natural_upper = np.asarray([bounds[name].upper for name in names])
+    lower = np.asarray(
+        [t.to_internal(b) for t, b in zip(transforms, natural_lower, strict=True)]
+    )
+    upper = np.asarray(
+        [t.to_internal(b) for t, b in zip(transforms, natural_upper, strict=True)]
+    )
     collapsed = tuple(
         name for name, low, high in zip(names, lower, upper, strict=True) if not low < high
     )
@@ -156,9 +179,9 @@ def optimize_empirical_bayes(
         raise OptimizationError(
             f"natural bounds for parameters {collapsed!r} collapse in log space"
         )
-    natural_lower = np.asarray([bounds[name].lower for name in names])
-    natural_upper = np.asarray([bounds[name].upper for name in names])
-    start = np.log([initial_values[name] for name in names])
+    start = np.asarray(
+        [t.to_internal(initial_values[name]) for t, name in zip(transforms, names, strict=True)]
+    )
     scipy_bounds = list(zip(lower, upper, strict=True))
 
     cache: dict[tuple[float, ...], _Evaluation] = {}
@@ -178,6 +201,7 @@ def optimize_empirical_bayes(
             parameters = _parameter_values(
                 names,
                 key,
+                transforms,
                 natural_lower,
                 natural_upper,
                 lower,
