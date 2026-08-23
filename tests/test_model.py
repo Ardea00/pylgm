@@ -680,3 +680,71 @@ def test_full_laplace_requires_integration():
                 panel=("region",), time="t")
     with pytest.raises(ValueError, match="integrate"):
         model.fit(frame, hyperparameters="optimize", latent_strategy="laplace")
+
+
+def test_penalty_prefers_family_parameter_priors():
+    # A prior carried on the family (e.g. a graph-bound PC prior) must drive the
+    # MAP-II penalty, not just the prior declared on the Hyperparameter.
+    from pylgm.compiler import compile_family
+
+    frame = _panel_frame()
+    model = LGM(
+        "y", Gaussian(0.5),
+        Fixed("1") + IID("region", index="region",
+                         precision=Hyperparameter("p", initial=1.0)),
+        panel=("region",), time="t",
+    )
+    data = DataConfig(time="t", response="y", panel=("region",))
+    panel = CanonicalPanel.from_frame(frame, data)
+    family = compile_family(model, panel)
+    assert family is not None
+    assert family.parameter_priors == {}
+
+    calls = []
+
+    class _SentinelPrior:
+        def logpdf(self, value):
+            calls.append(value)
+            return -7.0
+
+    object.__setattr__(family, "parameter_priors", {"p": _SentinelPrior()})
+
+    bounds, initial, penalty = model._family_optimization_inputs(family)
+    assert penalty is not None
+    assert penalty({"p": 3.0}) == -7.0
+    assert calls == [3.0]
+
+
+def test_penalty_avoids_double_counting_family_and_hyperparameter_priors():
+    # When a parameter has both a family-bound prior and its own Hyperparameter
+    # prior (same name), only the family's bound prior must contribute -- the
+    # Hyperparameter's own prior (a real PCPrecision, which would evaluate to a
+    # very different, finite number here) must not also be added in.
+    from pylgm.compiler import compile_family
+
+    frame = _panel_frame()
+    model = LGM(
+        "y", Gaussian(0.5),
+        Fixed("1") + IID("region", index="region",
+                         precision=Hyperparameter("p", initial=1.0,
+                                                  prior=PCPrecision(upper_sd=1.0, alpha=0.01))),
+        panel=("region",), time="t",
+    )
+    data = DataConfig(time="t", response="y", panel=("region",))
+    panel = CanonicalPanel.from_frame(frame, data)
+    family = compile_family(model, panel)
+    assert family is not None
+
+    family_calls = []
+
+    class _SentinelPrior:
+        def logpdf(self, value):
+            family_calls.append(value)
+            return -1000.0
+
+    object.__setattr__(family, "parameter_priors", {"p": _SentinelPrior()})
+
+    _, _, penalty = model._family_optimization_inputs(family)
+    assert penalty is not None
+    assert penalty({"p": 2.0}) == -1000.0
+    assert family_calls == [2.0]

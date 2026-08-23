@@ -236,6 +236,7 @@ class CompiledGaussianFamily:
     parameter_names: tuple[str, ...]
     initial: Hyperparameters
     parameter_bounds: Mapping[str, object]
+    parameter_priors: Mapping[str, object]
 
     def __init__(
         self,
@@ -246,6 +247,7 @@ class CompiledGaussianFamily:
         parameter_names: tuple[str, ...],
         initial: Hyperparameters,
         parameter_bounds: Mapping[str, object] = MappingProxyType({}),
+        parameter_priors: Mapping[str, object] = MappingProxyType({}),
     ) -> None:
         y_value = np.asarray(y)
         observed_value = np.asarray(observed)
@@ -328,6 +330,7 @@ class CompiledGaussianFamily:
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "initial", initial)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
+        object.__setattr__(self, "parameter_priors", MappingProxyType(dict(parameter_priors)))
 
     @property
     def y(self) -> np.ndarray:
@@ -378,6 +381,7 @@ class CompiledFamily:
     parameter_names: tuple[str, ...]
     likelihood_factory: Callable[[Mapping[str, float]], object] = field(repr=False)
     parameter_bounds: Mapping[str, object]
+    parameter_priors: Mapping[str, object]
 
     def __init__(
         self,
@@ -388,6 +392,7 @@ class CompiledFamily:
         parameter_names: tuple[str, ...],
         likelihood_factory: Callable[[Mapping[str, float]], object],
         parameter_bounds: Mapping[str, object] = MappingProxyType({}),
+        parameter_priors: Mapping[str, object] = MappingProxyType({}),
     ) -> None:
         y_value = np.asarray(y)
         observed_value = np.asarray(observed)
@@ -444,6 +449,7 @@ class CompiledFamily:
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "likelihood_factory", likelihood_factory)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
+        object.__setattr__(self, "parameter_priors", MappingProxyType(dict(parameter_priors)))
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(

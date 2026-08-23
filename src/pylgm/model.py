@@ -202,11 +202,18 @@ class LGM:
         else:
             bounds = {hp.name: OptimizationBounds(hp.initial, hp.lower, hp.upper) for _, hp in hyperparameters}
         initial = {hp.name: hp.initial for _, hp in hyperparameters}
+        family_priors = dict(getattr(family, "parameter_priors", {}) or {})
         priored = [hp for _, hp in hyperparameters if hp.prior is not None]
         penalty = None
-        if priored:
-            def penalty(values, priored=priored):
-                return sum(hp.prior.logpdf(values[hp.name]) for hp in priored)
+        if family_priors or priored:
+            def penalty(values, family_priors=family_priors, priored=priored):
+                total = 0.0
+                for name, prior in family_priors.items():
+                    total += float(prior.logpdf(values[name]))
+                for hp in priored:
+                    if hp.name not in family_priors:
+                        total += float(hp.prior.logpdf(values[hp.name]))
+                return total
         return bounds, initial, penalty
 
     def _run_empirical_bayes(self, family, engine: str) -> GaussianResult | LaplaceResult:

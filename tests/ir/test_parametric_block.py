@@ -117,3 +117,24 @@ def test_compiled_gaussian_family_rejects_parametric_parameters_missing_from_nam
             parameter_names=("region.precision",),  # missing "region.rho"
             initial=Hyperparameters(sigma=1.0, precisions={}),
         )
+
+
+def test_family_carries_parameter_priors():
+    block = LatentBlock(
+        "latent", ("x",), csr_matrix([[1.0]]), csr_matrix([[1.0]]), np.empty((0, 1))
+    )
+
+    class _Prior:
+        def logpdf(self, value):
+            return -value
+
+    family = CompiledGaussianFamily(
+        y=np.array([1.0]),
+        observed=np.array([True]),
+        offset=np.zeros(1),
+        blocks=(ScalableBlock(block, "latent.precision", 1.0),),
+        parameter_names=("latent.precision",),
+        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+        parameter_priors={"latent.precision": _Prior()},
+    )
+    assert family.parameter_priors["latent.precision"].logpdf(2.0) == -2.0
