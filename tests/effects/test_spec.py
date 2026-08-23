@@ -95,3 +95,55 @@ def test_predictor_rejects_duplicate_besag_name():
 
     with pytest.raises(ValueError, match="unique"):
         IID("region", "region") + Besag("region", index="region", graph=PATH_GRAPH)
+
+
+def test_proper_car_defaults():
+    from pylgm.effects import ProperCAR
+
+    effect = ProperCAR("region", index="region", graph=PATH_GRAPH, rho=0.5)
+    assert effect.name == "region"
+    assert effect.index == "region"
+    assert effect.rho == 0.5
+    assert effect.precision == 1.0
+
+
+def test_proper_car_accepts_hyperparameter_precision():
+    from pylgm.effects import ProperCAR
+
+    hp = Hyperparameter("region.precision", initial=1.0)
+    effect = ProperCAR("region", index="region", graph=PATH_GRAPH, rho=0.5, precision=hp)
+    assert effect.precision is hp
+
+
+def test_proper_car_rejects_hyperparameter_rho():
+    from pylgm.effects import ProperCAR
+
+    hp = Hyperparameter("region.rho", initial=0.5)
+    with pytest.raises(ValueError, match="rho"):
+        ProperCAR("region", index="region", graph=PATH_GRAPH, rho=hp)
+
+
+def test_proper_car_rejects_non_finite_rho():
+    from pylgm.effects import ProperCAR
+
+    with pytest.raises(ValueError, match="rho"):
+        ProperCAR("region", index="region", graph=PATH_GRAPH, rho=float("inf"))
+
+
+def test_proper_car_is_frozen_and_hashable():
+    from pylgm.effects import ProperCAR
+
+    effect = ProperCAR("region", index="region", graph=PATH_GRAPH, rho=0.5)
+    assert hash(effect) == hash(
+        ProperCAR("region", index="region", graph=PATH_GRAPH, rho=0.5)
+    )
+    with pytest.raises(FrozenInstanceError):
+        effect.rho = 0.1
+
+
+def test_proper_car_composes_in_predictor():
+    from pylgm.effects import Predictor, ProperCAR
+
+    predictor = Fixed("1") + ProperCAR("region", index="region", graph=PATH_GRAPH, rho=0.5)
+    assert isinstance(predictor, Predictor)
+    assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "ProperCAR"]

@@ -26,6 +26,12 @@ def _positive_precision(
     return value if isinstance(value, Hyperparameter) else _positive_real(value, name)
 
 
+def _finite_real(value: object, name: str) -> float:
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite real value")
+    return float(value)
+
+
 class _ComposableEffect:
     def __add__(self, other: object) -> "Predictor":
         return Predictor((self,)) + other
@@ -127,7 +133,39 @@ class Besag(_ComposableEffect):
         object.__setattr__(self, "graph", canonical)
 
 
-EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag
+@dataclass(frozen=True)
+class ProperCAR(_ComposableEffect):
+    """A proper conditional autoregressive (proper CAR) spatial latent effect."""
+
+    name: str
+    index: str
+    graph: Mapping
+    rho: float
+    precision: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.graph import normalize_graph
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if isinstance(self.rho, Hyperparameter):
+            raise ValueError(
+                "rho estimation is not yet supported (plug-in only); pass a float. "
+                "rho inference is planned in the bounded-hyperparameter slice"
+            )
+        object.__setattr__(self, "rho", _finite_real(self.rho, "rho"))
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        nodes, w = normalize_graph(self.graph)  # validates the graph
+        canonical = tuple(
+            (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
+            for i, node in enumerate(nodes)
+        )
+        object.__setattr__(self, "graph", canonical)
+
+
+EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag | ProperCAR
 
 
 @dataclass(frozen=True)
@@ -141,7 +179,10 @@ class Predictor:
             effects = tuple(self.effects)
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
-        if any(not isinstance(effect, (Fixed, IID, RW1, RW2, Besag)) for effect in effects):
+        if any(
+            not isinstance(effect, (Fixed, IID, RW1, RW2, Besag, ProperCAR))
+            for effect in effects
+        ):
             raise TypeError("effects must contain only effect specifications")
         names = [effect.name for effect in effects]
         if len(names) != len(set(names)):
@@ -151,9 +192,9 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2, Besag)):
+        if isinstance(other, (Fixed, IID, RW1, RW2, Besag, ProperCAR)):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
 
-__all__ = ["Besag", "Fixed", "IID", "Predictor", "RW1", "RW2"]
+__all__ = ["Besag", "Fixed", "IID", "Predictor", "ProperCAR", "RW1", "RW2"]

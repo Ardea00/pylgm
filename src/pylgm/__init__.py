@@ -1,6 +1,6 @@
 """pyLGM public package."""
 
-from pylgm.effects import Besag, Fixed, IID, RW1, RW2, load_graph_file
+from pylgm.effects import Besag, Fixed, IID, ProperCAR, RW1, RW2, load_graph_file
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
 from pylgm.likelihoods import Bernoulli, Gaussian, Poisson
 from pylgm.model import LGM
@@ -27,6 +27,7 @@ __all__ = [
     "load_graph_file",
     "Pipeline",
     "Poisson",
+    "ProperCAR",
     "RW1",
     "RW2",
     "__version__",
