@@ -41,10 +41,13 @@ hyperparameter inference.
 
 AR1 effects, `result.predict(new_data)`, parameterized IR metadata,
 INLA-style hyperparameter marginals, sparse production
-engines, spatial effects, and HMC are deferred to later slices. Optional
-PySpark input is now supported as a data boundary (see below). Pandas
-predictions in 0.3 cover the rows supplied to `LGM.fit`; their arrays follow
-the caller's original row order.
+engines, and HMC are deferred to later slices. The spatial (CAR) effect
+family is landing incrementally: `Besag` (intrinsic CAR/ICAR) has shipped
+(see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect)
+below); proper CAR and BYM2 remain deferred. Optional PySpark input is now
+supported as a data boundary (see below). Pandas predictions in 0.3 cover
+the rows supplied to `LGM.fit`; their arrays follow the caller's original
+row order.
 
 ## Non-Gaussian likelihoods (Laplace)
 
@@ -364,6 +367,70 @@ criteria.log_cpo_sum                # sum of log CPO, a leave-one-out log score
 Criteria are not yet computed for plug-in fits (`hyperparameters="optimize"`
 or the default). A runnable example lives at
 [`examples/inla_criteria/README.md`](examples/inla_criteria/README.md).
+
+## Besag / intrinsic CAR (ICAR) spatial effect
+
+`Besag(name, index, graph, precision=1.0, scale=True)` declares an intrinsic
+conditional-autoregressive (ICAR) spatial latent effect: precision
+`τ·(D−W)`, the graph Laplacian of the adjacency, with density proportional to
+`exp(−τ/2 · Σ_{i~j}(xᵢ−xⱼ)²)`. This structure is rank-deficient (it is
+invariant to adding a constant within a connected component), so the effect
+carries one sum-to-zero constraint per connected component of the graph.
+
+`graph` is a neighbour dict `{region: [neighbours, ...]}` keyed by the same
+labels as the data's `index` column, or the result of `load_graph_file(path)`,
+which parses the R-INLA/latte `.graph` text format into that same dict shape.
+The graph's nodes are the effect's domain, so it may include regions absent
+from the observed data (e.g. to predict at unobserved regions); every
+observed region must be a node in the graph, or `fit` raises a clear error.
+A node with zero neighbours is rejected at declaration time — an isolated
+region has no ICAR structure to borrow strength from and should be modeled as
+an `IID` effect instead — while a multi-node disconnected component (an
+"island" group) is supported and gets its own sum-to-zero constraint.
+
+`scale=True` (the default) applies the Sørbye–Rue (2014) scaling
+convention: each connected component's structure matrix is rescaled to a
+unit geometric-mean marginal variance, so `τ` is comparable across different
+graphs and to an `IID` effect's precision on the same scale. Pass
+`scale=False` to use the raw, unscaled `D−W` structure instead.
+
+```python
+import numpy as np
+import pandas as pd
+
+from pylgm import Besag, Fixed, Gaussian, LGM, load_graph_file
+
+# A small connected chain graph over regions "0".."5": i <-> i-1, i <-> i+1.
+graph = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= 5] for i in range(6)}
+
+frame = pd.DataFrame({"region": [str(i) for i in range(6)], "y": np.sin(np.arange(6) / 2.0)})
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + Besag("region", index="region", graph=graph, precision=1.0),
+    likelihood=Gaussian(sigma=0.1),
+)
+result = model.fit(frame)
+result.latent_marginals("region")  # GaussianMarginals over the 6 regions
+
+# Loading a graph from an R-INLA / latte .graph file instead of an inline dict:
+graph_from_file = load_graph_file("regions.graph")  # -> {"1": ["2"], "2": ["1", "3"], ...}
+```
+
+`precision` accepts a plain number or a declared `Hyperparameter`, and
+participates in `hyperparameters="optimize"`/`"integrate"` exactly like
+`IID`/`RW1`/`RW2` precisions. `Besag` composes with other effects the same
+way (`Fixed(...) + Besag(...) + IID(...)`) and works under both the default
+`latent_strategy="gaussian"` and `latent_strategy="simplified_laplace"`.
+Because it is a constrained effect (like `RW1`/`RW2`), `latent_strategy="laplace"`
+(full Laplace) rejects it with `UnsupportedEngineError`, the same restriction
+already documented above for `RW`/intrinsic effects.
+
+**Not yet built:** proper CAR (a spatial-dependence hyperparameter `ρ`,
+unconstrained), BYM2, spatial autocorrelation diagnostics, PC-priors for
+spatial hyperparameters, and shapefile/GeoJSON graph construction. The YAML
+`ModelConfig` frontend also does not yet have a `besag` effect type — see
+the [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
+for what's next.
 
 ## Development installation
 

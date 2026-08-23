@@ -211,7 +211,8 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - other latent-strategy refinements for INLA integration (sections 3c/3d
   below; the simplified-Laplace and unconstrained full-Laplace strategies
   have since shipped);
-- spatial effects.
+- spatial effects (the `Besag`/ICAR slice has since shipped under this
+  engine too — see section 4 below; proper CAR and BYM2 remain deferred).
 
 ### 3. INLA-style inference
 
@@ -310,8 +311,45 @@ Still deferred:
 
 ### 4. Spatial effects
 
-- Besag/ICAR, proper CAR, and BYM2;
-- graph construction through either data adapter;
+**Besag/ICAR — shipped.** `Besag(name, index, graph, precision=1.0,
+scale=True)` declares an intrinsic-CAR spatial effect: precision
+`τ·(D−W)` (the graph Laplacian), one sum-to-zero constraint per connected
+component, and Sørbye–Rue (2014) scaling by default. `graph` is a
+neighbour dict, either given inline or produced by `load_graph_file` parsing
+the R-INLA/latte `.graph` text format; the graph's nodes are the effect's
+domain. It is wired through the two declarative dispatch sites
+(`compile_lgm`/`compile_family`), composes with `Fixed`/`IID`/`RW1`/`RW2`,
+takes a plain number or a `Hyperparameter` for `precision` (participating in
+`optimize`/`integrate` like the other structured effects), and works under
+both the `exact_gaussian` and `laplace` engines and the `"gaussian"`/
+`"simplified_laplace"` latent strategies; `"laplace"` (full Laplace) rejects
+it with `UnsupportedEngineError` since it is a constrained effect, the same
+as `RW1`/`RW2`. See the
+[project README](../../../README.md#besag--intrinsic-car-icar-spatial-effect).
+
+Still deferred, in order:
+
+- **Proper CAR (next).** `Q = τ·(D − ρW)`, adding a spatial-dependence
+  hyperparameter `ρ` (typically constrained to keep `Q` positive definite);
+  unlike ICAR this is a full-rank, unconstrained precision, so it does not
+  need the sum-to-zero constraint machinery `Besag` uses.
+- **BYM2 (then).** The structured-plus-unstructured convolution model:
+  a scaled-ICAR spatial component plus an unstructured IID component, mixed
+  by a `φ ∈ [0, 1]` hyperparameter, with PC priors recommended for both `φ`
+  and the marginal precision (Riebler et al. 2016) — the natural target once
+  proper CAR is in place, completing the CAR family.
+- **Graph construction through either data adapter** — `load_graph_file` and
+  the neighbour-dict input both go through the Pandas-side compiler only;
+  a PySpark-side path is not built.
+- **Config-file `besag` effect type.** The YAML/`ModelConfig` frontend has
+  no schema for supplying a graph, so `Besag` is Python-API-only for now
+  (`Fixed`/`IID`/`RW1`/`RW2` are already YAML-declarable). This needs a
+  graph-in-config schema (inline neighbour list, or a `graph_file` path)
+  before `ModelConfig`/`_structured_blocks` can dispatch to `build_besag`.
+- **Graceful isolated-node handling.** An isolated (zero-neighbour) node
+  currently raises a directed error at declaration time (model it as `IID`
+  instead) rather than being handled automatically, e.g. by silently folding
+  it into an implicit unstructured term.
 - optional Matérn-SPDE support.
 
 ### 5. HMC-Laplace
@@ -416,7 +454,9 @@ mathematical correctness.
   full-Laplace latent strategies have since shipped as sub-slices 3a, 3b,
   3c, and 3d, with constrained-effect full Laplace and the other 3c/3d
   follow-ups remaining);
-- spatial effects and SPDE meshes;
+- spatial effects and SPDE meshes (was a non-goal of the first refactor;
+  `Besag`/ICAR has since shipped as its own sub-slice — see section 4 above;
+  proper CAR, BYM2, and SPDE remain deferred);
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
 - a new forecasting evaluation framework.
