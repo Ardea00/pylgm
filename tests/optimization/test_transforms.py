@@ -51,3 +51,17 @@ def test_logit_domain_and_validation():
         LogitTransform(1.0, 1.0)
     with pytest.raises(ValueError):
         LogitTransform(2.0, 1.0)
+
+
+def test_logit_rejects_non_finite_bounds():
+    for a, b in ((float("nan"), 1.0), (0.0, float("inf")), (float("-inf"), 0.0)):
+        with pytest.raises(ValueError):
+            LogitTransform(a, b)
+
+
+def test_logit_jacobian_stable_in_tails():
+    # log_expit keeps the Jacobian finite at large |u| where a naive
+    # sigmoid(u)*(1-sigmoid(u)) underflows to 0 and log -> -inf.
+    t = LogitTransform(0.0, 1.0)
+    for u in (-100.0, -40.0, 40.0, 100.0, 700.0):
+        assert np.isfinite(t.log_abs_jacobian(u))
