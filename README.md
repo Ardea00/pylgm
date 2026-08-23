@@ -6,8 +6,9 @@ Version 0.3 is a bounded foundation release: its stable inference engines are
 exact Gaussian and Laplace (fixed plug-in hyperparameters), and its
 declarative runtime accepts Pandas and Spark data. It provides `LGM`,
 Gaussian/Poisson/Bernoulli likelihoods, fixed/IID/RW1/RW2 effects, fit-row
-predictions, posterior marginals, and linear combinations. Schema-v1 and
-schema-v2 forecasting interfaces remain available for compatibility.
+and out-of-sample (`result.predict(new_data)`) predictions, posterior
+marginals, and linear combinations. Schema-v1 and schema-v2 forecasting
+interfaces remain available for compatibility.
 
 See the [approved Latte-parity and PySpark architecture](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md)
 for the explicitly labeled target state and staged roadmap. It is not the 0.3
@@ -39,8 +40,8 @@ hyperparameter's native scale with no Jacobian correction for `transform`.
 `PCPrecision` and `GaussianPrior` drive both point estimation and, under
 ["INLA integration"](#inla-integration), the integrated (marginal) posterior.
 
-AR1 effects, `result.predict(new_data)`, parameterized IR metadata, sparse
-production engines, and HMC are deferred to later slices. The spatial (CAR)
+AR1 effects, parameterized IR metadata, sparse production engines, and HMC
+are deferred to later slices. The spatial (CAR)
 effect family is now complete for the dense reference regime: `Besag`
 (intrinsic CAR/ICAR), `ProperCAR` (proper CAR, with its spatial-dependence
 parameter `ρ` either fixed or estimated), and `BYM2` (the structured +
@@ -54,9 +55,12 @@ effect types, graceful isolated-node handling, and sparse/large-graph
 scaling) are tracked in the
 [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects).
 Optional PySpark input is now
-supported as a data boundary (see below). Pandas predictions in 0.3 cover
-the rows supplied to `LGM.fit`; their arrays follow the caller's original
-row order.
+supported as a data boundary (see below). Pandas fit-row predictions in 0.3
+cover the rows supplied to `LGM.fit`, in the caller's original row order.
+`result.predict(new_data)` extends this to out-of-sample rows by reusing the
+fitted latent posterior (see ["Predicting new rows"](#predicting-new-rows)
+below); `new_data` itself must always be a Pandas DataFrame, including for
+results fitted from a Spark DataFrame.
 
 ## Non-Gaussian likelihoods (Laplace)
 
@@ -376,6 +380,126 @@ criteria.log_cpo_sum                # sum of log CPO, a leave-one-out log score
 Criteria are not yet computed for plug-in fits (`hyperparameters="optimize"`
 or the default). A runnable example lives at
 [`examples/inla_criteria/README.md`](examples/inla_criteria/README.md).
+
+## Predicting new rows
+
+`result.predict(new_data)` is available on `GaussianResult`, `LaplaceResult`,
+and `INLAResult` (i.e. every result produced by `LGM.fit`). It scores rows
+that were **not** passed to `fit` by rebuilding their design and reusing the
+already-fitted latent posterior — no refit. It returns an immutable
+`Prediction` with `predictive_mean`, `predictive_variance`, `fitted_mean`,
+and `keys` (`new_data`'s own index), plus `.to_frame()`, a `DataFrame`
+indexed like `new_data` with columns `predictive_mean`, `predictive_sd`, and
+`fitted_mean`.
+
+`new_data` must carry every column the fitted model reads — each effect's
+`index` column, every variable used in a `Fixed` formula, and the `offset`
+column when the model declares one — but **not** the response column.
+
+```python
+import pandas as pd
+from pylgm import Fixed, Gaussian, IID, LGM
+
+frame = pd.DataFrame({
+    "claims": [0.5, 1.5, 2.5, 3.5],
+    "x": [1.0, 2.0, 3.0, 4.0],
+    "region": ["a", "b", "a", "b"],
+})
+model = LGM(
+    response="claims",
+    predictor=Fixed("1 + x") + IID("region_effect", index="region", precision=2.0),
+    likelihood=Gaussian(sigma=0.5),
+)
+result = model.fit(frame)
+
+# new_data carries "x" (the Fixed formula variable) and "region" (the IID
+# effect's index), but not "claims" (the response).
+new_scenarios = pd.DataFrame({"x": [10.0, -3.0], "region": ["b", "a"]})
+prediction = result.predict(new_scenarios)
+print(prediction.to_frame())
+#    predictive_mean  predictive_sd  fitted_mean
+# 0         9.499999       1.833874     9.499999
+# 1        -3.499999       1.382286    -3.499999
+```
+
+`predict` **reuses** the fitted posterior; it cannot create a new latent
+column. An index level absent from the fitted model — a region `predict`
+never saw at `fit` time — raises `ValueError` naming both the offending block
+and the unrecognized level(s), rather than silently falling back to a prior
+or a zero contribution. The one exception is a spatial effect: it is keyed on
+graph **nodes**, so a node present in the effect's `graph` but not referenced
+by any fitted row already has a posterior and predicts without error.
+
+Forecasting genuinely new levels — a future time point, a region never seen
+at all — is a different operation, and it already worked before `predict`
+existed: include those rows at `fit` time with a `NaN` response. They
+contribute no likelihood but still receive a latent column (and, for a
+structured effect such as `RW1`, an extrapolated posterior) plus a full
+prediction, right alongside the observed rows.
+
+```python
+import numpy as np
+import pandas as pd
+from pylgm import Fixed, Gaussian, IID, LGM, RW1
+
+n_hist = 30
+history = pd.DataFrame({
+    "y": 1.0 + 0.2 * np.sin(np.arange(n_hist) / 3.0),
+    "region": (["a", "b"] * (n_hist // 2))[:n_hist],
+    "t": range(n_hist),
+})
+# These 4 future periods never appeared at fit time. Give them a NaN
+# response instead of calling predict() on them.
+future = pd.DataFrame({
+    "y": [np.nan, np.nan, np.nan, np.nan],
+    "region": ["a", "b", "a", "b"],
+    "t": [n_hist, n_hist + 1, n_hist + 2, n_hist + 3],
+})
+frame = pd.concat([history, future], ignore_index=True)
+
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + IID("region", index="region", precision=2.0)
+    + RW1("trend", index="t", precision=2.0),
+    likelihood=Gaussian(sigma=0.2),
+)
+result = model.fit(frame)
+
+# The last 4 rows are the future periods; predictive_mean/_variance already
+# cover them, in the caller's row order (same arrays fit() always returns).
+print(np.round(result.predictive_mean[-4:], 3))    # [0.957 0.957 0.957 0.957]
+print(np.round(result.predictive_variance[-4:], 3))  # [0.597 1.077 1.597 2.077]
+```
+
+An `RW1`/`RW2` forecast extrapolates **flat** from the last fitted level —
+these examples show it exactly, because the region effect nets out to ~0 by
+symmetry — and its variance strictly increases with each additional step
+ahead, converging toward growth of `1/τ` per step as the fitted history
+grows long relative to the forecast horizon (the finite-sample deviation
+comes from the effect's sum-to-zero identifiability constraint, which
+couples the whole chain including the unobserved tail).
+
+| need | use |
+| --- | --- |
+| new covariate values / scenarios on **known** index levels | `result.predict(new_data)` |
+| **new** time points, regions, or groups | `NaN`-response rows at `fit` time |
+
+`predictive_variance` and `fitted_mean` follow exactly the same per-engine
+conventions `predict` mirrors from the fit-row outputs: the exact-Gaussian
+path's `predictive_variance` includes the observation variance `σ²`; the
+Laplace path's does not. `fitted_mean` is identity for Gaussian, the exact
+lognormal expectation `exp(μ + σ²_η/2)` for the Poisson log link, and the
+documented **point estimate** `logit⁻¹(μ)` (ignoring linear-predictor
+variance) for the Bernoulli logit link — see
+["Non-Gaussian likelihoods (Laplace)"](#non-gaussian-likelihoods-laplace)
+above.
+
+`predict` works on a result fitted from either Pandas or a Spark DataFrame,
+but `new_data` itself must always be a Pandas DataFrame — Spark `new_data` is
+not supported. **Not shipped**: a prior-based fallback for unseen levels,
+predictive quantiles or simulation, response-scale predictive variance for
+non-Gaussian links, and an automatic future-frame construction helper (the
+`NaN`-response rows above are built by hand).
 
 ## Besag / intrinsic CAR (ICAR) spatial effect
 

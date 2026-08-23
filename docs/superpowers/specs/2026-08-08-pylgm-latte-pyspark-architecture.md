@@ -106,7 +106,13 @@ result.diagnostics
 ```
 
 In 0.3, fit-row predictions are exposed as `predictive_mean` and
-`predictive_variance`, while `result.predict(new_data)` is deferred.
+`predictive_variance`, and `result.predict(new_data)` has since shipped for
+out-of-sample rows on `GaussianResult`, `LaplaceResult`, and `INLAResult`
+alike — it reuses the fitted latent posterior and cannot create a new latent
+column (see the [project README](../../../README.md#predicting-new-rows)).
+Still deferred: Spark `new_data` (the accepted `new_data` is Pandas-only), a
+prior-based fallback for an unseen index level, predictive quantiles or
+simulation, and a future-frame construction helper.
 `hyperparameter_marginals()` is present but empty for the conditional exact
 fit because hyperparameters are not integrated.
 
@@ -179,9 +185,14 @@ since shipped on top of that: when the declared `Hyperparameter` also
 carries a `prior`, its native-scale log density penalizes the same marginal
 likelihood, and `result.diagnostics["hyperparameter_penalized"]` records it
 (no Jacobian correction for `transform`). This is still a point estimate,
-not a marginal. AR1, `result.predict(new_data)`, and parameterized IR
-metadata are explicitly deferred. The hyperparameter integration core (grid
-quadrature, section 3a) and model-assessment criteria (DIC/WAIC/CPO/PIT,
+not a marginal. Out-of-sample prediction has since shipped:
+`result.predict(new_data)` scores new rows against the fitted latent
+posterior on `GaussianResult`, `LaplaceResult`, and `INLAResult`; Spark
+`new_data`, a prior-based fallback for unseen index levels, predictive
+quantiles/simulation, and a future-frame construction helper remain
+deferred. AR1 and parameterized IR metadata are still explicitly deferred.
+The hyperparameter integration core (grid quadrature, section 3a) and
+model-assessment criteria (DIC/WAIC/CPO/PIT,
 section 3b) have since shipped; the simplified-Laplace latent strategy
 (section 3c) has since shipped as well, and full-Laplace latent marginals
 for unconstrained models (section 3d) have since shipped on top of that,
@@ -497,7 +508,11 @@ mathematical correctness.
 - AR1 effects;
 - the PySpark adapter (was a non-goal of the first refactor; has since shipped
   as its own Gaussian-only data-boundary slice);
-- `result.predict(new_data)`;
+- `result.predict(new_data)` (was a non-goal of the first refactor; has since
+  shipped for `GaussianResult`, `LaplaceResult`, and `INLAResult` as its own
+  out-of-sample-prediction slice; Spark `new_data`, a prior-based fallback
+  for unseen index levels, predictive quantiles/simulation, and a
+  future-frame construction helper remain deferred);
 - parameterized IR metadata and prior-aware hyperparameter inference;
 - non-Gaussian likelihoods;
 - INLA integration (was a non-goal of the first refactor; the integration
