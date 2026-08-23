@@ -519,3 +519,40 @@ def test_build_prediction_context_matches_the_compiled_blocks():
     assert structured[0][2] == compiled.blocks[1].labels
     assert structured[1][:2] == ("trend", "t")
     assert structured[1][2] == compiled.blocks[2].labels
+
+
+def test_prediction_context_guard_catches_misordered_entries():
+    # predict_from only validates the TOTAL design width, so entries built in a
+    # different order than the compiled blocks would misassign columns with no
+    # error. Two same-width blocks make the width check useless; the label
+    # alignment guard is what must catch it.
+    import pandas as pd
+
+    from pylgm import Fixed, Gaussian, IID, LGM
+    from pylgm.compiler import build_prediction_context, compile_lgm
+    from pylgm.data import CanonicalPanel
+    from pylgm.exceptions import CompilationError
+
+    frame = pd.DataFrame({
+        "y": [0.1, 0.2, 0.3, 0.4],
+        "region": ["a", "b", "a", "b"],
+        "grp": ["p", "q", "p", "q"],
+    })
+    panel = CanonicalPanel(frame, np.array([True] * 4), ("region",), "y")
+    ordered = LGM(
+        response="y",
+        predictor=Fixed("1") + IID("region", index="region") + IID("grp", index="grp"),
+        likelihood=Gaussian(sigma=0.5),
+    )
+    compiled = compile_lgm(ordered, panel)
+    assert [b.name for b in compiled.blocks] == ["fixed", "region", "grp"]
+    # happy path still works
+    build_prediction_context(ordered, panel, compiled)
+
+    swapped = LGM(
+        response="y",
+        predictor=Fixed("1") + IID("grp", index="grp") + IID("region", index="region"),
+        likelihood=Gaussian(sigma=0.5),
+    )
+    with pytest.raises(CompilationError, match="order"):
+        build_prediction_context(swapped, panel, compiled)
