@@ -211,9 +211,9 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - other latent-strategy refinements for INLA integration (sections 3c/3d
   below; the simplified-Laplace and unconstrained full-Laplace strategies
   have since shipped);
-- spatial effects (the `Besag`/ICAR and `ProperCAR` plug-in-ρ slices have
-  since shipped under this engine too — see section 4 below; ρ estimation
-  and BYM2 remain deferred).
+- spatial effects (the `Besag`/ICAR and `ProperCAR` slices, including ρ
+  estimation, have since shipped under this engine too — see section 4 below;
+  BYM2 remains deferred).
 
 ### 3. INLA-style inference
 
@@ -328,24 +328,32 @@ it with `UnsupportedEngineError` since it is a constrained effect, the same
 as `RW1`/`RW2`. See the
 [project README](../../../README.md#besag--intrinsic-car-icar-spatial-effect).
 
-**Proper CAR (plug-in ρ) — shipped.** `ProperCAR(name, index, graph, rho,
-precision=1.0)` declares `Q = τ·(D − ρW)`: unlike ICAR this is a full-rank,
-unconstrained precision, so it carries no sum-to-zero constraint and is the
-first spatial effect to work under full Laplace (`latent_strategy="laplace"`).
-`rho` is a **fixed float** this slice, validated against the open interval
-`(1/μ_min, 1/μ_max)` of the normalized adjacency's eigenvalues; `precision`
-(τ) is a plain number or `Hyperparameter`, participating in
-`optimize`/`integrate` via the existing `ScalableBlock` scalar-multiply path
-(no family-layer changes needed). See the
+**Proper CAR — shipped.** `ProperCAR(name, index, graph, rho, precision=1.0)`
+declares `Q = τ·(D − ρW)`: unlike ICAR this is a full-rank, unconstrained
+precision, so it carries no sum-to-zero constraint and is the first spatial
+effect to work under full Laplace (`latent_strategy="laplace"`). `rho` is
+validated against the open interval `(1/μ_min, 1/μ_max)` of the normalized
+adjacency's eigenvalues; `precision` (τ) is a plain number or
+`Hyperparameter`. A **fixed float** `rho` uses the existing `ScalableBlock`
+scalar-multiply path; see the
 [project README](../../../README.md#proper-car-spatial-effect).
+
+**Bounded-hyperparameter inference (ρ estimation) — shipped.** A per-parameter
+transform abstraction (`LogTransform` for positive parameters, scaled
+`LogitTransform(a, b)` for bounded ones) drives both the empirical-Bayes
+optimiser and the INLA grid, with the importance weights carrying the
+generalized Jacobian `Σ log|dθ/du|` (the log path is numerically unchanged).
+`ProperCAR` accepts `rho=Hyperparameter(..., transform="logit")`, whose
+interval is resolved from the graph at compile time, and ρ is then estimated
+and integrated over jointly with τ. Because `τ(D − ρW)` is not a scalar
+multiple of a fixed matrix, it is carried by a `ParametricBlock` that rebuilds
+the precision per hyperparameter value, coexisting with `ScalableBlock`;
+compiled families now carry `parameter_bounds`. See the
+[project README](../../../README.md#bounded-hyperparameters).
 
 Still deferred, in order:
 
-- **Bounded-hyperparameter inference (next).** A bounded, possibly-negative
-  per-parameter transform threaded through the empirical-Bayes optimiser and
-  the INLA grid. This unlocks **both** ρ estimation for `ProperCAR` **and**
-  BYM2's mixing parameter `φ ∈ [0, 1]`.
-- **BYM2 (then).** The structured-plus-unstructured convolution model:
+- **BYM2 (next).** The structured-plus-unstructured convolution model:
   a scaled-ICAR spatial component plus an unstructured IID component, mixed
   by `φ`, with PC priors recommended for both `φ` and the marginal precision
   (Riebler et al. 2016) — the natural target once bounded-hyperparameter
@@ -467,9 +475,8 @@ mathematical correctness.
   3c, and 3d, with constrained-effect full Laplace and the other 3c/3d
   follow-ups remaining);
 - spatial effects and SPDE meshes (was a non-goal of the first refactor;
-  `Besag`/ICAR and `ProperCAR` (plug-in ρ) have since shipped as their own
-  sub-slices — see section 4 above; ρ estimation, BYM2, and SPDE remain
-  deferred);
+  `Besag`/ICAR and `ProperCAR` (including ρ estimation) have since shipped as
+  their own sub-slices — see section 4 above; BYM2 and SPDE remain deferred);
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
 - a new forecasting evaluation framework.

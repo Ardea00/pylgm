@@ -25,16 +25,25 @@ class Hyperparameter:
 
     A declared ``Hyperparameter`` is estimated by type-II maximum likelihood
     (empirical Bayes) in ``LGM.fit``, optimizing over ``[lower, upper]`` starting
-    from ``initial``. The optimizer searches in log space, and the MAP penalty
-    (when a ``prior`` is declared) is evaluated on the native scale with no
-    Jacobian correction; the ``transform`` field is reserved for future use and
-    not yet wired into inference. This applies to both the exact-Gaussian and
-    Laplace engines; the estimate is reported on ``result.hyperparameters``,
-    keyed by ``name``. When ``prior`` is declared, it is added as a native-scale
-    log penalty to that objective, turning the estimate into a MAP-II estimate;
-    ``result.diagnostics`` records whether any declared hyperparameter was
-    penalized this way. Full posterior *integration* over hyperparameters
-    (marginals) remains future INLA work.
+    from ``initial``. This applies to both the exact-Gaussian and Laplace
+    engines; the estimate is reported on ``result.hyperparameters``, keyed by
+    ``name``. With ``hyperparameters="integrate"`` the posterior is integrated
+    over instead, and ``result.hyperparameter_marginals()`` reports the
+    marginals.
+
+    ``transform`` selects the unconstrained scale both the optimizer and the
+    INLA grid search in: ``"log"`` (default) for strictly positive parameters
+    such as ``sigma`` and effect precisions, and ``"logit"`` for parameters
+    confined to a bounded interval, such as a :class:`~pylgm.effects.ProperCAR`
+    ``rho`` (whose interval is resolved from the graph at compile time). Under
+    ``"logit"`` the ``initial`` value may be any finite real — including zero or
+    negative — and ``lower``/``upper`` may be left ``None`` for the effect to
+    supply. ``"identity"`` is accepted but not wired into inference.
+
+    When ``prior`` is declared, its native-scale log density is added as a
+    penalty to the objective (no Jacobian correction), turning the estimate into
+    a MAP-II estimate; ``result.diagnostics`` records whether any declared
+    hyperparameter was penalized this way.
     """
 
     name: str

@@ -43,10 +43,11 @@ AR1 effects, `result.predict(new_data)`, parameterized IR metadata,
 INLA-style hyperparameter marginals, sparse production
 engines, and HMC are deferred to later slices. The spatial (CAR) effect
 family is landing incrementally: `Besag` (intrinsic CAR/ICAR) and `ProperCAR`
-(proper CAR with a fixed, plug-in spatial-dependence parameter `ρ`) have
-shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect)
-and ["Proper CAR spatial effect"](#proper-car-spatial-effect) below); ρ
-estimation and BYM2 remain deferred. Optional PySpark input is now
+(proper CAR, with its spatial-dependence parameter `ρ` either fixed or
+estimated) have shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect),
+["Proper CAR spatial effect"](#proper-car-spatial-effect), and
+["Bounded hyperparameters"](#bounded-hyperparameters) below); BYM2 remains
+deferred. Optional PySpark input is now
 supported as a data boundary (see below). Pandas predictions in 0.3 cover
 the rows supplied to `LGM.fit`; their arrays follow the caller's original
 row order.
@@ -442,15 +443,15 @@ conditional-autoregressive spatial latent effect: precision
 effect carries **no sum-to-zero constraint**.
 
 `graph` uses the same neighbour-dict or `load_graph_file(path)` input as
-`Besag`. `rho` (ρ) is a **fixed float** in this slice — it must lie in the
-open interval `(1/μ_min, 1/μ_max)`, where `μ` are the eigenvalues of the
-normalized adjacency, for `D − ρW` to be positive definite; for a graph with
-edges the upper bound is `1`. `ρ = 0` recovers a spatially-independent,
-degree-weighted precision `τD`. An out-of-range `rho` raises a `ValueError`
-naming the valid interval. Passing a `Hyperparameter` for `rho` raises a
-directed error: **ρ estimation is not yet supported** (plug-in only this
-slice); it is planned for the bounded-hyperparameter inference slice (see
-the [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)).
+`Besag`. `rho` (ρ) must lie in the open interval `(1/μ_min, 1/μ_max)`, where
+`μ` are the eigenvalues of the normalized adjacency, for `D − ρW` to be
+positive definite; for a graph with edges the upper bound is `1`. `ρ = 0`
+recovers a spatially-independent, degree-weighted precision `τD`. An
+out-of-range `rho` raises a `ValueError` naming the valid interval.
+
+`rho` accepts either a **fixed float** (plug-in, shown below) or a declared
+`Hyperparameter`, in which case ρ is **estimated** — see
+["Estimating ρ"](#estimating-ρ).
 
 ```python
 import numpy as np
@@ -478,10 +479,66 @@ other structured effects' precisions. Because it is unconstrained,
 `latent_strategy="laplace"`** (full Laplace) — `Besag` is rejected there
 since it carries a sum-to-zero constraint.
 
-**Not yet built:** ρ estimation, BYM2, Sørbye–Rue scaling of the proper-CAR
-structure, and shapefile/GeoJSON graph construction — see the
+### Estimating ρ
+
+Passing a `Hyperparameter` for `rho` estimates the spatial dependence instead
+of fixing it. Declare it with `transform="logit"`: ρ lives on a bounded
+interval, so it is inferred on a scaled-logit scale rather than the log scale
+used for positive parameters. The interval itself is resolved **from the
+graph** at compile time — leave `lower`/`upper` as `None` and the compiler
+supplies `(1/μ_min, 1/μ_max)` — and `initial` may be any finite value inside
+it, including `0.0`.
+
+```python
+from pylgm import Fixed, Gaussian, Hyperparameter, LGM, ProperCAR
+from pylgm.priors import PCPrecision
+
+rho = Hyperparameter("region.rho", initial=0.0, transform="logit")
+tau = Hyperparameter("region.precision", initial=1.0, prior=PCPrecision(upper_sd=1.0, alpha=0.01))
+model = LGM(
+    response="y",
+    predictor=Fixed("1")
+    + ProperCAR("region", index="region", graph=graph, rho=rho, precision=tau),
+    likelihood=Gaussian(sigma=0.1),
+)
+
+eb = model.fit(frame)                                   # empirical Bayes
+eb.hyperparameters["region.rho"]                        # point estimate of rho
+
+post = model.fit(frame, hyperparameters="integrate")    # INLA over (tau, rho)
+post.hyperparameter_marginals()["region.rho"].mean      # rho marginal
+```
+
+ρ and τ are estimated (or integrated over) **jointly**. Under the hood the
+effect's precision is no longer a scalar multiple of a fixed matrix, so it is
+carried as a parametric block that rebuilds `τ(D − ρW)` at each hyperparameter
+value; see ["Bounded hyperparameters"](#bounded-hyperparameters).
+
+**Not yet built:** BYM2, Sørbye–Rue scaling of the proper-CAR structure, and
+shapefile/GeoJSON graph construction — see the
 [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
 for what's next.
+
+## Bounded hyperparameters
+
+Hyperparameter inference runs on an unconstrained internal scale chosen per
+parameter by its `transform`:
+
+| `transform` | Natural domain | Used for |
+| --- | --- | --- |
+| `"log"` (default) | `θ > 0` | `sigma`, effect precisions (τ) |
+| `"logit"` | a bounded interval `(a, b)` | `ProperCAR` `rho` |
+| `"identity"` | — | accepted, but **not** wired into inference |
+
+Both the empirical-Bayes optimizer and the INLA grid work in this internal
+space, and the INLA importance weights carry the corresponding Jacobian
+`Σ log|dθ/du|`. For log-scale parameters this is exactly the previous
+behaviour, so existing models are unaffected; the abstraction is what makes a
+bounded parameter such as ρ estimable at all.
+
+A `"logit"` hyperparameter may declare any finite `initial` (zero or negative
+included) and may leave `lower`/`upper` as `None`, letting the effect supply
+the interval — which is how `ProperCAR` passes its graph-derived range for ρ.
 
 ## Development installation
 
