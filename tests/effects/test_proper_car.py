@@ -69,3 +69,17 @@ def test_isolated_node_raises():
 def test_observed_region_absent_from_graph_raises():
     with pytest.raises(ValueError, match="not in the graph"):
         build_proper_car(_frame(["A", "B", "Z"]), "region", "region", PATH, 0.5, 1.0)
+
+
+def test_boundary_rho_rejected_on_bipartite_graph():
+    # A 6-node path is bipartite: mu_max = +1, mu_min = -1, so BOTH rho = +1 and
+    # rho = -1 are the singular boundary and must raise (not admitted via the
+    # float round-off of 1/mu). Guards against the P3-only rounding-luck case.
+    path6 = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= 5] for i in range(6)}
+    frame = _frame([str(i) for i in range(6)])
+    for rho in (1.0, -1.0):
+        with pytest.raises(ValueError, match=r"rho must lie in"):
+            build_proper_car(frame, "region", "region", path6, rho, 1.0)
+    # ...but rho just inside the boundary is accepted and positive definite.
+    block = build_proper_car(frame, "region", "region", path6, 0.99, 1.0)
+    cho_factor(block.precision.toarray())
