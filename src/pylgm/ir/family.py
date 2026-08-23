@@ -79,6 +79,46 @@ class ScalableBlock:
         object.__setattr__(self, "scale", _ordinary_positive(scale, "block scale"))
 
 
+@dataclass(frozen=True, init=False)
+class ParametricBlock:
+    """A latent block whose precision is an arbitrary function of hyperparameters."""
+
+    block: LatentBlock
+    parameters: tuple[str, ...]
+    build: Callable[[Mapping[str, float]], csr_matrix]
+
+    def __init__(
+        self,
+        block: LatentBlock,
+        parameters: tuple[str, ...],
+        build: Callable[[Mapping[str, float]], csr_matrix],
+    ) -> None:
+        if not isinstance(block, LatentBlock):
+            raise ModelValidationError("parametric block must contain a latent block")
+        names = tuple(parameters)
+        if not names or any(not isinstance(n, str) or not n for n in names):
+            raise ModelValidationError("parametric block parameters must be non-empty strings")
+        if not callable(build):
+            raise ModelValidationError("parametric block build must be callable")
+        object.__setattr__(self, "block", block)
+        object.__setattr__(self, "parameters", names)
+        object.__setattr__(self, "build", build)
+
+    def materialize(self, resolved: Mapping[str, float]) -> LatentBlock:
+        precision = self.build(resolved)
+        if not np.isfinite(precision.data).all():
+            raise NumericalError(
+                f"parametric precision for block {self.block.name!r} must remain finite"
+            )
+        return LatentBlock(
+            self.block.name,
+            self.block.labels,
+            self.block.design,
+            precision,
+            self.block.constraints,
+        )
+
+
 def _qualified_labels(blocks: tuple[LatentBlock, ...]) -> tuple[str, ...]:
     labels = tuple(
         f"{block.name}:{label}" for block in blocks for label in block.labels
@@ -89,10 +129,13 @@ def _qualified_labels(blocks: tuple[LatentBlock, ...]) -> tuple[str, ...]:
 
 
 def _materialize_blocks(
-    blocks: tuple[ScalableBlock, ...], resolved: Mapping[str, float]
+    blocks: tuple[ScalableBlock | ParametricBlock, ...], resolved: Mapping[str, float]
 ) -> tuple[LatentBlock, ...]:
     materialized: list[LatentBlock] = []
     for item in blocks:
+        if isinstance(item, ParametricBlock):
+            materialized.append(item.materialize(resolved))
+            continue
         multiplier = resolved[item.parameter] if item.parameter else item.scale
         with np.errstate(over="ignore", invalid="ignore"):
             precision = item.block.precision * multiplier
@@ -162,18 +205,20 @@ class CompiledGaussianFamily:
     _y: np.ndarray = field(repr=False)
     _observed: np.ndarray = field(repr=False)
     _offset: np.ndarray = field(repr=False)
-    blocks: tuple[ScalableBlock, ...]
+    blocks: tuple[ScalableBlock | ParametricBlock, ...]
     parameter_names: tuple[str, ...]
     initial: Hyperparameters
+    parameter_bounds: Mapping[str, object]
 
     def __init__(
         self,
         y: np.ndarray,
         observed: np.ndarray,
         offset: np.ndarray,
-        blocks: tuple[ScalableBlock, ...],
+        blocks: tuple[ScalableBlock | ParametricBlock, ...],
         parameter_names: tuple[str, ...],
         initial: Hyperparameters,
+        parameter_bounds: Mapping[str, object] = MappingProxyType({}),
     ) -> None:
         y_value = np.asarray(y)
         observed_value = np.asarray(observed)
@@ -202,8 +247,8 @@ class CompiledGaussianFamily:
             names = tuple(parameter_names)
         except TypeError as error:
             raise ModelValidationError("family blocks and parameter names must be iterable") from error
-        if any(not isinstance(item, ScalableBlock) for item in block_values):
-            raise ModelValidationError("family blocks must be scalable blocks")
+        if any(not isinstance(item, (ScalableBlock, ParametricBlock)) for item in block_values):
+            raise ModelValidationError("family blocks must be scalable or parametric blocks")
         if any(item.block.design.shape[0] != y_value.size for item in block_values):
             raise ModelValidationError("family block design rows must match the response")
         block_names = [item.block.name for item in block_values]
@@ -216,11 +261,21 @@ class CompiledGaussianFamily:
         if not isinstance(initial, Hyperparameters):
             raise ModelValidationError("family initial values must be hyperparameters")
         bindings = tuple(
-            item.parameter for item in block_values if item.parameter is not None
+            item.parameter
+            for item in block_values
+            if isinstance(item, ScalableBlock) and item.parameter is not None
         )
         if len(bindings) != len(set(bindings)):
             raise ModelValidationError("scalable block parameters must be unique")
+        parametric_names: set[str] = set()
         for item in block_values:
+            if isinstance(item, ParametricBlock):
+                if not set(item.parameters) <= set(names):
+                    raise ModelValidationError(
+                        "parametric block parameters must appear in parameter_names"
+                    )
+                parametric_names.update(item.parameters)
+                continue
             if item.parameter is None:
                 continue
             expected = f"{item.block.name}.precision"
@@ -232,7 +287,7 @@ class CompiledGaussianFamily:
                 raise ModelValidationError(
                     "bound scalable blocks require an initial configured precision"
                 )
-        expected_names = set(bindings)
+        expected_names = set(bindings) | parametric_names
         if "sigma" in names:
             expected_names.add("sigma")
         if set(names) != expected_names:
@@ -245,6 +300,7 @@ class CompiledGaussianFamily:
         object.__setattr__(self, "blocks", block_values)
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "initial", initial)
+        object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
 
     @property
     def y(self) -> np.ndarray:
@@ -289,18 +345,20 @@ class CompiledFamily:
     _y: np.ndarray = field(repr=False)
     _observed: np.ndarray = field(repr=False)
     _offset: np.ndarray = field(repr=False)
-    blocks: tuple[ScalableBlock, ...]
+    blocks: tuple[ScalableBlock | ParametricBlock, ...]
     parameter_names: tuple[str, ...]
     likelihood_factory: Callable[[Mapping[str, float]], object] = field(repr=False)
+    parameter_bounds: Mapping[str, object]
 
     def __init__(
         self,
         y: np.ndarray,
         observed: np.ndarray,
         offset: np.ndarray,
-        blocks: tuple[ScalableBlock, ...],
+        blocks: tuple[ScalableBlock | ParametricBlock, ...],
         parameter_names: tuple[str, ...],
         likelihood_factory: Callable[[Mapping[str, float]], object],
+        parameter_bounds: Mapping[str, object] = MappingProxyType({}),
     ) -> None:
         y_value = np.asarray(y)
         observed_value = np.asarray(observed)
@@ -320,8 +378,8 @@ class CompiledFamily:
             raise ModelValidationError("family arrays must have equal row counts")
         block_values = tuple(blocks)
         names = tuple(parameter_names)
-        if any(not isinstance(item, ScalableBlock) for item in block_values):
-            raise ModelValidationError("family blocks must be scalable blocks")
+        if any(not isinstance(item, (ScalableBlock, ParametricBlock)) for item in block_values):
+            raise ModelValidationError("family blocks must be scalable or parametric blocks")
         if any(item.block.design.shape[0] != y_value.size for item in block_values):
             raise ModelValidationError("family block design rows must match the response")
         block_names = [item.block.name for item in block_values]
@@ -331,13 +389,22 @@ class CompiledFamily:
             raise ModelValidationError("parameter names must be non-empty strings")
         if len(names) != len(set(names)):
             raise ModelValidationError("parameter names must be unique")
-        bound = tuple(item.parameter for item in block_values if item.parameter is not None)
+        bound = tuple(
+            item.parameter
+            for item in block_values
+            if isinstance(item, ScalableBlock) and item.parameter is not None
+        )
         if len(bound) != len(set(bound)):
             raise ModelValidationError("scalable block parameters must be unique")
         for parameter in bound:
             if parameter not in names:
                 raise ModelValidationError(
                     f"bound block parameter {parameter!r} must appear in parameter_names"
+                )
+        for item in block_values:
+            if isinstance(item, ParametricBlock) and not set(item.parameters) <= set(names):
+                raise ModelValidationError(
+                    "parametric block parameters must appear in parameter_names"
                 )
         if not callable(likelihood_factory):
             raise ModelValidationError("likelihood_factory must be callable")
@@ -347,6 +414,7 @@ class CompiledFamily:
         object.__setattr__(self, "blocks", block_values)
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "likelihood_factory", likelihood_factory)
+        object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(values, self.parameter_names)
