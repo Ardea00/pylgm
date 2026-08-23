@@ -53,3 +53,26 @@ def test_spark_fit_row_limit_raises_before_fitting(spark):
         model.fit(
             spark.createDataFrame(rows, ["region", "time", "y"]), max_driver_rows=1
         )
+
+
+def test_spark_fit_result_can_predict(spark):
+    # _fit_spark wires the prediction context on its own branches; without a
+    # test, a regression there would only surface for Spark users.
+    rows = [("B", 2, 4.0, 8.0), ("A", 1, 1.0, 2.0), ("B", 1, 3.0, 6.0), ("A", 2, 2.0, 4.0)]
+    columns = ["region", "time", "x", "y"]
+    model = LGM(
+        "y",
+        Gaussian(1.0),
+        Fixed("0 + x", prior_precision=1.0),
+        panel=("region",),
+        time="time",
+    )
+    result = model.fit(spark.createDataFrame(rows, columns))
+    assert result.prediction_context is not None
+
+    # A Spark fit reports rows in canonical (sorted) order, not input order,
+    # so predict on the canonically-sorted frame to compare row-for-row.
+    frame = pd.DataFrame(rows, columns=columns).sort_values(["region", "time"])
+    prediction = result.predict(frame)
+    assert np.allclose(prediction.predictive_mean, result.predictive_mean)
+    assert np.allclose(prediction.predictive_variance, result.predictive_variance)
