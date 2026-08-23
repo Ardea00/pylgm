@@ -11,6 +11,7 @@ from pylgm.likelihoods import CompiledGaussian
 from pylgm.inference import fit_gaussian
 from pylgm.optimization.empirical_bayes import OptimizationBounds
 from pylgm.optimization.inla import _build_grid, _finite_difference_hessian, integrate_inla
+from pylgm.optimization.transforms import LogitTransform, LogTransform
 
 
 def test_finite_difference_hessian_recovers_quadratic():
@@ -131,3 +132,62 @@ def test_integrate_inla_produces_a_hyperparameter_distribution():
     assert result.diagnostics["inla_grid_points"] >= 3
     assert result.hyperparameter_marginals()["p"].variance[0] > 0.0
     assert result.hyperparameter_marginals()["p"].mean[0] > 0.0
+
+
+def test_integrate_inla_with_explicit_log_transform_matches_default():
+    # Back-compat: an all-LogTransform model must integrate identically whether
+    # the transform is left at its OptimizationBounds default or passed
+    # explicitly -- the Jacobian generalization is a no-op for LogTransform.
+    family = _one_hyperparameter_family()
+    default_bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+    explicit_bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2, transform=LogTransform())}
+    result_default = integrate_inla(family, default_bounds, fit=fit_gaussian, radius=6)
+    result_explicit = integrate_inla(family, explicit_bounds, fit=fit_gaussian, radius=6)
+    np.testing.assert_allclose(result_default.mean, result_explicit.mean)
+    np.testing.assert_allclose(result_default.covariance, result_explicit.covariance)
+    np.testing.assert_allclose(
+        result_default.log_marginal_likelihood, result_explicit.log_marginal_likelihood
+    )
+
+
+def test_integrate_inla_with_logit_transform_matches_fine_1d_quadrature():
+    # A bounded (LogitTransform) hyperparameter's integrated *hyperparameter*
+    # marginal (mean/variance of theta itself) must match a direct trapezoidal-
+    # style quadrature over theta (uniform prior on theta, so the brute-force
+    # reference needs no Jacobian -- its weight is exp(s(theta)) directly).
+    #
+    # The transform is centred so the empirical-Bayes mode lands near u=0,
+    # where d(log_abs_jacobian)/du ~ 0 while d(sum(u))/du = 1 -- the two
+    # weightings diverge sharply there, so a wrong Jacobian (e.g. still
+    # summing u instead of transform.log_abs_jacobian(u)) is caught with a
+    # large margin (observed: correct Jacobian mean/var within ~1e-4 of the
+    # brute-force reference; sum(u) instead is off by 0.33 / 0.09).
+    family = _one_hyperparameter_family()
+    lower, upper = 0.05, 2.15
+    # LogitTransform.contains is the open interval, so its own domain must be
+    # strictly wider than the [lower, upper] optimization bounds.
+    transform = LogitTransform(0.01, 2.2)
+    bounds = {"p": OptimizationBounds(1.0, lower, upper, transform=transform)}
+    # grid_step/radius/log_density_drop wide enough that the u-grid spans the
+    # full internal-space domain (the whitened grid step is grid_step/sqrt(-H),
+    # so a narrow default radius would truncate the domain well before its
+    # boundary and bias the reference comparison for reasons unrelated to the
+    # Jacobian).
+    result = integrate_inla(
+        family, bounds, fit=fit_gaussian, grid_step=1.0, radius=12, log_density_drop=10.0,
+    )
+
+    # independent fine 1-D quadrature directly over theta (natural scale)
+    thetas = np.linspace(lower, upper, 4001)
+    logw = np.array([
+        float(fit_gaussian(family.materialize({"p": float(theta)})).log_marginal_likelihood)
+        for theta in thetas
+    ])  # uniform prior on theta: no Jacobian needed
+    w = np.exp(logw - logsumexp(logw))
+    ref_mean = float(np.sum(w * thetas))
+    ref_var = float(np.sum(w * thetas ** 2) - ref_mean ** 2)
+
+    hyper = result.hyperparameter_marginals()["p"]
+    np.testing.assert_allclose(hyper.mean[0], ref_mean, atol=1e-2)
+    np.testing.assert_allclose(hyper.variance[0], ref_var, atol=1e-2)
+    assert result.diagnostics["inla_grid_points"] >= 3

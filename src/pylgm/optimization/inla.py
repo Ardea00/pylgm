@@ -248,12 +248,13 @@ def integrate_inla(
 ) -> INLAResult:
     names = tuple(family.parameter_names)
     conditional_fit = fit if fit is not None else fit_gaussian
+    transforms = [bounds[name].transform for name in names]
     lower = np.array([bounds[name].lower for name in names])
     upper = np.array([bounds[name].upper for name in names])
 
     def evaluate(u):
         theta = {
-            name: float(np.clip(np.exp(value), lower[i], upper[i]))
+            name: float(np.clip(transforms[i].from_internal(value), lower[i], upper[i]))
             for i, (name, value) in enumerate(zip(names, u, strict=True))
         }
         compiled = family.materialize(theta)
@@ -270,18 +271,21 @@ def integrate_inla(
         family, bounds, initial=initial, fit=conditional_fit, penalty=penalty,
         allow_large_dense=allow_large_dense,
     )
-    u_star = np.array([np.log(eb.parameters[name]) for name in names])
+    u_star = np.array(
+        [transforms[i].to_internal(eb.parameters[name]) for i, name in enumerate(names)]
+    )
     hessian = _finite_difference_hessian(lambda u: evaluate(u)[0], u_star)
     grid = _build_grid(
         u_star, hessian, grid_step=grid_step, radius=radius, max_grid_points=max_grid_points,
     )
-    # A grid point whose raw log-theta lands outside the declared [lower, upper] domain
+    # A grid point whose raw internal-u lands outside the declared [lower, upper] domain
     # gets clipped to the same boundary theta as its neighbours: dθ/du is zero there, so
     # its correct Jacobian contribution is zero too. Including it with the raw `u` as if
     # the mapping stayed invertible double-counts (and, as radius grows, exponentially
     # over-weights) the boundary — drop such points before weighting instead.
-    log_lower, log_upper = np.log(lower), np.log(upper)
-    in_domain = grid[np.all((grid >= log_lower) & (grid <= log_upper), axis=1)]
+    internal_lower = np.array([transforms[i].to_internal(lower[i]) for i in range(len(names))])
+    internal_upper = np.array([transforms[i].to_internal(upper[i]) for i in range(len(names))])
+    in_domain = grid[np.all((grid >= internal_lower) & (grid <= internal_upper), axis=1)]
     if in_domain.size == 0:
         in_domain = u_star.reshape(1, -1)
     grid = in_domain
@@ -295,7 +299,11 @@ def integrate_inla(
     if not kept:
         raise NumericalError("INLA grid retained no points above the density threshold")
 
-    log_weights = np.array([s + float(np.sum(u)) for (u, s, _, _, _) in kept])
+    # importance-weight Jacobian: log|d theta / d u| summed over parameters
+    log_weights = np.array([
+        s + float(sum(transforms[i].log_abs_jacobian(u[i]) for i in range(len(names))))
+        for (u, s, _, _, _) in kept
+    ])
     weights = np.exp(log_weights - logsumexp(log_weights))
 
     reference = kept[0][2]
