@@ -42,9 +42,11 @@ hyperparameter inference.
 AR1 effects, `result.predict(new_data)`, parameterized IR metadata,
 INLA-style hyperparameter marginals, sparse production
 engines, and HMC are deferred to later slices. The spatial (CAR) effect
-family is landing incrementally: `Besag` (intrinsic CAR/ICAR) has shipped
-(see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect)
-below); proper CAR and BYM2 remain deferred. Optional PySpark input is now
+family is landing incrementally: `Besag` (intrinsic CAR/ICAR) and `ProperCAR`
+(proper CAR with a fixed, plug-in spatial-dependence parameter `ρ`) have
+shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](#besag--intrinsic-car-icar-spatial-effect)
+and ["Proper CAR spatial effect"](#proper-car-spatial-effect) below); ρ
+estimation and BYM2 remain deferred. Optional PySpark input is now
 supported as a data boundary (see below). Pandas predictions in 0.3 cover
 the rows supplied to `LGM.fit`; their arrays follow the caller's original
 row order.
@@ -425,11 +427,60 @@ Because it is a constrained effect (like `RW1`/`RW2`), `latent_strategy="laplace
 (full Laplace) rejects it with `UnsupportedEngineError`, the same restriction
 already documented above for `RW`/intrinsic effects.
 
-**Not yet built:** proper CAR (a spatial-dependence hyperparameter `ρ`,
-unconstrained), BYM2, spatial autocorrelation diagnostics, PC-priors for
+**Not yet built:** BYM2, spatial autocorrelation diagnostics, PC-priors for
 spatial hyperparameters, and shapefile/GeoJSON graph construction. The YAML
 `ModelConfig` frontend also does not yet have a `besag` effect type — see
 the [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
+for what's next.
+
+## Proper CAR spatial effect
+
+`ProperCAR(name, index, graph, rho, precision=1.0)` declares a proper
+conditional-autoregressive spatial latent effect: precision
+`Q = τ·(D − ρW)`, where `D` is the degree matrix and `W` the adjacency of
+`graph`. Unlike `Besag`/ICAR, this precision is full-rank (proper), so the
+effect carries **no sum-to-zero constraint**.
+
+`graph` uses the same neighbour-dict or `load_graph_file(path)` input as
+`Besag`. `rho` (ρ) is a **fixed float** in this slice — it must lie in the
+open interval `(1/μ_min, 1/μ_max)`, where `μ` are the eigenvalues of the
+normalized adjacency, for `D − ρW` to be positive definite; for a graph with
+edges the upper bound is `1`. `ρ = 0` recovers a spatially-independent,
+degree-weighted precision `τD`. An out-of-range `rho` raises a `ValueError`
+naming the valid interval. Passing a `Hyperparameter` for `rho` raises a
+directed error: **ρ estimation is not yet supported** (plug-in only this
+slice); it is planned for the bounded-hyperparameter inference slice (see
+the [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)).
+
+```python
+import numpy as np
+import pandas as pd
+
+from pylgm import Fixed, Gaussian, LGM, ProperCAR
+
+# The same small connected chain graph over regions "0".."5" used above.
+graph = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= 5] for i in range(6)}
+
+frame = pd.DataFrame({"region": [str(i) for i in range(6)], "y": np.sin(np.arange(6) / 2.0)})
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + ProperCAR("region", index="region", graph=graph, rho=0.9),
+    likelihood=Gaussian(sigma=0.1),
+)
+result = model.fit(frame)
+result.latent_marginals("region").mean  # posterior mean over the 6 regions
+```
+
+`precision` (τ) accepts a plain number or a declared `Hyperparameter`, and
+participates in `hyperparameters="optimize"`/`"integrate"` exactly like the
+other structured effects' precisions. Because it is unconstrained,
+`ProperCAR` is the **first spatial effect to work under
+`latent_strategy="laplace"`** (full Laplace) — `Besag` is rejected there
+since it carries a sum-to-zero constraint.
+
+**Not yet built:** ρ estimation, BYM2, Sørbye–Rue scaling of the proper-CAR
+structure, and shapefile/GeoJSON graph construction — see the
+[spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
 for what's next.
 
 ## Development installation

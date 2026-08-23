@@ -211,8 +211,9 @@ since shipped for this engine as well, the same way as for exact Gaussian
 - other latent-strategy refinements for INLA integration (sections 3c/3d
   below; the simplified-Laplace and unconstrained full-Laplace strategies
   have since shipped);
-- spatial effects (the `Besag`/ICAR slice has since shipped under this
-  engine too — see section 4 below; proper CAR and BYM2 remain deferred).
+- spatial effects (the `Besag`/ICAR and `ProperCAR` plug-in-ρ slices have
+  since shipped under this engine too — see section 4 below; ρ estimation
+  and BYM2 remain deferred).
 
 ### 3. INLA-style inference
 
@@ -327,17 +328,28 @@ it with `UnsupportedEngineError` since it is a constrained effect, the same
 as `RW1`/`RW2`. See the
 [project README](../../../README.md#besag--intrinsic-car-icar-spatial-effect).
 
+**Proper CAR (plug-in ρ) — shipped.** `ProperCAR(name, index, graph, rho,
+precision=1.0)` declares `Q = τ·(D − ρW)`: unlike ICAR this is a full-rank,
+unconstrained precision, so it carries no sum-to-zero constraint and is the
+first spatial effect to work under full Laplace (`latent_strategy="laplace"`).
+`rho` is a **fixed float** this slice, validated against the open interval
+`(1/μ_min, 1/μ_max)` of the normalized adjacency's eigenvalues; `precision`
+(τ) is a plain number or `Hyperparameter`, participating in
+`optimize`/`integrate` via the existing `ScalableBlock` scalar-multiply path
+(no family-layer changes needed). See the
+[project README](../../../README.md#proper-car-spatial-effect).
+
 Still deferred, in order:
 
-- **Proper CAR (next).** `Q = τ·(D − ρW)`, adding a spatial-dependence
-  hyperparameter `ρ` (typically constrained to keep `Q` positive definite);
-  unlike ICAR this is a full-rank, unconstrained precision, so it does not
-  need the sum-to-zero constraint machinery `Besag` uses.
+- **Bounded-hyperparameter inference (next).** A bounded, possibly-negative
+  per-parameter transform threaded through the empirical-Bayes optimiser and
+  the INLA grid. This unlocks **both** ρ estimation for `ProperCAR` **and**
+  BYM2's mixing parameter `φ ∈ [0, 1]`.
 - **BYM2 (then).** The structured-plus-unstructured convolution model:
   a scaled-ICAR spatial component plus an unstructured IID component, mixed
-  by a `φ ∈ [0, 1]` hyperparameter, with PC priors recommended for both `φ`
-  and the marginal precision (Riebler et al. 2016) — the natural target once
-  proper CAR is in place, completing the CAR family.
+  by `φ`, with PC priors recommended for both `φ` and the marginal precision
+  (Riebler et al. 2016) — the natural target once bounded-hyperparameter
+  inference lands, completing the CAR family.
 - **Graph construction through either data adapter** — `load_graph_file` and
   the neighbour-dict input both go through the Pandas-side compiler only;
   a PySpark-side path is not built.
@@ -455,8 +467,9 @@ mathematical correctness.
   3c, and 3d, with constrained-effect full Laplace and the other 3c/3d
   follow-ups remaining);
 - spatial effects and SPDE meshes (was a non-goal of the first refactor;
-  `Besag`/ICAR has since shipped as its own sub-slice — see section 4 above;
-  proper CAR, BYM2, and SPDE remain deferred);
+  `Besag`/ICAR and `ProperCAR` (plug-in ρ) have since shipped as their own
+  sub-slices — see section 4 above; ρ estimation, BYM2, and SPDE remain
+  deferred);
 - HMC-Laplace;
 - distributed sparse factorization on Spark executors;
 - a new forecasting evaluation framework.
