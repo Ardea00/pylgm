@@ -64,7 +64,7 @@ def _validate_parameter_mapping(
         value = _ordinary_finite(values[name], label)
         if not transform.contains(value):
             raise ModelValidationError(
-                f"{label} must lie in the domain of its transform; got {value}"
+                f"{label} must lie in {transform.domain_description()}; got {value}"
             )
         result[name] = value
     return result

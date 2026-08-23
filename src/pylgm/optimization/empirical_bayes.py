@@ -46,8 +46,8 @@ class OptimizationBounds:
         upper = _ordinary_number(self.upper, "upper")
         if not self.transform.contains(lower) or not self.transform.contains(upper):
             raise ValueError(
-                "lower and upper must be an ordinary finite positive number "
-                "within the transform's natural domain"
+                "lower and upper must be finite numbers within "
+                f"{self.transform.domain_description()}"
             )
         if lower >= upper or not lower <= initial <= upper:
             raise ValueError(

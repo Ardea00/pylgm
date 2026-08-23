@@ -313,6 +313,12 @@ def _log_bounds(hp: Hyperparameter) -> OptimizationBounds:
     ``model.py`` used to build directly (default transform is already
     ``LogTransform``), so existing optimise/integrate behaviour is unchanged.
     """
+    if hp.transform == "logit":
+        raise CompilationError(
+            f"hyperparameter {hp.name!r} declares transform='logit' but is not attached "
+            "to an effect that supplies a bounded interval; only a proper CAR rho "
+            "resolves its interval (from the graph)"
+        )
     return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=LogTransform())
 
 
@@ -366,10 +372,24 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             nodes, w = normalize_graph(dict(effect.graph))
             degree = np.asarray(w.sum(axis=1)).ravel()
             a, b = car_rho_interval(dict(effect.graph))
+            if effect.rho.transform != "logit":
+                # A log-transform rho would silently inherit positive-only default
+                # bounds and be confined to a wrong, one-sided interval.
+                raise CompilationError(
+                    f"proper CAR rho {effect.rho.name!r} must be declared with "
+                    f"transform='logit' (its interval ({a:.6g}, {b:.6g}) is resolved "
+                    f"from the graph); got transform={effect.rho.transform!r}"
+                )
             inset = 1e-6 * (b - a)
             rho_lower = a + inset if effect.rho.lower is None else max(effect.rho.lower, a + inset)
             rho_upper = b - inset if effect.rho.upper is None else min(effect.rho.upper, b - inset)
-            rho_initial = float(np.clip(effect.rho.initial, rho_lower, rho_upper))
+            if not rho_lower <= effect.rho.initial <= rho_upper:
+                raise CompilationError(
+                    f"initial value for proper CAR rho {effect.rho.name!r} must lie in "
+                    f"({a:.6g}, {b:.6g}), the graph's positive-definiteness interval; "
+                    f"got {effect.rho.initial}"
+                )
+            rho_initial = float(effect.rho.initial)
             template = build_proper_car(
                 frame, effect.name, effect.index, dict(effect.graph),
                 rho_initial, value if not optimized else 1.0,

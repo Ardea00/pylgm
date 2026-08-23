@@ -14,6 +14,7 @@ class Transform(Protocol):
     def from_internal(self, u: float) -> float: ...
     def log_abs_jacobian(self, u: float) -> float: ...  # log|d theta / d u|
     def contains(self, theta: float) -> bool: ...
+    def domain_description(self) -> str: ...  # human-readable natural domain
 
 
 class LogTransform:
@@ -30,6 +31,9 @@ class LogTransform:
 
     def contains(self, theta: float) -> bool:
         return np.isfinite(theta) and theta > 0.0
+
+    def domain_description(self) -> str:
+        return "the positive reals"
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, LogTransform)
@@ -64,6 +68,9 @@ class LogitTransform:
 
     def contains(self, theta: float) -> bool:
         return np.isfinite(theta) and self.lower < theta < self.upper
+
+    def domain_description(self) -> str:
+        return f"the open interval ({self.lower:.6g}, {self.upper:.6g})"
 
     def __eq__(self, other: object) -> bool:
         return (

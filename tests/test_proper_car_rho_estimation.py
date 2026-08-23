@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from pylgm import Fixed, Gaussian, Hyperparameter, LGM, ProperCAR
 from pylgm.priors import PCPrecision
@@ -66,3 +67,30 @@ def test_plugin_rho_still_works():
                 predictor=Fixed("1") + ProperCAR("region", index="region", graph=_chain(12), rho=0.9),
                 likelihood=Gaussian(sigma=0.1))
     assert model.fit(frame) is not None
+
+
+def test_rho_hyperparameter_requires_logit_transform():
+    # A log-transform rho would silently inherit positive-only default bounds
+    # (initial*1e-3 .. initial*1e3), confining rho to a wrong one-sided interval
+    # and returning an estimate pinned at that artificial bound. Reject it.
+    from pylgm.exceptions import CompilationError
+
+    rho = Hyperparameter("region.rho", initial=0.5)  # transform defaults to "log"
+    model = LGM(response="y",
+                predictor=Fixed("1")
+                + ProperCAR("region", index="region", graph=_chain(12), rho=rho),
+                likelihood=Gaussian(sigma=0.1))
+    with pytest.raises(CompilationError, match="transform='logit'"):
+        model.fit(_spatial_frame())
+
+
+def test_rho_initial_outside_graph_interval_names_the_interval():
+    from pylgm.exceptions import CompilationError
+
+    rho = Hyperparameter("region.rho", initial=5.0, transform="logit")
+    model = LGM(response="y",
+                predictor=Fixed("1")
+                + ProperCAR("region", index="region", graph=_chain(12), rho=rho),
+                likelihood=Gaussian(sigma=0.1))
+    with pytest.raises(CompilationError, match="positive-definiteness interval"):
+        model.fit(_spatial_frame())

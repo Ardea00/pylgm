@@ -528,7 +528,7 @@ parameter by its `transform`:
 | --- | --- | --- |
 | `"log"` (default) | `θ > 0` | `sigma`, effect precisions (τ) |
 | `"logit"` | a bounded interval `(a, b)` | `ProperCAR` `rho` |
-| `"identity"` | — | accepted, but **not** wired into inference |
+| `"identity"` | `θ > 0` | accepted, but **not** wired into inference (treated as `log`) |
 
 Both the empirical-Bayes optimizer and the INLA grid work in this internal
 space, and the INLA importance weights carry the corresponding Jacobian

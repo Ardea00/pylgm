@@ -661,7 +661,6 @@ def test_returned_fit_equals_a_rematerialized_optimum() -> None:
     [
         (True, 0.1, 2.0),
         (np.float64(1.0), 0.1, 2.0),
-        (1.0, 0.0, 2.0),
         (1.0, 0.1, np.inf),
         (1.0, 0.1, np.nan),
         (10**1000, 0.1, 2.0),
@@ -672,6 +671,15 @@ def test_bounds_require_ordinary_finite_positive_numbers(
 ) -> None:
     with pytest.raises(ValueError, match="ordinary finite positive"):
         OptimizationBounds(*values)  # type: ignore[arg-type]
+
+
+def test_bounds_outside_the_transform_domain_name_that_domain() -> None:
+    # A well-formed number outside the transform's natural domain is a domain
+    # error, and the message names the domain rather than assuming positivity.
+    with pytest.raises(ValueError, match="the positive reals"):
+        OptimizationBounds(1.0, 0.0, 2.0)
+    with pytest.raises(ValueError, match=r"the open interval \(-1, 1\)"):
+        OptimizationBounds(0.0, -2.0, 0.5, transform=LogitTransform(-1.0, 1.0))
 
 
 @pytest.mark.parametrize("values", [(0.5, 1.0, 2.0), (3.0, 1.0, 2.0), (1.0, 1.0, 1.0)])
