@@ -209,8 +209,9 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 precisions[effect.name] = precision
             elif isinstance(effect, ProperCAR):
                 precision = _resolved_precision(effect.precision)
+                rho = _resolved_precision(effect.rho)
                 block = build_proper_car(
-                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, precision
+                    frame, effect.name, effect.index, dict(effect.graph), rho, precision
                 )
                 precisions[effect.name] = precision
             elif isinstance(effect, BYM2):

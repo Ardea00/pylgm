@@ -476,6 +476,7 @@ class GaussianResult:
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
     _hyperparameters: Mapping[str, float] | None = field(repr=False)
+    _prediction_context: object | None = field(repr=False)
 
     def __init__(
         self,
@@ -490,6 +491,7 @@ class GaussianResult:
         prediction_keys: pd.DataFrame | None = None,
         *,
         hyperparameters: Mapping[str, float] | None = None,
+        prediction_context: object | None = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -525,6 +527,7 @@ class GaussianResult:
         object.__setattr__(
             self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
         )
+        object.__setattr__(self, "_prediction_context", prediction_context)
 
     @property
     def mean(self) -> np.ndarray:
@@ -553,6 +556,10 @@ class GaussianResult:
         return self._hyperparameters
 
     @property
+    def prediction_context(self) -> object | None:
+        return self._prediction_context
+
+    @property
     def engine(self) -> str:
         return "exact_gaussian"
 
@@ -568,6 +575,17 @@ class GaussianResult:
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
         return linear_combinations_from(self._mean, self._covariance, weights)
+
+    def predict(self, new_data):
+        """Score new rows with the fitted latent posterior."""
+        from pylgm.inference.prediction import predict_from
+
+        if self.prediction_context is None:
+            raise ValueError(
+                "this result carries no prediction context; predict() is available "
+                "on results produced by LGM.fit"
+            )
+        return predict_from(self.prediction_context, self.mean, self.covariance, new_data)
 
 
 @dataclass(frozen=True, init=False)
@@ -659,6 +677,7 @@ class LaplaceResult:
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
     _hyperparameters: Mapping[str, float] | None = field(repr=False)
+    _prediction_context: object | None = field(repr=False)
 
     def __init__(
         self,
@@ -675,6 +694,7 @@ class LaplaceResult:
         prediction_keys: pd.DataFrame | None = None,
         *,
         hyperparameters: Mapping[str, float] | None = None,
+        prediction_context: object | None = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -712,6 +732,7 @@ class LaplaceResult:
         object.__setattr__(
             self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
         )
+        object.__setattr__(self, "_prediction_context", prediction_context)
 
     @property
     def mean(self) -> np.ndarray:
@@ -745,6 +766,10 @@ class LaplaceResult:
         return self._hyperparameters
 
     @property
+    def prediction_context(self) -> object | None:
+        return self._prediction_context
+
+    @property
     def engine(self) -> str:
         return "laplace"
 
@@ -760,6 +785,17 @@ class LaplaceResult:
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
         return linear_combinations_from(self._mean, self._covariance, weights)
+
+    def predict(self, new_data):
+        """Score new rows with the fitted latent posterior."""
+        from pylgm.inference.prediction import predict_from
+
+        if self.prediction_context is None:
+            raise ValueError(
+                "this result carries no prediction context; predict() is available "
+                "on results produced by LGM.fit"
+            )
+        return predict_from(self.prediction_context, self.mean, self.covariance, new_data)
 
 
 def _readonly_hyperparameter_marginals(
@@ -794,6 +830,7 @@ class INLAResult:
     diagnostics: Mapping[str, object]
     _hyperparameters: Mapping[str, float] | None = field(repr=False)
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
+    _prediction_context: object | None = field(repr=False)
 
     def __init__(
         self,
@@ -813,6 +850,7 @@ class INLAResult:
         prediction_keys: pd.DataFrame | None = None,
         hyperparameters: Mapping[str, float] | None = None,
         latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = None,
+        prediction_context: object | None = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -869,6 +907,7 @@ class INLAResult:
             self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
         )
         object.__setattr__(self, "_latent_marginal_table", latent_marginal_table)
+        object.__setattr__(self, "_prediction_context", prediction_context)
 
     @property
     def mean(self) -> np.ndarray:
@@ -901,6 +940,10 @@ class INLAResult:
     @property
     def hyperparameters(self) -> Mapping[str, float] | None:
         return self._hyperparameters
+
+    @property
+    def prediction_context(self) -> object | None:
+        return self._prediction_context
 
     @property
     def latent_marginal_table(self) -> "SkewNormalMarginals | TabulatedMarginals | None":
@@ -937,3 +980,14 @@ class INLAResult:
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
         return linear_combinations_from(self._mean, self._covariance, weights)
+
+    def predict(self, new_data):
+        """Score new rows with the fitted, hyperparameter-integrated latent posterior."""
+        from pylgm.inference.prediction import predict_from
+
+        if self.prediction_context is None:
+            raise ValueError(
+                "this result carries no prediction context; predict() is available "
+                "on results produced by LGM.fit"
+            )
+        return predict_from(self.prediction_context, self.mean, self.covariance, new_data)

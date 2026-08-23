@@ -26,6 +26,7 @@ def _rebuild_result(
     prediction_keys: pd.DataFrame | None = None,
     hyperparameters: Mapping[str, float] | None = None,
     diagnostics: Mapping[str, object] | None = None,
+    prediction_context: object | None = None,
 ) -> GaussianResult | LaplaceResult | INLAResult:
     """Rebuild a result of the same type, optionally reordering rows or overriding metadata.
 
@@ -48,6 +49,9 @@ def _rebuild_result(
         diagnostics=diagnostics if diagnostics is not None else result.diagnostics,
         prediction_keys=prediction_keys if prediction_keys is not None else result.prediction_keys,
         hyperparameters=hyperparameters if hyperparameters is not None else result.hyperparameters,
+        prediction_context=(
+            prediction_context if prediction_context is not None else result.prediction_context
+        ),
     )
     if isinstance(result, LaplaceResult):
         fitted_mean = (
@@ -249,7 +253,7 @@ class LGM:
         data = DataConfig(time=time, response=self.response, panel=self.panel)
         panel = CanonicalPanel.from_frame(prepared, data)
 
-        from pylgm.compiler import compile_family, compile_lgm
+        from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
 
         family = compile_family(self, panel)
         if hyperparameters == "integrate":
@@ -258,11 +262,15 @@ class LGM:
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
             result = self._run_inla(family, engine, latent_strategy)
+            compiled = compile_lgm(self, panel)
         elif family is None:
             compiled = compile_lgm(self, panel)
             result = self._engine(engine)(compiled)
         else:
             result = self._run_empirical_bayes(family, engine)
+            compiled = compile_lgm(self, panel)
+        context = build_prediction_context(self, panel, compiled)
+        result = _rebuild_result(result, prediction_context=context)
         return _align_predictions_with_source_rows(result, panel.source_positions)
 
     def _fit_spark(
@@ -278,7 +286,7 @@ class LGM:
 
         canonical = canonicalize_spark_frame(frame, self, max_driver_rows=max_driver_rows)
 
-        from pylgm.compiler import compile_family, compile_lgm
+        from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
 
         family = compile_family(self, canonical.panel)
         if hyperparameters == "integrate":
@@ -287,12 +295,17 @@ class LGM:
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
             result = self._run_inla(family, engine, latent_strategy)
+            compiled = compile_lgm(self, canonical.panel)
         elif family is None:
             compiled = compile_lgm(self, canonical.panel)
             result = self._engine(engine)(compiled)
         else:
             result = self._run_empirical_bayes(family, engine)
-        return _rebuild_result(result, prediction_keys=canonical.prediction_keys)
+            compiled = compile_lgm(self, canonical.panel)
+        context = build_prediction_context(self, canonical.panel, compiled)
+        return _rebuild_result(
+            result, prediction_keys=canonical.prediction_keys, prediction_context=context
+        )
 
 
 __all__ = ["LGM"]
