@@ -1,5 +1,6 @@
 """Declarative latent-effect specifications."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 from typing import TypeAlias
@@ -98,7 +99,35 @@ class RW2(_ComposableEffect):
         )
 
 
-EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2
+@dataclass(frozen=True)
+class Besag(_ComposableEffect):
+    """A Besag / intrinsic CAR (ICAR) spatial latent effect."""
+
+    name: str
+    index: str
+    graph: Mapping
+    precision: float | Hyperparameter = 1.0
+    scale: bool = True
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.graph import normalize_graph
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        if not isinstance(self.scale, bool):
+            raise ValueError("scale must be a boolean")
+        nodes, w = normalize_graph(self.graph)  # validates the graph
+        canonical = tuple(
+            (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
+            for i, node in enumerate(nodes)
+        )
+        object.__setattr__(self, "graph", canonical)
+
+
+EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag
 
 
 @dataclass(frozen=True)
@@ -112,7 +141,7 @@ class Predictor:
             effects = tuple(self.effects)
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
-        if any(not isinstance(effect, (Fixed, IID, RW1, RW2)) for effect in effects):
+        if any(not isinstance(effect, (Fixed, IID, RW1, RW2, Besag)) for effect in effects):
             raise TypeError("effects must contain only effect specifications")
         names = [effect.name for effect in effects]
         if len(names) != len(set(names)):
@@ -122,9 +151,9 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2)):
+        if isinstance(other, (Fixed, IID, RW1, RW2, Besag)):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
 
-__all__ = ["Fixed", "IID", "Predictor", "RW1", "RW2"]
+__all__ = ["Besag", "Fixed", "IID", "Predictor", "RW1", "RW2"]

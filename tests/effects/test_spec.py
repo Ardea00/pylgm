@@ -29,3 +29,69 @@ def test_effect_declarations_are_immutable():
 
     with pytest.raises(FrozenInstanceError):
         effect.index = "other"  # type: ignore[misc]
+
+
+PATH_GRAPH = {"A": ["B"], "B": ["A", "C"], "C": ["B"]}
+
+
+def test_besag_defaults():
+    from pylgm.effects import Besag
+
+    effect = Besag("region", index="region", graph=PATH_GRAPH)
+    assert effect.name == "region"
+    assert effect.index == "region"
+    assert effect.precision == 1.0
+    assert effect.scale is True
+
+
+def test_besag_accepts_hyperparameter_precision():
+    from pylgm.effects import Besag
+
+    hp = Hyperparameter("region.precision", initial=1.0)
+    effect = Besag("region", index="region", graph=PATH_GRAPH, precision=hp)
+    assert effect.precision is hp
+
+
+def test_besag_is_frozen_and_hashable():
+    from pylgm.effects import Besag
+
+    effect = Besag("region", index="region", graph=PATH_GRAPH)
+    assert hash(effect) == hash(Besag("region", index="region", graph=PATH_GRAPH))
+    with pytest.raises(FrozenInstanceError):
+        effect.name = "x"
+
+
+def test_besag_graph_roundtrips_to_dict():
+    from pylgm.effects import Besag
+
+    effect = Besag("region", index="region", graph=PATH_GRAPH)
+    assert dict(effect.graph) == {"A": ("B",), "B": ("A", "C"), "C": ("B",)}
+
+
+def test_besag_rejects_bad_graph():
+    from pylgm.effects import Besag
+
+    with pytest.raises(ValueError):
+        Besag("region", index="region", graph={})
+
+
+def test_besag_rejects_non_boolean_scale():
+    from pylgm.effects import Besag
+
+    with pytest.raises(ValueError, match="scale"):
+        Besag("region", index="region", graph=PATH_GRAPH, scale="yes")
+
+
+def test_besag_composes_in_predictor():
+    from pylgm.effects import Besag, Predictor
+
+    predictor = Fixed("1") + Besag("region", index="region", graph=PATH_GRAPH)
+    assert isinstance(predictor, Predictor)
+    assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "Besag"]
+
+
+def test_predictor_rejects_duplicate_besag_name():
+    from pylgm.effects import Besag
+
+    with pytest.raises(ValueError, match="unique"):
+        IID("region", "region") + Besag("region", index="region", graph=PATH_GRAPH)
