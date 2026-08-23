@@ -583,20 +583,45 @@ same way `ProperCAR`'s ρ is:
 from pylgm import BYM2, Fixed, Gaussian, Hyperparameter, LGM, PCBYM2Phi
 from pylgm.priors import PCPrecision
 
+# A larger graph with a genuinely spatial signal: phi is weakly identified,
+# so a handful of regions cannot distinguish structured from unstructured.
+rng = np.random.default_rng(0)
+n = 20
+big_graph = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= n - 1] for i in range(n)}
+signal = np.zeros(n)
+for i in range(1, n):
+    signal[i] = 0.9 * signal[i - 1] + rng.normal(scale=0.4)
+signal -= signal.mean()
+big_frame = pd.DataFrame({
+    "region": [str(i) for i in range(n)],
+    "y": signal + rng.normal(scale=0.3, size=n),
+})
+
 phi = Hyperparameter("region.phi", initial=0.5, transform="logit", prior=PCBYM2Phi())
 tau = Hyperparameter("region.precision", initial=1.0, prior=PCPrecision(upper_sd=1.0, alpha=0.01))
 model = LGM(
     response="y",
-    predictor=Fixed("1") + BYM2("region", index="region", graph=graph, precision=tau, phi=phi),
-    likelihood=Gaussian(sigma=0.1),
+    predictor=Fixed("1") + BYM2("region", index="region", graph=big_graph, precision=tau, phi=phi),
+    likelihood=Gaussian(sigma=0.3),
 )
 
-eb = model.fit(frame)                                   # empirical Bayes
+eb = model.fit(big_frame)                                # empirical Bayes
 eb.hyperparameters["region.phi"]                         # point estimate of phi
 
-post = model.fit(frame, hyperparameters="integrate")     # INLA over (tau, phi)
+post = model.fit(big_frame, hyperparameters="integrate")  # INLA over (tau, phi)
 post.hyperparameter_marginals()["region.phi"].mean        # phi marginal
 ```
+
+**φ is weakly identified, by nature of the model.** Structured and
+unstructured components explain small datasets almost equally well, which is
+precisely why Riebler et al. pair BYM2 with an informative PC prior. Two
+practical consequences: the profile objective can be *bimodal* (mass near
+"pure IID" and near "pure spatial", with a valley between), so empirical Bayes
+— a local optimizer — may report whichever mode it descends into; and on small
+graphs φ can collapse to its boundary even when the simulating truth was
+interior. Prefer `hyperparameters="integrate"` for φ, keep the PC prior, and
+treat a boundary φ̂ on a small graph as "not identified" rather than as
+evidence of no spatial structure.
 
 `PCBYM2Phi(upper=0.5, alpha=2/3)` is Riebler et al.'s PC prior for φ,
 calibrated so that `P(φ < upper) = alpha`. Because its distance scale
