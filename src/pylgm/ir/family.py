@@ -23,8 +23,35 @@ def _ordinary_positive(value: object, name: str) -> float:
     return float(value)
 
 
+def _ordinary_finite(value: object, name: str) -> float:
+    if type(value) not in (int, float) or not np.isfinite(value):
+        raise ModelValidationError(f"{name} must be a finite real number")
+    return float(value)
+
+
+def _unconstrained_parametric_names(
+    block_values: tuple["ScalableBlock | ParametricBlock", ...],
+) -> frozenset[str]:
+    """Parametric-block parameters that are not required to stay positive.
+
+    A ``ParametricBlock`` parameter that isn't a ``*.precision`` (e.g. a proper
+    CAR ``rho``) can validly take any finite value in its bounded interval,
+    including zero or negative — unlike sigma and scalable-block precisions,
+    which must stay strictly positive.
+    """
+    return frozenset(
+        name
+        for item in block_values
+        if isinstance(item, ParametricBlock)
+        for name in item.parameters
+        if not name.endswith(".precision")
+    )
+
+
 def _validate_parameter_mapping(
-    values: Mapping[str, float], parameter_names: tuple[str, ...]
+    values: Mapping[str, float],
+    parameter_names: tuple[str, ...],
+    unconstrained: frozenset[str] = frozenset(),
 ) -> dict[str, float]:
     if not isinstance(values, Mapping):
         raise ModelValidationError("optimized values must be a mapping")
@@ -37,10 +64,15 @@ def _validate_parameter_mapping(
             f"optimized values must contain exactly {parameter_names!r}; "
             f"missing={missing}, unknown={unknown}"
         )
-    return {
-        name: _ordinary_positive(values[name], f"optimized parameter {name!r}")
-        for name in parameter_names
-    }
+    result = {}
+    for name in parameter_names:
+        label = f"optimized parameter {name!r}"
+        result[name] = (
+            _ordinary_finite(values[name], label)
+            if name in unconstrained
+            else _ordinary_positive(values[name], label)
+        )
+    return result
 
 
 @dataclass(frozen=True, init=False)
@@ -209,6 +241,7 @@ class CompiledGaussianFamily:
     parameter_names: tuple[str, ...]
     initial: Hyperparameters
     parameter_bounds: Mapping[str, object]
+    _unconstrained_names: frozenset[str] = field(repr=False, default_factory=frozenset)
 
     def __init__(
         self,
@@ -301,6 +334,7 @@ class CompiledGaussianFamily:
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "initial", initial)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
+        object.__setattr__(self, "_unconstrained_names", _unconstrained_parametric_names(block_values))
 
     @property
     def y(self) -> np.ndarray:
@@ -321,7 +355,9 @@ class CompiledGaussianFamily:
         return result
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
-        resolved = _validate_parameter_mapping(values, self.parameter_names)
+        resolved = _validate_parameter_mapping(
+            values, self.parameter_names, self._unconstrained_names
+        )
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = CompiledGaussian(resolved.get("sigma", self.initial.sigma))
         return _assemble_compiled_model(
@@ -349,6 +385,7 @@ class CompiledFamily:
     parameter_names: tuple[str, ...]
     likelihood_factory: Callable[[Mapping[str, float]], object] = field(repr=False)
     parameter_bounds: Mapping[str, object]
+    _unconstrained_names: frozenset[str] = field(repr=False, default_factory=frozenset)
 
     def __init__(
         self,
@@ -415,9 +452,12 @@ class CompiledFamily:
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "likelihood_factory", likelihood_factory)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
+        object.__setattr__(self, "_unconstrained_names", _unconstrained_parametric_names(block_values))
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
-        resolved = _validate_parameter_mapping(values, self.parameter_names)
+        resolved = _validate_parameter_mapping(
+            values, self.parameter_names, self._unconstrained_names
+        )
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = self.likelihood_factory(resolved)
         return _assemble_compiled_model(

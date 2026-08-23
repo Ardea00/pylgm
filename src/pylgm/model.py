@@ -193,14 +193,15 @@ class LGM:
             )
         return fit
 
-    def _family_optimization_inputs(self):
+    def _family_optimization_inputs(self, family):
         from pylgm.compiler import _model_hyperparameters
 
         hyperparameters = list(_model_hyperparameters(self))
-        bounds, initial = {}, {}
-        for _, hp in hyperparameters:
-            bounds[hp.name] = OptimizationBounds(hp.initial, hp.lower, hp.upper)
-            initial[hp.name] = hp.initial
+        if family.parameter_bounds:
+            bounds = dict(family.parameter_bounds)
+        else:
+            bounds = {hp.name: OptimizationBounds(hp.initial, hp.lower, hp.upper) for _, hp in hyperparameters}
+        initial = {hp.name: hp.initial for _, hp in hyperparameters}
         priored = [hp for _, hp in hyperparameters if hp.prior is not None]
         penalty = None
         if priored:
@@ -210,7 +211,7 @@ class LGM:
 
     def _run_empirical_bayes(self, family, engine: str) -> GaussianResult | LaplaceResult:
         fit = self._engine(engine)
-        bounds, initial, penalty = self._family_optimization_inputs()
+        bounds, initial, penalty = self._family_optimization_inputs(family)
         eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit, penalty=penalty)
         diagnostics = dict(eb.fit.diagnostics)
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
@@ -220,7 +221,7 @@ class LGM:
 
     def _run_inla(self, family, engine: str, latent_strategy: str = "gaussian") -> INLAResult:
         fit = self._engine(engine)
-        bounds, initial, penalty = self._family_optimization_inputs()
+        bounds, initial, penalty = self._family_optimization_inputs(family)
         return integrate_inla(
             family, bounds, initial=initial, fit=fit, penalty=penalty,
             latent_strategy=latent_strategy,

@@ -36,6 +36,25 @@ def _validity_interval(
     return lower, upper, mu_min, mu_max
 
 
+def car_rho_interval(graph: Mapping) -> tuple[float, float]:
+    """Return the open ``(lower, upper)`` interval of valid rho for a graph.
+
+    ``D - rho W`` is positive definite exactly for rho in this interval; shared
+    by the compiler so it can build rho's transform/bounds without duplicating
+    the eigenvalue math in ``_validity_interval``.
+    """
+    nodes, w = normalize_graph(graph)
+    degree = np.asarray(w.sum(axis=1)).ravel()
+    isolated = [nodes[i] for i in range(len(degree)) if degree[i] == 0]
+    if isolated:
+        raise ValueError(
+            "proper CAR rho interval is undefined for isolated nodes "
+            f"(regions have no neighbours): {isolated!r}"
+        )
+    lower, upper, _, _ = _validity_interval(w, degree)
+    return lower, upper
+
+
 def build_proper_car(
     frame: pd.DataFrame,
     name: str,

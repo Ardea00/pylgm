@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from formulaic.errors import FormulaicError
-from scipy.sparse import block_diag, hstack
+from scipy.sparse import block_diag, csr_matrix, diags, hstack
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
@@ -18,11 +18,22 @@ from pylgm.effects import (
     build_iid,
     build_proper_car,
     build_random_walk,
+    normalize_graph,
 )
+from pylgm.effects.proper_car import car_rho_interval
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
-from pylgm.ir import CompiledFamily, CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
+from pylgm.ir import (
+    CompiledFamily,
+    CompiledGaussianFamily,
+    CompiledLGM,
+    Hyperparameters,
+    ParametricBlock,
+    ScalableBlock,
+)
 from pylgm.ir.model import LatentBlock, _block_constraints
 from pylgm.likelihoods import Bernoulli, CompiledGaussian, Gaussian, Poisson
+from pylgm.optimization.empirical_bayes import OptimizationBounds
+from pylgm.optimization.transforms import LogitTransform, LogTransform
 from pylgm.parameters import Hyperparameter
 
 if TYPE_CHECKING:
@@ -290,7 +301,19 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
         precision = getattr(effect, "precision", None)
         if isinstance(precision, Hyperparameter):
             found.append((effect.name, precision))
+        if isinstance(effect, ProperCAR) and isinstance(effect.rho, Hyperparameter):
+            found.append((effect.name, effect.rho))
     return found
+
+
+def _log_bounds(hp: Hyperparameter) -> OptimizationBounds:
+    """Bounds for a log-transform (positive) hyperparameter: sigma or a precision.
+
+    Identical to the ``OptimizationBounds(hp.initial, hp.lower, hp.upper)`` that
+    ``model.py`` used to build directly (default transform is already
+    ``LogTransform``), so existing optimise/integrate behaviour is unchanged.
+    """
+    return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=LogTransform())
 
 
 def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
@@ -307,8 +330,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     )
     y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
 
-    scalable: list[ScalableBlock] = []
+    scalable: list[ScalableBlock | ParametricBlock] = []
     parameter_names: list[str] = []
+    parameter_bounds: dict[str, OptimizationBounds] = {}
     for effect in model.predictor.effects:
         if isinstance(effect, Fixed):
             block = build_fixed(frame, effect.formula, effect.prior_precision)
@@ -324,14 +348,59 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
             if optimized:
                 parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
             continue
         if isinstance(effect, ProperCAR):
-            block = build_proper_car(
-                frame, effect.name, effect.index, dict(effect.graph), effect.rho, value
+            rho_is_hp = isinstance(effect.rho, Hyperparameter)
+            if not rho_is_hp:
+                block = build_proper_car(
+                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, value
+                )
+                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+                if optimized:
+                    parameter_names.append(precision.name)
+                    parameter_bounds[precision.name] = _log_bounds(precision)
+                continue
+            # rho is a Hyperparameter -> a ParametricBlock over (tau, rho), bounded
+            # to the graph's positive-definiteness interval via a Logit transform.
+            nodes, w = normalize_graph(dict(effect.graph))
+            degree = np.asarray(w.sum(axis=1)).ravel()
+            a, b = car_rho_interval(dict(effect.graph))
+            inset = 1e-6 * (b - a)
+            rho_lower = a + inset if effect.rho.lower is None else max(effect.rho.lower, a + inset)
+            rho_upper = b - inset if effect.rho.upper is None else min(effect.rho.upper, b - inset)
+            rho_initial = float(np.clip(effect.rho.initial, rho_lower, rho_upper))
+            template = build_proper_car(
+                frame, effect.name, effect.index, dict(effect.graph),
+                rho_initial, value if not optimized else 1.0,
             )
-            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            deg = degree
+            wmat = w
+            tau_name = precision.name if optimized else None
+            tau_fixed = None if optimized else value
+            rho_name = effect.rho.name
+
+            def build(
+                values,
+                deg=deg,
+                wmat=wmat,
+                tau_name=tau_name,
+                tau_fixed=tau_fixed,
+                rho_name=rho_name,
+            ) -> csr_matrix:
+                tau = values[tau_name] if tau_name else tau_fixed
+                rho = values[rho_name]
+                return csr_matrix(tau * (diags(deg) - rho * wmat))
+
+            params = tuple(name for name in (tau_name, rho_name) if name)
+            scalable.append(ParametricBlock(template, params, build))
             if optimized:
                 parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            parameter_names.append(rho_name)
+            parameter_bounds[rho_name] = OptimizationBounds(
+                rho_initial, rho_lower, rho_upper, transform=LogitTransform(a, b)
+            )
             continue
         if isinstance(effect, IID):
             block = build_iid(frame, effect.name, effect.index, value)
@@ -341,11 +410,13 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
         if optimized:
             parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
 
     if isinstance(model.likelihood, Gaussian):
         sigma = model.likelihood.sigma
         if isinstance(sigma, Hyperparameter):
             parameter_names.append(sigma.name)
+            parameter_bounds[sigma.name] = _log_bounds(sigma)
             sigma_name = sigma.name
 
             def factory(resolved: dict, sigma_name: str = sigma_name) -> CompiledGaussian:
@@ -367,4 +438,5 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         blocks=tuple(scalable),
         parameter_names=tuple(parameter_names),
         likelihood_factory=factory,
+        parameter_bounds=parameter_bounds,
     )
