@@ -115,12 +115,12 @@ def test_proper_car_accepts_hyperparameter_precision():
     assert effect.precision is hp
 
 
-def test_proper_car_rejects_hyperparameter_rho():
+def test_proper_car_accepts_hyperparameter_rho():
     from pylgm.effects import ProperCAR
 
-    hp = Hyperparameter("region.rho", initial=0.5)
-    with pytest.raises(ValueError, match="rho"):
-        ProperCAR("region", index="region", graph=PATH_GRAPH, rho=hp)
+    hp = Hyperparameter("region.rho", initial=0.3, transform="logit")
+    effect = ProperCAR("region", index="region", graph=PATH_GRAPH, rho=hp)
+    assert effect.rho is hp
 
 
 def test_proper_car_rejects_non_finite_rho():

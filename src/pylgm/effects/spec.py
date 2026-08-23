@@ -140,7 +140,7 @@ class ProperCAR(_ComposableEffect):
     name: str
     index: str
     graph: Mapping
-    rho: float
+    rho: float | Hyperparameter
     precision: float | Hyperparameter = 1.0
 
     def __post_init__(self) -> None:
@@ -149,11 +149,9 @@ class ProperCAR(_ComposableEffect):
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
         if isinstance(self.rho, Hyperparameter):
-            raise ValueError(
-                "rho estimation is not yet supported (plug-in only); pass a float. "
-                "rho inference is planned in the bounded-hyperparameter slice"
-            )
-        object.__setattr__(self, "rho", _finite_real(self.rho, "rho"))
+            object.__setattr__(self, "rho", self.rho)  # interval resolved at compile time
+        else:
+            object.__setattr__(self, "rho", _finite_real(self.rho, "rho"))
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )

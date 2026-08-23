@@ -39,23 +39,35 @@ class Hyperparameter:
     name: str
     initial: float
     prior: Prior | None = None
-    transform: Literal["identity", "log"] = "log"
+    transform: Literal["identity", "log", "logit"] = "log"
     lower: float | None = None
     upper: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("name must be a non-empty string")
-        object.__setattr__(self, "initial", _positive_real(self.initial, "initial"))
+        if self.transform not in ("identity", "log", "logit"):
+            raise ValueError("transform must be 'identity', 'log', or 'logit'")
         if self.prior is not None and not callable(getattr(self.prior, "logpdf", None)):
             raise ValueError("prior must provide a logpdf method")
-        if self.transform not in ("identity", "log"):
-            raise ValueError("transform must be 'identity' or 'log'")
-        lower = self.initial * 1e-3 if self.lower is None else _positive_real(self.lower, "lower")
-        upper = self.initial * 1e3 if self.upper is None else _positive_real(self.upper, "upper")
-        if not lower < self.initial:
-            raise ValueError("lower bound must be below initial")
-        if not self.initial < upper:
-            raise ValueError("upper bound must be above initial")
-        object.__setattr__(self, "lower", lower)
-        object.__setattr__(self, "upper", upper)
+        if self.transform == "log":
+            object.__setattr__(self, "initial", _positive_real(self.initial, "initial"))
+            lower = self.initial * 1e-3 if self.lower is None else _positive_real(self.lower, "lower")
+            upper = self.initial * 1e3 if self.upper is None else _positive_real(self.upper, "upper")
+            if not lower < self.initial:
+                raise ValueError("lower bound must be below initial")
+            if not self.initial < upper:
+                raise ValueError("upper bound must be above initial")
+            object.__setattr__(self, "lower", lower)
+            object.__setattr__(self, "upper", upper)
+        else:
+            # identity / logit: any finite initial; bounds may be deferred (None)
+            if type(self.initial) not in (int, float) or not math.isfinite(self.initial):
+                raise ValueError("initial must be a finite real value")
+            object.__setattr__(self, "initial", float(self.initial))
+            if self.lower is not None and not math.isfinite(self.lower):
+                raise ValueError("lower must be a finite real value or None")
+            if self.upper is not None and not math.isfinite(self.upper):
+                raise ValueError("upper must be a finite real value or None")
+            if self.lower is not None and self.upper is not None and not self.lower < self.upper:
+                raise ValueError("lower must be below upper")
