@@ -7,7 +7,7 @@ from scipy.sparse import block_diag, hstack
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
-from pylgm.effects import Fixed, IID, RW1, build_fixed, build_iid, build_random_walk
+from pylgm.effects import Besag, Fixed, IID, RW1, build_besag, build_fixed, build_iid, build_random_walk
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
 from pylgm.ir import CompiledFamily, CompiledGaussianFamily, CompiledLGM, Hyperparameters, ScalableBlock
 from pylgm.ir.model import LatentBlock, _block_constraints
@@ -173,6 +173,12 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 precision = _resolved_precision(effect.precision)
                 block = build_iid(frame, effect.name, effect.index, precision)
                 precisions[effect.name] = precision
+            elif isinstance(effect, Besag):
+                precision = _resolved_precision(effect.precision)
+                block = build_besag(
+                    frame, effect.name, effect.index, dict(effect.graph), precision, effect.scale
+                )
+                precisions[effect.name] = precision
             else:
                 precision = _resolved_precision(effect.precision)
                 order = 1 if isinstance(effect, RW1) else 2
@@ -294,6 +300,14 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         precision = effect.precision
         optimized = isinstance(precision, Hyperparameter)
         value = 1.0 if optimized else precision
+        if isinstance(effect, Besag):
+            block = build_besag(
+                frame, effect.name, effect.index, dict(effect.graph), value, effect.scale
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+            continue
         if isinstance(effect, IID):
             block = build_iid(frame, effect.name, effect.index, value)
         else:
