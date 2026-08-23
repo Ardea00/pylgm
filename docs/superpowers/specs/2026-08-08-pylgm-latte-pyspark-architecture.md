@@ -392,10 +392,11 @@ this slice. Still deferred, in order:
   the neighbour-dict input both go through the Pandas-side compiler only;
   a PySpark-side path is not built.
 - **Graceful isolated-node handling.** An isolated (zero-neighbour) node
-  currently raises a directed error at declaration time (model it as `IID`
-  instead) rather than being handled automatically, e.g. by silently folding
-  it into an implicit unstructured term. This applies to `Besag` and `BYM2`
-  alike.
+  currently raises a directed error (model it as `IID` instead) rather than
+  being handled automatically, e.g. by folding it into an implicit
+  unstructured term. This applies to `Besag`, `ProperCAR`, and `BYM2` alike.
+  Note the error surfaces when the effect is *built* (at `fit` time), not when
+  the spec is declared — the declaration only validates the graph's shape.
 - **Sparse/large-graph scaling.** `Besag`, `ProperCAR`, and `BYM2` all use
   dense linear algebra (dense structure matrices, and, for `BYM2`, a dense
   `O(n^3)` eigendecomposition at compile time); none of the three has a

@@ -619,9 +619,19 @@ practical consequences: the profile objective can be *bimodal* (mass near
 "pure IID" and near "pure spatial", with a valley between), so empirical Bayes
 — a local optimizer — may report whichever mode it descends into; and on small
 graphs φ can collapse to its boundary even when the simulating truth was
-interior. Prefer `hyperparameters="integrate"` for φ, keep the PC prior, and
-treat a boundary φ̂ on a small graph as "not identified" rather than as
-evidence of no spatial structure.
+interior. Keep the PC prior, and treat a boundary φ̂ as "not identified"
+rather than as evidence about spatial structure.
+
+**Integration does not rescue a boundary φ̂.** The INLA grid is built around
+the empirical-Bayes mode and its curvature, so when φ̂ pins at a boundary the
+grid degenerates there too: the reported φ marginal becomes a near point mass
+with a spuriously tiny standard deviation (the example above returns a mean of
+≈0.99996 with sd ≈2e-8, which is grid degeneracy, not posterior certainty).
+Before believing a φ marginal, check `result.diagnostics["inla_grid_points"]`
+and `["inla_collapsed"]` — a handful of points clustered at a bound means the
+hyperparameter was not identified, whatever the interval width suggests. This
+affects φ specifically because it is weakly identified; τ and ρ marginals on
+the same fits behave normally.
 
 `PCBYM2Phi(upper=0.5, alpha=2/3)` is Riebler et al.'s PC prior for φ,
 calibrated so that `P(φ < upper) = alpha`. Because its distance scale

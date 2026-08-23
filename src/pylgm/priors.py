@@ -153,7 +153,9 @@ class _BoundPCBYM2Phi:
             )
         self._d_one = d_one
         self._rate = _solve_pc_rate(d_upper, d_one, self.alpha)
-        self._log_norm = float(np.log1p(-np.exp(-self._rate * d_one)))
+        # log(-expm1(x)) rather than log1p(-exp(x)): stable when rate*d_one is
+        # tiny, which happens for an alpha just above the attainable floor.
+        self._log_norm = float(np.log(-np.expm1(-self._rate * d_one)))
 
     def _offsets(self, phi: float) -> "np.ndarray":
         """``t - 1`` where ``t = 1 - phi + phi*gamma``, computed without cancellation."""

@@ -1,7 +1,7 @@
 from pylgm.effects.besag import build_besag
 from pylgm.effects.bym2 import build_bym2
 from pylgm.effects.fixed import build_fixed
-from pylgm.effects.graph import load_graph_file, normalize_graph
+from pylgm.effects.graph import canonical_graph, load_graph_file, normalize_graph
 from pylgm.effects.iid import build_iid
 from pylgm.effects.proper_car import build_proper_car
 from pylgm.effects.random_walk import build_random_walk
