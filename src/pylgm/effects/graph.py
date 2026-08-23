@@ -29,6 +29,22 @@ def design_from_graph(
     )
 
 
+def canonical_graph(
+    graph: Mapping[object, Sequence[object]],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Validate a graph and return an immutable, canonically ordered form.
+
+    Spatial effect specs are frozen dataclasses, so they cannot hold a mutable
+    mapping and stay hashable. ``dict()`` on the result reconstructs a neighbour
+    mapping that ``normalize_graph`` accepts again.
+    """
+    nodes, w = normalize_graph(graph)
+    return tuple(
+        (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
+        for i, node in enumerate(nodes)
+    )
+
+
 def normalize_graph(
     graph: Mapping[object, Sequence[object]],
 ) -> tuple[tuple[str, ...], csr_matrix]:

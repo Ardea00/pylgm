@@ -116,7 +116,7 @@ class Besag(_ComposableEffect):
     scale: bool = True
 
     def __post_init__(self) -> None:
-        from pylgm.effects.graph import normalize_graph
+        from pylgm.effects.graph import canonical_graph
 
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
@@ -125,12 +125,7 @@ class Besag(_ComposableEffect):
         )
         if not isinstance(self.scale, bool):
             raise ValueError("scale must be a boolean")
-        nodes, w = normalize_graph(self.graph)  # validates the graph
-        canonical = tuple(
-            (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
-            for i, node in enumerate(nodes)
-        )
-        object.__setattr__(self, "graph", canonical)
+        object.__setattr__(self, "graph", canonical_graph(self.graph))
 
 
 @dataclass(frozen=True)
@@ -144,7 +139,7 @@ class ProperCAR(_ComposableEffect):
     precision: float | Hyperparameter = 1.0
 
     def __post_init__(self) -> None:
-        from pylgm.effects.graph import normalize_graph
+        from pylgm.effects.graph import canonical_graph
 
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
@@ -155,12 +150,7 @@ class ProperCAR(_ComposableEffect):
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )
-        nodes, w = normalize_graph(self.graph)  # validates the graph
-        canonical = tuple(
-            (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
-            for i, node in enumerate(nodes)
-        )
-        object.__setattr__(self, "graph", canonical)
+        object.__setattr__(self, "graph", canonical_graph(self.graph))
 
 
 @dataclass(frozen=True)
@@ -174,7 +164,7 @@ class BYM2(_ComposableEffect):
     phi: float | Hyperparameter = 0.5
 
     def __post_init__(self) -> None:
-        from pylgm.effects.graph import normalize_graph
+        from pylgm.effects.graph import canonical_graph
 
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
@@ -186,12 +176,7 @@ class BYM2(_ComposableEffect):
             if not 0.0 < phi < 1.0:
                 raise ValueError("phi must lie strictly inside (0, 1)")
             object.__setattr__(self, "phi", phi)
-        nodes, w = normalize_graph(self.graph)
-        canonical = tuple(
-            (node, tuple(sorted(nodes[j] for j in w.indices[w.indptr[i] : w.indptr[i + 1]])))
-            for i, node in enumerate(nodes)
-        )
-        object.__setattr__(self, "graph", canonical)
+        object.__setattr__(self, "graph", canonical_graph(self.graph))
 
 
 EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag | ProperCAR | BYM2

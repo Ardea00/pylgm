@@ -22,6 +22,7 @@ __all__ = [
     "build_iid",
     "build_proper_car",
     "build_random_walk",
+    "canonical_graph",
     "load_graph_file",
     "normalize_graph",
 ]
