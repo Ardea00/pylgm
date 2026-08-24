@@ -355,6 +355,39 @@ def _log_bounds(hp: Hyperparameter) -> OptimizationBounds:
     return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=LogTransform())
 
 
+def _bounded_parameter(
+    hyperparameter: Hyperparameter,
+    lower: float,
+    upper: float,
+    *,
+    label: str,
+    inset: float,
+) -> OptimizationBounds:
+    """Bounds for a hyperparameter confined to an open interval.
+
+    Shared by proper CAR's rho, BYM2's phi and AR1's rho: all three are bounded
+    parameters inferred on a logit scale, and all three must reject a log
+    transform, which would silently inherit positive-only default bounds and
+    confine the parameter to a wrong, one-sided interval.
+    """
+    if hyperparameter.transform != "logit":
+        raise CompilationError(
+            f"{label} {hyperparameter.name!r} must be declared with transform='logit' "
+            f"(it is bounded to ({lower:.6g}, {upper:.6g})); got "
+            f"transform={hyperparameter.transform!r}"
+        )
+    low = lower + inset if hyperparameter.lower is None else max(hyperparameter.lower, lower + inset)
+    high = upper - inset if hyperparameter.upper is None else min(hyperparameter.upper, upper - inset)
+    if not low <= hyperparameter.initial <= high:
+        raise CompilationError(
+            f"initial value for {label} {hyperparameter.name!r} must lie in "
+            f"({low:.6g}, {high:.6g}); got {hyperparameter.initial}"
+        )
+    return OptimizationBounds(
+        float(hyperparameter.initial), low, high, transform=LogitTransform(lower, upper)
+    )
+
+
 def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
     """Build an optimisable family, or None when no Hyperparameter is declared."""
     if not _model_hyperparameters(model):
@@ -406,23 +439,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             nodes, w = normalize_graph(dict(effect.graph))
             degree = np.asarray(w.sum(axis=1)).ravel()
             a, b = car_rho_interval(dict(effect.graph))
-            if effect.rho.transform != "logit":
-                # A log-transform rho would silently inherit positive-only default
-                # bounds and be confined to a wrong, one-sided interval.
-                raise CompilationError(
-                    f"proper CAR rho {effect.rho.name!r} must be declared with "
-                    f"transform='logit' (its interval ({a:.6g}, {b:.6g}) is resolved "
-                    f"from the graph); got transform={effect.rho.transform!r}"
-                )
-            inset = 1e-6 * (b - a)
-            rho_lower = a + inset if effect.rho.lower is None else max(effect.rho.lower, a + inset)
-            rho_upper = b - inset if effect.rho.upper is None else min(effect.rho.upper, b - inset)
-            if not rho_lower <= effect.rho.initial <= rho_upper:
-                raise CompilationError(
-                    f"initial value for proper CAR rho {effect.rho.name!r} must lie in "
-                    f"({a:.6g}, {b:.6g}), the graph's positive-definiteness interval; "
-                    f"got {effect.rho.initial}"
-                )
+            rho_bounds = _bounded_parameter(
+                effect.rho, a, b, label="proper CAR rho", inset=1e-6 * (b - a)
+            )
             rho_initial = float(effect.rho.initial)
             template = build_proper_car(
                 frame, effect.name, effect.index, dict(effect.graph),
@@ -452,9 +471,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 parameter_names.append(precision.name)
                 parameter_bounds[precision.name] = _log_bounds(precision)
             parameter_names.append(rho_name)
-            parameter_bounds[rho_name] = OptimizationBounds(
-                rho_initial, rho_lower, rho_upper, transform=LogitTransform(a, b)
-            )
+            parameter_bounds[rho_name] = rho_bounds
             continue
         if isinstance(effect, BYM2):
             phi_is_hp = isinstance(effect.phi, Hyperparameter)
@@ -470,20 +487,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             # phi is a Hyperparameter -> a ParametricBlock over (tau, phi), bounded
             # to (0, 1) via a Logit transform (BYM2 is unconstrained: no graph
             # interval to resolve, unlike proper CAR's rho).
-            if effect.phi.transform != "logit":
-                raise CompilationError(
-                    f"BYM2 phi {effect.phi.name!r} must be declared with transform='logit' "
-                    f"(it mixes on (0, 1)); got transform={effect.phi.transform!r}"
-                )
             vectors, values_ = bym2_spectrum(dict(effect.graph))
-            inset = 1e-6
-            phi_lower = inset if effect.phi.lower is None else max(effect.phi.lower, inset)
-            phi_upper = 1.0 - inset if effect.phi.upper is None else min(effect.phi.upper, 1.0 - inset)
-            if not phi_lower <= effect.phi.initial <= phi_upper:
-                raise CompilationError(
-                    f"initial value for BYM2 phi {effect.phi.name!r} must lie in "
-                    f"({phi_lower:.6g}, {phi_upper:.6g}); got {effect.phi.initial}"
-                )
+            phi_bounds = _bounded_parameter(effect.phi, 0.0, 1.0, label="BYM2 phi", inset=1e-6)
             template = build_bym2(
                 frame, effect.name, effect.index, dict(effect.graph),
                 value, float(effect.phi.initial),
@@ -509,10 +514,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 parameter_names.append(precision.name)
                 parameter_bounds[precision.name] = _log_bounds(precision)
             parameter_names.append(phi_name)
-            parameter_bounds[phi_name] = OptimizationBounds(
-                float(effect.phi.initial), phi_lower, phi_upper,
-                transform=LogitTransform(0.0, 1.0),
-            )
+            parameter_bounds[phi_name] = phi_bounds
             if effect.phi.prior is not None and hasattr(effect.phi.prior, "bind"):
                 positive = values_[values_ > 1e-10]
                 parameter_priors[phi_name] = effect.phi.prior.bind(positive)
@@ -528,20 +530,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                     parameter_names.append(precision.name)
                     parameter_bounds[precision.name] = _log_bounds(precision)
                 continue
-            if effect.rho.transform != "logit":
-                raise CompilationError(
-                    f"AR1 rho {effect.rho.name!r} must be declared with "
-                    f"transform='logit' (it is a correlation on (-1, 1)); got "
-                    f"transform={effect.rho.transform!r}"
-                )
-            inset = 1e-6
-            rho_lower = -1.0 + inset if effect.rho.lower is None else max(effect.rho.lower, -1.0 + inset)
-            rho_upper = 1.0 - inset if effect.rho.upper is None else min(effect.rho.upper, 1.0 - inset)
-            if not rho_lower <= effect.rho.initial <= rho_upper:
-                raise CompilationError(
-                    f"initial value for AR1 rho {effect.rho.name!r} must lie in "
-                    f"({rho_lower:.6g}, {rho_upper:.6g}); got {effect.rho.initial}"
-                )
+            rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="AR1 rho", inset=1e-6)
             level_count = len(ordered_observed_levels(frame[effect.index]))
             template = build_ar1(
                 frame, effect.name, effect.index, value, float(effect.rho.initial)
@@ -566,10 +555,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 parameter_names.append(precision.name)
                 parameter_bounds[precision.name] = _log_bounds(precision)
             parameter_names.append(rho_name)
-            parameter_bounds[rho_name] = OptimizationBounds(
-                float(effect.rho.initial), rho_lower, rho_upper,
-                transform=LogitTransform(-1.0, 1.0),
-            )
+            parameter_bounds[rho_name] = rho_bounds
             continue
         if isinstance(effect, IID):
             block = build_iid(frame, effect.name, effect.index, value)

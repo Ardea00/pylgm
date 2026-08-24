@@ -85,6 +85,10 @@ def test_rho_hyperparameter_requires_logit_transform():
 
 
 def test_rho_initial_outside_graph_interval_names_the_interval():
+    # The interval (a, b) comes from car_rho_interval(_chain(12)), the graph's
+    # positive-definiteness interval; this pins the effect label and the actual
+    # numeric bounds rather than a wording snippet, so it survives an error
+    # message that becomes uniform across proper CAR / BYM2 / AR1.
     from pylgm.exceptions import CompilationError
 
     rho = Hyperparameter("region.rho", initial=5.0, transform="logit")
@@ -92,5 +96,8 @@ def test_rho_initial_outside_graph_interval_names_the_interval():
                 predictor=Fixed("1")
                 + ProperCAR("region", index="region", graph=_chain(12), rho=rho),
                 likelihood=Gaussian(sigma=0.1))
-    with pytest.raises(CompilationError, match="positive-definiteness interval"):
+    with pytest.raises(
+        CompilationError,
+        match=r"proper CAR rho 'region\.rho' must lie in \(-0\.999998, 0\.999998\)",
+    ):
         model.fit(_spatial_frame())

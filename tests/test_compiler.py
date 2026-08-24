@@ -4,7 +4,7 @@ import pytest
 from scipy.sparse import csr_matrix
 from typing import cast
 
-from pylgm import Bernoulli, Fixed, Gaussian, IID, LGM, Poisson
+from pylgm import AR1, Bernoulli, BYM2, Fixed, Gaussian, IID, LGM, Poisson, ProperCAR
 from pylgm.effects import Predictor
 from pylgm.compiler import compile_family, compile_gaussian_family, compile_lgm, compile_model
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
@@ -556,3 +556,77 @@ def test_prediction_context_guard_catches_misordered_entries():
     )
     with pytest.raises(CompilationError, match="order"):
         build_prediction_context(swapped, panel, compiled)
+
+
+def _chain_graph(n: int) -> dict[str, list[str]]:
+    return {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j <= n - 1] for i in range(n)}
+
+
+def _region_frame(n: int = 4) -> pd.DataFrame:
+    return pd.DataFrame({"region": [str(i) for i in range(n)], "y": [0.1, -0.2, 0.05, 0.3][:n]})
+
+
+def _time_frame(n: int = 4) -> pd.DataFrame:
+    return pd.DataFrame({"t": list(range(n)), "y": [0.1, -0.2, 0.05, 0.3][:n]})
+
+
+def _proper_car_model(rho: Hyperparameter) -> LGM:
+    return LGM(
+        response="y",
+        predictor=Fixed("1") + ProperCAR("region", index="region", graph=_chain_graph(4), rho=rho),
+        likelihood=Gaussian(sigma=0.1),
+    )
+
+
+def _bym2_model(phi: Hyperparameter) -> LGM:
+    return LGM(
+        response="y",
+        predictor=Fixed("1") + BYM2("region", index="region", graph=_chain_graph(4), phi=phi),
+        likelihood=Gaussian(sigma=0.1),
+    )
+
+
+def _ar1_model(rho: Hyperparameter) -> LGM:
+    return LGM(
+        response="y",
+        predictor=Fixed("1") + AR1("trend", index="t", rho=rho),
+        likelihood=Gaussian(sigma=0.1),
+    )
+
+
+# Safety net for extracting the shared bounded-parameter bounds construction
+# (proper CAR's rho, BYM2's phi, AR1's rho): each is a hyperparameter confined
+# to an open interval on a logit scale. These pin the behaviour -- reject a
+# non-logit transform naming the effect, reject an out-of-interval initial
+# naming the effect and the interval -- through the real LGM.fit path, so an
+# extraction that changes behaviour (not just wording) fails loudly.
+@pytest.mark.parametrize(
+    "build_model, frame_factory, label",
+    [
+        (_proper_car_model, _region_frame, "proper CAR rho"),
+        (_bym2_model, _region_frame, "BYM2 phi"),
+        (_ar1_model, _time_frame, "AR1 rho"),
+    ],
+)
+def test_bounded_parameter_rejects_non_logit_transform(
+    build_model, frame_factory, label: str
+) -> None:
+    hp = Hyperparameter("bounded", initial=0.5)  # transform defaults to "log"
+    with pytest.raises(CompilationError, match=f"{label}.*transform='logit'"):
+        build_model(hp).fit(frame_factory())
+
+
+@pytest.mark.parametrize(
+    "build_model, frame_factory, label",
+    [
+        (_proper_car_model, _region_frame, "proper CAR rho"),
+        (_bym2_model, _region_frame, "BYM2 phi"),
+        (_ar1_model, _time_frame, "AR1 rho"),
+    ],
+)
+def test_bounded_parameter_rejects_out_of_interval_initial(
+    build_model, frame_factory, label: str
+) -> None:
+    hp = Hyperparameter("bounded", initial=5.0, transform="logit")
+    with pytest.raises(CompilationError, match=f"{label}.*must lie in"):
+        build_model(hp).fit(frame_factory())
