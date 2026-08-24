@@ -21,12 +21,13 @@ slightly, so ``predict().fitted_mean`` is a moment-matched approximation of
 ``INLAResult.fitted_mean`` rather than an exact reproduction; the gap scales
 with the hyperparameter uncertainty. Reproducing it exactly would require
 retaining every grid point's latent covariance, which is not affordable for a
-wide latent field. ``predictive_mean`` and ``predictive_variance`` are exact in
-every case, as is ``fitted_mean`` for the identity link and for all plug-in and
+wide latent field. ``predictive_mean`` and ``predictive_variance`` are exact,
+as is ``fitted_mean`` for the identity link and for all plug-in and
 empirical-Bayes fits.
 """
 
 from dataclasses import dataclass, field
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -53,11 +54,40 @@ class PredictionContext:
 
 
 def _fixed_block(spec: ModelSpec, new_data: pd.DataFrame) -> np.ndarray:
+    # na_action="raise" rather than formulaic's default "drop". Dropping is
+    # doubly unsafe here: a NaN covariate would silently shorten the design
+    # (and a single surviving row would then broadcast over every requested
+    # row), and an unseen categorical level becomes NaN, which contrast coding
+    # would otherwise render as an all-zero dummy -- indistinguishable from the
+    # reference level. Both must fail loudly, as unseen structured levels do.
     try:
-        matrix = spec.get_model_matrix(new_data)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            matrix = spec.get_model_matrix(new_data, na_action="raise")
+        # An unseen categorical level is cast to NaN inside contrast coding,
+        # after na_action is applied, so it only surfaces as a warning; left
+        # alone it becomes an all-zero dummy row that scores as the reference
+        # level. Escalate it to the same hard error the structured blocks give.
+        mismatch = next(
+            (
+                item
+                for item in caught
+                if type(item.message).__name__ == "DataMismatchWarning"
+            ),
+            None,
+        )
+        if mismatch is not None:
+            raise ValueError(str(mismatch.message))
+        for item in caught:  # keep every other warning visible
+            warnings.warn_explicit(
+                item.message, item.category, item.filename, item.lineno
+            )
     except Exception as error:
         raise ValueError(
-            f"predict() could not rebuild the fixed-effect design from new_data: {error}"
+            "predict() could not rebuild the fixed-effect design from new_data "
+            f"({error}). A null covariate, or a categorical level that was not "
+            "in the fitted data, will do this: predict reuses the fitted design, "
+            "so it cannot score a level the model never saw."
         ) from error
     return np.asarray(matrix, dtype=float)
 
@@ -97,6 +127,15 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
     design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))
+    # Defence in depth against a block silently losing rows: a length-1 design
+    # would broadcast against the offset and fabricate a prediction for every
+    # requested row.
+    if design.shape[0] != len(new_data):
+        raise ValueError(
+            f"predict() rebuilt a design with {design.shape[0]} rows for "
+            f"{len(new_data)} input rows; new_data may contain nulls in a column "
+            "the model reads"
+        )
     if design.shape[1] != context.width:
         raise ValueError(
             f"predict() rebuilt design width {design.shape[1]} does not match the "

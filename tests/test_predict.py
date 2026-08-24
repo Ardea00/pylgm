@@ -163,3 +163,55 @@ def test_integrated_nonlinear_link_fitted_mean_is_a_documented_approximation():
     # the response scale agrees closely but NOT exactly, by construction
     assert not np.allclose(prediction.fitted_mean, result.fitted_mean, atol=1e-12)
     assert np.allclose(prediction.fitted_mean, result.fitted_mean, rtol=5e-3)
+
+
+def test_predict_uses_the_fitted_sigma_not_its_initial_value():
+    # The context's likelihood comes from compile_lgm, which resolves a
+    # Hyperparameter sigma to .initial. On the optimise/integrate paths that is
+    # only the starting guess, so predict would add the wrong observation
+    # variance -- silently, and by orders of magnitude.
+    frame = pd.DataFrame({
+        "y": [0.5, 1.5, 2.5, 3.5],
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "region": ["a", "b", "a", "b"],
+    })
+    model = LGM(
+        response="y",
+        predictor=Fixed("1 + x") + IID("region", index="region", precision=2.0),
+        likelihood=Gaussian(sigma=Hyperparameter("sigma", initial=3.0)),
+    )
+    for mode in ("optimize", "integrate"):
+        result = model.fit(frame, hyperparameters=mode)
+        prediction = result.predict(frame)
+        assert np.allclose(
+            prediction.predictive_variance, result.predictive_variance, atol=1e-10
+        ), mode
+        # and the context is no longer carrying the 3.0 starting guess
+        assert result.prediction_context.likelihood.sigma < 1.0
+
+
+def test_null_covariate_raises_instead_of_fabricating_rows():
+    # formulaic's default na_action="drop" would shorten the design; a single
+    # surviving row then broadcasts over every requested row, inventing
+    # predictions that look entirely plausible.
+    frame = pd.DataFrame({"y": [0.5, 1.5, 2.5, 3.5], "x": [1.0, 2.0, 3.0, 4.0]})
+    result = LGM(
+        response="y", predictor=Fixed("1 + x"), likelihood=Gaussian(sigma=0.5)
+    ).fit(frame)
+    with pytest.raises(ValueError, match="predict"):
+        result.predict(pd.DataFrame({"x": [1.0, np.nan, np.nan]}))
+
+
+def test_unseen_fixed_categorical_level_raises_not_scored_as_the_reference():
+    # An unseen level is cast to NaN inside contrast coding and would otherwise
+    # become an all-zero dummy -- identical to the reference level, and wrong.
+    frame = pd.DataFrame({
+        "y": [0.5, 1.5, 2.5, 3.5],
+        "g": ["hi", "lo", "mid", "hi"],
+    })
+    result = LGM(
+        response="y", predictor=Fixed("1 + g"), likelihood=Gaussian(sigma=0.5)
+    ).fit(frame)
+    assert np.all(np.isfinite(result.predict(pd.DataFrame({"g": ["lo"]})).predictive_mean))
+    with pytest.raises(ValueError, match="predict"):
+        result.predict(pd.DataFrame({"g": ["ZZZ"]}))

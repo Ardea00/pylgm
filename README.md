@@ -502,8 +502,8 @@ separates the two by an amount that grows with the hyperparameter
 uncertainty, so `predict().fitted_mean` is a moment-matched approximation of
 `result.fitted_mean` there rather than an exact match (reproducing it exactly
 would mean retaining every grid point's latent covariance). `predictive_mean`
-and `predictive_variance` are exact in every case, as is `fitted_mean` for the
-identity link and for all plug-in and empirical-Bayes fits.
+and `predictive_variance` are exact, as is `fitted_mean` for the identity link
+and for all plug-in and empirical-Bayes fits.
 
 `predict` works on a result fitted from either Pandas or a Spark DataFrame,
 but `new_data` itself must always be a Pandas DataFrame — Spark `new_data` is

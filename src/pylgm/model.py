@@ -19,6 +19,42 @@ from pylgm.optimization.inla import integrate_inla
 _ROW_KEY = "__pylgm_row__"
 
 
+def _context_with_fitted_likelihood(context, result, model):
+    """Replace the context's plug-in likelihood with the fitted one.
+
+    ``build_prediction_context`` reads the likelihood off a ``compile_lgm``
+    result, which resolves a ``Hyperparameter`` sigma to its ``.initial``. On
+    the optimise and integrate paths that is only the starting guess, so
+    ``predict`` would add the wrong observation variance -- silently, and by
+    orders of magnitude. Substitute what was actually estimated.
+    """
+    from dataclasses import replace
+
+    from pylgm.likelihoods import CompiledGaussian, Gaussian
+    from pylgm.parameters import Hyperparameter
+
+    if not isinstance(model.likelihood, Gaussian):
+        return context
+    if not isinstance(model.likelihood.sigma, Hyperparameter):
+        return context
+    name = model.likelihood.sigma.name
+
+    marginals = getattr(result, "hyperparameter_marginals", None)
+    if callable(marginals):
+        table = marginals() or {}
+        if name in table:
+            # The integrated fit-row variance mixes per-theta sigma^2, so the
+            # matching plug-in is sqrt(E[sigma^2]) = sqrt(mean^2 + variance).
+            entry = table[name]
+            second = float(entry.mean[0]) ** 2 + float(entry.variance[0])
+            return replace(context, likelihood=CompiledGaussian(float(np.sqrt(second))))
+
+    fitted = result.hyperparameters
+    if fitted and name in fitted:
+        return replace(context, likelihood=CompiledGaussian(float(fitted[name])))
+    return context
+
+
 def _rebuild_result(
     result: GaussianResult | LaplaceResult | INLAResult,
     *,
@@ -270,6 +306,7 @@ class LGM:
             result = self._run_empirical_bayes(family, engine)
             compiled = compile_lgm(self, panel)
         context = build_prediction_context(self, panel, compiled)
+        context = _context_with_fitted_likelihood(context, result, self)
         result = _rebuild_result(result, prediction_context=context)
         return _align_predictions_with_source_rows(result, panel.source_positions)
 
@@ -303,6 +340,7 @@ class LGM:
             result = self._run_empirical_bayes(family, engine)
             compiled = compile_lgm(self, canonical.panel)
         context = build_prediction_context(self, canonical.panel, compiled)
+        context = _context_with_fitted_likelihood(context, result, self)
         return _rebuild_result(
             result, prediction_keys=canonical.prediction_keys, prediction_context=context
         )
