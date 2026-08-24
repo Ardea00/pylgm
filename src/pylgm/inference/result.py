@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -137,6 +138,33 @@ def _marginal_array(value: np.ndarray, name: str) -> np.ndarray:
     return result
 
 
+def _marginal_grid_array(value: np.ndarray, name: str) -> np.ndarray:
+    result = np.asarray(value, dtype=float)
+    if result.ndim != 2:
+        raise ValueError(f"{name} must be two-dimensional (n_components, n_grid)")
+    if not np.isfinite(result).all():
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+@runtime_checkable
+class LatentMarginals(Protocol):
+    """The read surface every latent-marginal representation provides.
+
+    The three implementations differ irreducibly -- a Gaussian mean/variance
+    pair, a grid-weighted mixture of skew-normals, and a tabulated density --
+    so this documents the contract rather than sharing an implementation.
+    """
+
+    @property
+    def mean(self) -> np.ndarray: ...
+    @property
+    def variance(self) -> np.ndarray: ...
+    @property
+    def std(self) -> np.ndarray: ...
+    def quantile(self, probability: float) -> np.ndarray: ...
+
+
 def latent_marginals_from(
     mean: np.ndarray,
     covariance: np.ndarray,
@@ -230,15 +258,6 @@ class GaussianMarginals:
         return _readonly_array(self._mean + norm.ppf(probability) * np.sqrt(self._variance))
 
 
-def _skew_normal_marginal_array(value: np.ndarray, name: str) -> np.ndarray:
-    result = np.asarray(value, dtype=float)
-    if result.ndim != 2:
-        raise ValueError(f"{name} must be two-dimensional (n_components, n_grid)")
-    if not np.isfinite(result).all():
-        raise ValueError(f"{name} must be finite")
-    return result
-
-
 @dataclass(frozen=True, init=False)
 class SkewNormalMarginals:
     """Grid-mixture-of-skew-normals summaries for one or more posterior quantities.
@@ -261,10 +280,10 @@ class SkewNormalMarginals:
         scale: np.ndarray,
         shape: np.ndarray,
     ) -> None:
-        weights = _skew_normal_marginal_array(weights, "weights")
-        location = _skew_normal_marginal_array(location, "location")
-        scale = _skew_normal_marginal_array(scale, "scale")
-        shape = _skew_normal_marginal_array(shape, "shape")
+        weights = _marginal_grid_array(weights, "weights")
+        location = _marginal_grid_array(location, "location")
+        scale = _marginal_grid_array(scale, "scale")
+        shape = _marginal_grid_array(shape, "shape")
         if not (weights.shape == location.shape == scale.shape == shape.shape):
             raise ValueError("weights, location, scale, shape must have matching shapes")
         if np.any(weights < 0):
@@ -345,15 +364,6 @@ class SkewNormalMarginals:
         )
 
 
-def _tabulated_marginal_array(value: np.ndarray, name: str) -> np.ndarray:
-    result = np.asarray(value, dtype=float)
-    if result.ndim != 2:
-        raise ValueError(f"{name} must be two-dimensional (n_components, n_grid)")
-    if not np.isfinite(result).all():
-        raise ValueError(f"{name} must be finite")
-    return result
-
-
 @dataclass(frozen=True, init=False)
 class TabulatedMarginals:
     """Numerical density marginals from grid evaluations for posterior quantities.
@@ -366,8 +376,8 @@ class TabulatedMarginals:
     _density: np.ndarray = field(repr=False)
 
     def __init__(self, x: np.ndarray, density: np.ndarray) -> None:
-        x = _tabulated_marginal_array(x, "x")
-        density = _tabulated_marginal_array(density, "density")
+        x = _marginal_grid_array(x, "x")
+        density = _marginal_grid_array(density, "density")
         if x.shape != density.shape:
             raise ValueError("x and density must have matching shapes")
         if x.shape[0] == 0 or x.shape[1] == 0:

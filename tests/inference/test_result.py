@@ -10,8 +10,10 @@ from pylgm.inference.result import (
     GaussianMarginals,
     INLAResult,
     LaplaceResult,
+    LatentMarginals,
     ModelCriteria,
     SkewNormalMarginals,
+    TabulatedMarginals,
 )
 from pylgm.ir import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
@@ -535,3 +537,18 @@ def test_skew_normal_marginals_quantile_cdf_roundtrip_and_skew():
     q = m.quantile(0.3)
     np.testing.assert_allclose(m.cdf(q)[0], 0.3, atol=1e-4)
     assert m.skewness[0] > 0  # positive shape -> right skew
+
+
+def test_marginal_types_satisfy_the_latent_marginals_protocol():
+    gaussian = GaussianMarginals(np.array([0.0]), np.array([1.0]))
+    skew_normal = SkewNormalMarginals(
+        weights=np.array([[1.0]]), location=np.array([[0.0]]),
+        scale=np.array([[1.0]]), shape=np.array([[0.0]]),
+    )
+    tabulated = TabulatedMarginals(
+        np.linspace(-5, 5, 11)[None, :],
+        np.ones((1, 11)),
+    )
+    assert isinstance(gaussian, LatentMarginals)
+    assert isinstance(skew_normal, LatentMarginals)
+    assert isinstance(tabulated, LatentMarginals)
