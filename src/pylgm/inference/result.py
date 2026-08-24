@@ -474,6 +474,7 @@ class TabulatedMarginals:
         return TabulatedMarginals(self._x[selection], self._density[selection])
 
 
+@dataclass(frozen=True, init=False)
 class _BaseResult:
     """Shared read surface for the fitted-result types.
 
@@ -486,6 +487,18 @@ class _BaseResult:
     Every subclass MUST call :meth:`_init_common` from its ``__init__``; the
     read surface below is backed by the attributes it sets.
     """
+
+    labels: tuple[str, ...]
+    _mean: np.ndarray = field(repr=False)
+    _covariance: np.ndarray = field(repr=False)
+    log_marginal_likelihood: float
+    _predictive_mean: np.ndarray = field(repr=False)
+    _predictive_variance: np.ndarray = field(repr=False)
+    _prediction_keys: pd.DataFrame | None = field(repr=False)
+    block_slices: Mapping[str, slice]
+    diagnostics: Mapping[str, object]
+    _hyperparameters: Mapping[str, float] | None = field(repr=False)
+    _prediction_context: object | None = field(repr=False)
 
     #: Attributes ``_init_common`` sets, plus the public names whose property
     #: getters read them. Both are needed: an ``AttributeError`` raised inside a
@@ -661,18 +674,7 @@ class _BaseResult:
 class GaussianResult(_BaseResult):
     _ENGINE = "exact_gaussian"
 
-    labels: tuple[str, ...]
-    _mean: np.ndarray = field(repr=False)
-    _covariance: np.ndarray = field(repr=False)
-    log_marginal_likelihood: float
-    _predictive_mean: np.ndarray = field(repr=False)
-    _predictive_variance: np.ndarray = field(repr=False)
     observation_variance: float | None
-    _prediction_keys: pd.DataFrame | None = field(repr=False)
-    block_slices: Mapping[str, slice]
-    diagnostics: Mapping[str, object]
-    _hyperparameters: Mapping[str, float] | None = field(repr=False)
-    _prediction_context: object | None = field(repr=False)
 
     def __init__(
         self,
@@ -796,19 +798,8 @@ def _validate_prediction_keys(
 class LaplaceResult(_BaseResult):
     _ENGINE = "laplace"
 
-    labels: tuple[str, ...]
-    _mean: np.ndarray = field(repr=False)
-    _covariance: np.ndarray = field(repr=False)
-    log_marginal_likelihood: float
-    _predictive_mean: np.ndarray = field(repr=False)
-    _predictive_variance: np.ndarray = field(repr=False)
     _fitted_mean: np.ndarray = field(repr=False)
     link_name: str
-    _prediction_keys: pd.DataFrame | None = field(repr=False)
-    block_slices: Mapping[str, slice]
-    diagnostics: Mapping[str, object]
-    _hyperparameters: Mapping[str, float] | None = field(repr=False)
-    _prediction_context: object | None = field(repr=False)
 
     def __init__(
         self,
@@ -875,22 +866,11 @@ class INLAResult(_BaseResult):
     observation_variance: float | None
     _ENGINE = "inla"
 
-    labels: tuple[str, ...]
-    _mean: np.ndarray = field(repr=False)
-    _covariance: np.ndarray = field(repr=False)
-    log_marginal_likelihood: float
-    _predictive_mean: np.ndarray = field(repr=False)
-    _predictive_variance: np.ndarray = field(repr=False)
     _hyperparameter_marginals: Mapping[str, GaussianMarginals] = field(repr=False)
     _criteria: ModelCriteria = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
-    _prediction_keys: pd.DataFrame | None = field(repr=False)
-    block_slices: Mapping[str, slice]
-    diagnostics: Mapping[str, object]
-    _hyperparameters: Mapping[str, float] | None = field(repr=False)
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
-    _prediction_context: object | None = field(repr=False)
 
     def __init__(
         self,

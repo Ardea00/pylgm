@@ -506,7 +506,7 @@
         ]
       }
     },
-    "repr": "INLAResult(observation_variance=None, labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-14.803588059036729, link_name='logit', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.8905005390682823, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.180886115868841}))",
+    "repr": "INLAResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-14.803588059036729, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.8905005390682823, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.180886115868841}), observation_variance=None, link_name='logit')",
     "type": "INLAResult"
   },
   "bernoulli_ar1_laplace_optimize_fixed_rho": {
@@ -913,7 +913,7 @@
         ]
       }
     },
-    "repr": "LaplaceResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-14.213126150917068, link_name='logit', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'latent_dimension': 11, 'observed_count': 10, 'constraint_count': 0, 'newton_iterations': 4, 'final_gradient_norm': 4.724984531667684e-11, 'newton_decrement': None, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 10, 'hyperparameter_penalized': True}))",
+    "repr": "LaplaceResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-14.213126150917068, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'latent_dimension': 11, 'observed_count': 10, 'constraint_count': 0, 'newton_iterations': 4, 'final_gradient_norm': 4.724984531667684e-11, 'newton_decrement': None, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 10, 'hyperparameter_penalized': True}), link_name='logit')",
     "type": "LaplaceResult"
   },
   "bernoulli_iid_laplace_plugin": {
@@ -1150,7 +1150,7 @@
         ]
       }
     },
-    "repr": "LaplaceResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-12.812489743645399, link_name='logit', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'newton_iterations': 4, 'final_gradient_norm': 5.438666468454489e-09, 'newton_decrement': None}))",
+    "repr": "LaplaceResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-12.812489743645399, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'newton_iterations': 4, 'final_gradient_norm': 5.438666468454489e-09, 'newton_decrement': None}), link_name='logit')",
     "type": "LaplaceResult"
   },
   "gaussian_ar1_integrate_fixed_rho": {
@@ -1594,7 +1594,7 @@
         ]
       }
     },
-    "repr": "INLAResult(observation_variance=0.04000000000000008, labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-19.957753696395926, link_name=None, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.3390408041923254, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.3791212035689644}))",
+    "repr": "INLAResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-19.957753696395926, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.3390408041923254, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.3791212035689644}), observation_variance=0.04000000000000008, link_name=None)",
     "type": "INLAResult"
   },
   "gaussian_besag_plugin": {
@@ -1800,7 +1800,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-11.735794863303763, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 4, 'constraint_count': 1}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-11.735794863303763, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 4, 'constraint_count': 1}), observation_variance=0.04000000000000001)",
     "type": "GaussianResult"
   },
   "gaussian_iid_integrate": {
@@ -2074,7 +2074,7 @@
         ]
       }
     },
-    "repr": "INLAResult(observation_variance=0.040000000000000015, labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.576851332606383, link_name=None, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.109392503153815, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 4.406582354505306}))",
+    "repr": "INLAResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.576851332606383, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.109392503153815, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 4.406582354505306}), observation_variance=0.040000000000000015, link_name=None)",
     "type": "INLAResult"
   },
   "gaussian_iid_optimize": {
@@ -2302,7 +2302,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.11618694792178, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 14, 'hyperparameter_penalized': True}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.11618694792178, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 14, 'hyperparameter_penalized': True}), observation_variance=0.04000000000000001)",
     "type": "GaussianResult"
   },
   "gaussian_iid_plugin": {
@@ -2528,7 +2528,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.894947379652649, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.894947379652649, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0}), observation_variance=0.04000000000000001)",
     "type": "GaussianResult"
   },
   "gaussian_rw1_optimize": {
@@ -2852,7 +2852,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-9.324013633469107, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 118, 'hyperparameter_penalized': True}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-9.324013633469107, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 118, 'hyperparameter_penalized': True}), observation_variance=0.04000000000000001)",
     "type": "GaussianResult"
   },
   "gaussian_rw1_plugin": {
@@ -3174,7 +3174,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-13.62733918843533, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-13.62733918843533, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1}), observation_variance=0.04000000000000001)",
     "type": "GaussianResult"
   },
   "poisson_besag_laplace_integrate": {
@@ -3426,7 +3426,7 @@
         ]
       }
     },
-    "repr": "INLAResult(observation_variance=None, labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-14.597482709637376, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.9238460140159366, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_region.precision': 1.5726791789275099}))",
+    "repr": "INLAResult(labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-14.597482709637376, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.9238460140159366, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_region.precision': 1.5726791789275099}), observation_variance=None, link_name='log')",
     "type": "INLAResult"
   },
   "poisson_iid_laplace_integrate_simplified_laplace": {
@@ -3740,7 +3740,7 @@
         ]
       }
     },
-    "repr": "INLAResult(observation_variance=None, labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-22.22219537134888, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.1638152116014266, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 1.5442403740042585, 'skew_clamped': 0}))",
+    "repr": "INLAResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-22.22219537134888, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.1638152116014266, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 1.5442403740042585, 'skew_clamped': 0}), observation_variance=None, link_name='log')",
     "type": "INLAResult"
   },
   "poisson_iid_laplace_plugin": {
@@ -3977,7 +3977,7 @@
         ]
       }
     },
-    "repr": "LaplaceResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-21.641807658603152, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'newton_iterations': 7, 'final_gradient_norm': 1.096358736404939e-15, 'newton_decrement': None}))",
+    "repr": "LaplaceResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-21.641807658603152, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'newton_iterations': 7, 'final_gradient_norm': 1.096358736404939e-15, 'newton_decrement': None}), link_name='log')",
     "type": "LaplaceResult"
   },
   "poisson_rw1_laplace_optimize": {
@@ -4312,7 +4312,7 @@
         ]
       }
     },
-    "repr": "LaplaceResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-20.428669449155315, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1, 'newton_iterations': 6, 'final_gradient_norm': 4.996003610813204e-16, 'newton_decrement': None, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 46, 'hyperparameter_penalized': True}))",
+    "repr": "LaplaceResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-20.428669449155315, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1, 'newton_iterations': 6, 'final_gradient_norm': 4.996003610813204e-16, 'newton_decrement': None, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 46, 'hyperparameter_penalized': True}), link_name='log')",
     "type": "LaplaceResult"
   }
 }
