@@ -75,7 +75,26 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             if gradient_norm < tolerance:
                 converged = True
             else:
-                raise InferenceConvergenceError(iterations, gradient_norm)
+                # The gradient's scale follows the data -- for a Poisson model its
+                # components are of order the counts -- so an absolute threshold is
+                # unreachable on plenty of well-behaved problems: the iteration
+                # reaches the mode and then stalls just above it. Fall back to the
+                # Newton decrement, which is scale-invariant and bounds the actual
+                # suboptimality (f(z) - f* ~ lambda^2 / 2), and accept the point
+                # when it is demonstrably optimal in objective terms.
+                #
+                # This lives only on the failure path on purpose. Breaking on the
+                # decrement inside the loop cures the same stalls but stops earlier
+                # than the gradient test on well-scaled problems, relocating the
+                # mode; here, every fit that converges today is untouched.
+                weights = likelihood.working_weights(eta, y_obs)
+                hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
+                factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
+                decrement = -0.5 * float(gradient @ cho_solve(factor, -gradient))
+                if decrement < tolerance:
+                    converged = True
+                else:
+                    raise InferenceConvergenceError(iterations, gradient_norm)
         eta = reduced_design @ z + offset_obs
         weights = likelihood.working_weights(eta, y_obs)
         hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design

@@ -81,3 +81,79 @@ def test_laplace_succeeds_within_its_actual_iteration_budget():
     needed = full.diagnostics["newton_iterations"]
     tight = fit_laplace(compiled, max_iterations=needed)
     np.testing.assert_allclose(tight.mean, full.mean, atol=1e-8)
+
+
+def _stalling_poisson_model(seed=0, n=14):
+    """A Poisson model whose Newton loop stalls above the absolute tolerance."""
+    import pandas as pd
+
+    from pylgm import AR1, Fixed, Hyperparameter, LGM, Poisson
+    from pylgm.priors import PCPrecision
+
+    rng = np.random.default_rng(seed)
+    signal = np.zeros(n)
+    for i in range(1, n):
+        signal[i] = 0.8 * signal[i - 1] + rng.normal(scale=0.3)
+    frame = pd.DataFrame({
+        "t": list(range(n)),
+        "y": rng.poisson(np.exp(1.5 + signal)).astype(float),
+    })
+    model = LGM(
+        response="y",
+        predictor=Fixed("1")
+        + AR1("trend", index="t",
+              precision=Hyperparameter("trend.precision", initial=1.0,
+                                       prior=PCPrecision(upper_sd=1.0, alpha=0.01)),
+              rho=Hyperparameter("trend.rho", initial=0.0, transform="logit")),
+        likelihood=Poisson(),
+    )
+    return model, frame
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_stalling_poisson_integrate_now_converges(seed):
+    # Before the Newton decrement rescue these raised InferenceConvergenceError
+    # on 8/10 seeds: the loop reached the mode but could not push max|grad|
+    # below the absolute 1e-8 tolerance, and one bad grid point aborted the
+    # whole integration.
+    model, frame = _stalling_poisson_model(seed)
+    result = model.fit(frame, engine="laplace", hyperparameters="integrate")
+    assert np.all(np.isfinite(result.latent_marginals("trend").mean))
+
+
+def test_rescued_fit_is_actually_at_the_mode():
+    # The rescue must accept a genuinely optimal point, not merely relabel a
+    # failure. Check the score equation directly at the returned mode, scaled
+    # by the gradient the data can produce.
+    from pylgm.compiler import compile_lgm
+    from pylgm.data import CanonicalPanel
+    from pylgm.inference.laplace import fit_laplace
+
+    model, frame = _stalling_poisson_model(0)
+    panel = CanonicalPanel(frame, np.ones(len(frame), dtype=bool), ("t",), "y")
+    compiled = compile_lgm(model, panel)
+    result = fit_laplace(compiled)
+
+    design = compiled.design.toarray()[compiled.observed]
+    eta = design @ result.mean + compiled.offset[compiled.observed]
+    y_obs = compiled.y[compiled.observed]
+    score = (
+        compiled.precision.toarray() @ result.mean
+        - design.T @ compiled.likelihood.gradient(eta, y_obs)
+    )
+    scale = max(1.0, float(np.max(np.abs(y_obs))))
+    assert np.max(np.abs(score)) / scale < 1e-6
+
+
+def test_genuine_non_convergence_still_raises():
+    # The rescue must not swallow a fit that really has not converged.
+    from pylgm.compiler import compile_lgm
+    from pylgm.data import CanonicalPanel
+    from pylgm.exceptions import InferenceConvergenceError
+    from pylgm.inference.laplace import fit_laplace
+
+    model, frame = _stalling_poisson_model(0)
+    panel = CanonicalPanel(frame, np.ones(len(frame), dtype=bool), ("t",), "y")
+    compiled = compile_lgm(model, panel)
+    with pytest.raises(InferenceConvergenceError):
+        fit_laplace(compiled, max_iterations=1)

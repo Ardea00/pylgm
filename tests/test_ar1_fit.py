@@ -95,20 +95,13 @@ def test_predict_works_and_unseen_level_points_at_the_nan_workflow():
         result.predict(pd.DataFrame({"t": [999]}))
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pre-existing, not AR1-specific: under hyperparameters='integrate' with a "
-        "non-Gaussian likelihood, the dense Laplace Newton loop stalls just above "
-        "its absolute 1e-8 gradient tolerance at some grid point, and one bad "
-        "point aborts the whole integration. Measured on main for every "
-        "structured effect (RW1 3/10, IID 5/10, ProperCAR 6/10, BYM2 8/10 "
-        "failures); AR1 sits in the same range. Pinned here so the gap is "
-        "visible rather than merely undocumented -- the fix is a relative "
-        "gradient tolerance in the Newton loop, tracked separately."
-    ),
-)
-def test_poisson_integrate_is_currently_unreliable():
+def test_poisson_integrate_converges():
+    """Regression for the Laplace Newton stall rescue.
+
+    The dense Newton loop used to stall just above its absolute gradient
+    tolerance at some grid point, and one bad point aborted the whole
+    integration (8/10 seeds for this model). The decrement rescue fixes it.
+    """
     rng = np.random.default_rng(0)
     n = 14
     signal = np.zeros(n)

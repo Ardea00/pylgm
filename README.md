@@ -70,6 +70,16 @@ through a dedicated `engine="laplace"` Newton-Raphson mode-finder; the Gaussian
 likelihood keeps using `engine="exact_gaussian"` and `LGM.fit` rejects the
 mismatched engine/likelihood combination:
 
+The mode-finder stops on an absolute gradient threshold, and falls back to the
+**Newton decrement** `½·∇fᵀH⁻¹∇f` when that threshold is out of reach. The
+gradient's scale follows the data — for a Poisson model its components are of
+order the counts — so on many well-behaved problems the iteration reaches the
+mode and then stalls just above the threshold. The decrement is scale-invariant
+and bounds the actual suboptimality, so it accepts such a point instead of
+failing. This matters most under `hyperparameters="integrate"`, where a single
+grid point that failed to converge used to abort the whole integration.
+
+
 ```python
 from pylgm import Fixed, IID, LGM, Poisson
 
@@ -554,17 +564,11 @@ is the fixed `(-1, 1)` inset by `1e-6` (no graph-derived bound, unlike
 `ProperCAR`'s ρ); a `Hyperparameter`'s own `lower`/`upper` narrow it further if
 you set them.
 
-Two caveats on that interval. **Conditioning degrades as ρ approaches the
-bound and as the series grows** — `cond(Q)` runs roughly `2e6·n` at the inset
-edge, so a 1000-level series fitted at ρ ≈ 1 retains only about seven
-significant digits. Nothing fails, but treat an ρ̂ pinned at the bound on a long
-series as "the data want a random walk" and consider `RW1` instead. And
-`hyperparameters="integrate"` is currently **reliable only for a Gaussian
-likelihood**: with Poisson or Bernoulli the dense Laplace inner loop stalls just
-above its gradient tolerance at some grid point and aborts the integration.
-That limitation is pre-existing and affects every structured effect, not just
-AR1; use `hyperparameters="optimize"` for non-Gaussian temporal models until it
-is fixed.
+One caveat on that interval: **conditioning degrades as ρ approaches the bound
+and as the series grows** — `cond(Q)` runs roughly `2e6·n` at the inset edge, so
+a 1000-level series fitted at ρ ≈ 1 retains only about seven significant digits.
+Nothing fails, but treat an ρ̂ pinned at the bound on a long series as "the data
+want a random walk" and consider `RW1` instead.
 
 ```python
 from pylgm import AR1, Fixed, Gaussian, Hyperparameter, LGM
