@@ -121,11 +121,59 @@ expectation `exp(mean + variance / 2)` of the linear predictor; for the
 Bernoulli **logit link** there is no closed form, so it is a documented
 **point estimate** `logit^-1(mean)` that ignores the linear-predictor
 variance. `result.predictive_variance` is the linear-predictor (eta)
-posterior variance and excludes response-scale observation noise, unlike
-`GaussianResult.predictive_variance`, which adds it. A runnable example lives at
+posterior variance and excludes response-scale observation noise, for every
+result type including `GaussianResult` — see
+["The `predictive_variance` convention"](#the-predictive_variance-convention)
+below. A runnable example lives at
 [`examples/count_glm/README.md`](examples/count_glm/README.md), including the
 Spark data-boundary path (Spark only collects and canonicalizes data; the
 Laplace fit itself still runs on the driver, same as `exact_gaussian`).
+
+## The `predictive_variance` convention
+
+`predictive_variance` is the **linear-predictor** posterior variance
+`Var(eta)` for every result type (`GaussianResult`, `LaplaceResult`,
+`INLAResult`) and for `result.predict(new_data)` — it never includes
+response-scale observation noise.
+
+**This changed for Gaussian models.** Before this version,
+`GaussianResult.predictive_variance` (and the Gaussian path of `predict()`)
+included the observation variance `sigma^2` — i.e. it reported
+`Var(eta) + sigma^2` — while the Laplace path already reported `Var(eta)`
+alone, so the same attribute name meant two different quantities depending on
+engine. Reported Gaussian predictive variances (and predictive standard
+deviations) recorded from before this version are too large by `sigma^2`;
+**re-fit rather than reuse stored numbers**. Poisson and Bernoulli values are
+unchanged — they never included an observation variance, since those
+likelihoods have no such parameter.
+
+`GaussianResult` gains **`observation_variance`** (the Gaussian likelihood's
+`sigma^2`). The old, response-scale value is recovered exactly:
+
+```python
+response_scale_variance = result.predictive_variance + result.observation_variance
+```
+
+`predict()`'s returned `Prediction` does not carry `observation_variance`
+itself (it is a property of the fitted `GaussianResult`, constant across new
+rows), so the same reconstruction reads `prediction.predictive_variance +
+result.observation_variance`.
+
+Why this convention: it is the only one definable for Poisson/Bernoulli
+likelihoods, which have no observation-variance parameter at all; it matches
+R-INLA's `summary.linear.predictor`; and it is what the Laplace path and
+every non-Gaussian model already did. `fitted_mean`, `mean`,
+`log_marginal_likelihood`, and the model-assessment criteria (DIC/WAIC/CPO/PIT)
+are all unaffected by this change.
+
+**Structural note.** The three result types (`GaussianResult`, `LaplaceResult`,
+`INLAResult`) now share a private `_BaseResult` carrying their common
+read-only properties, delegating methods, and constructor validation; they
+remain siblings — none inherits another, and no public API was renamed,
+removed, or moved. The three latent-marginal types (`GaussianMarginals`,
+`SkewNormalMarginals`, `TabulatedMarginals`) satisfy a documented
+`LatentMarginals` protocol, exported from `pylgm.inference`, formalizing the
+`mean`/`variance`/`std`/`quantile` surface they already shared.
 
 ## Empirical Bayes
 
@@ -439,8 +487,8 @@ new_scenarios = pd.DataFrame({"x": [10.0, -3.0], "region": ["b", "a"]})
 prediction = result.predict(new_scenarios)
 print(prediction.to_frame())
 #    predictive_mean  predictive_sd  fitted_mean
-# 0         9.499999       1.833874     9.499999
-# 1        -3.499999       1.382286    -3.499999
+# 0         9.499999       1.764396     9.499999
+# 1        -3.499999       1.288687    -3.499999
 ```
 
 `predict` **reuses** the fitted posterior; it cannot create a new latent
@@ -489,7 +537,7 @@ result = model.fit(frame)
 # The last 4 rows are the future periods; predictive_mean/_variance already
 # cover them, in the caller's row order (same arrays fit() always returns).
 print(np.round(result.predictive_mean[-4:], 3))    # [0.957 0.957 0.957 0.957]
-print(np.round(result.predictive_variance[-4:], 3))  # [0.597 1.077 1.597 2.077]
+print(np.round(result.predictive_variance[-4:], 3))  # [0.557 1.037 1.557 2.037]
 ```
 
 An `RW1`/`RW2` forecast extrapolates **flat** from the last fitted level —
@@ -505,10 +553,12 @@ couples the whole chain including the unobserved tail).
 | new covariate values / scenarios on **known** index levels | `result.predict(new_data)` |
 | **new** time points, regions, or groups | `NaN`-response rows at `fit` time |
 
-`predictive_variance` and `fitted_mean` follow exactly the same per-engine
-conventions `predict` mirrors from the fit-row outputs: the exact-Gaussian
-path's `predictive_variance` includes the observation variance `σ²`; the
-Laplace path's does not. `fitted_mean` is identity for Gaussian, the exact
+`predictive_variance` and `fitted_mean` follow exactly the same conventions
+`predict` mirrors from the fit-row outputs: `predictive_variance` is the
+linear-predictor variance `Var(eta)`, for every engine — see
+["The `predictive_variance` convention"](#the-predictive_variance-convention)
+above for the Gaussian reconstruction of the response-scale value.
+`fitted_mean` is identity for Gaussian, the exact
 lognormal expectation `exp(μ + σ²_η/2)` for the Poisson log link, and the
 documented **point estimate** `logit⁻¹(μ)` (ignoring linear-predictor
 variance) for the Bernoulli logit link — see

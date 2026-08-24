@@ -110,9 +110,13 @@ In 0.3, fit-row predictions are exposed as `predictive_mean` and
 out-of-sample rows on `GaussianResult`, `LaplaceResult`, and `INLAResult`
 alike — it reuses the fitted latent posterior and cannot create a new latent
 column (see the [project README](../../../README.md#predicting-new-rows)).
-Still deferred: Spark `new_data` (the accepted `new_data` is Pandas-only), a
-prior-based fallback for an unseen index level, predictive quantiles or
-simulation, and a future-frame construction helper.
+`predictive_variance` means the linear-predictor variance `Var(eta)`
+consistently across every result type and for `predict()` (see the
+[project README](../../../README.md#the-predictive_variance-convention));
+this was a breaking change for `GaussianResult`, which previously folded the
+observation variance into it. Still deferred: Spark `new_data` (the accepted
+`new_data` is Pandas-only), a prior-based fallback for an unseen index level,
+predictive quantiles or simulation, and a future-frame construction helper.
 `hyperparameter_marginals()` is present but empty for the conditional exact
 fit because hyperparameters are not integrated.
 
@@ -321,13 +325,44 @@ Still deferred:
   strategy.
 - **R-INLA parity fixtures** — validation remains against a brute-force
   true-marginal oracle, not reproduced R-INLA output.
-- **Result-type unification** — `latent_marginals` currently returns one of
-  three distinct types (`GaussianMarginals`, `SkewNormalMarginals`,
-  `TabulatedMarginals`) depending on `latent_strategy`, rather than a single
-  common marginal interface.
 - Other recorded INLA follow-ups: integrand-mode grid recentering,
   randomized discrete PIT, robust discrete CPO, and model-assessment
   criteria for non-integrated fits.
+
+**Result-type unification — shipped.** `latent_marginals` still returns one
+of three distinct types (`GaussianMarginals`, `SkewNormalMarginals`,
+`TabulatedMarginals`) depending on `latent_strategy` — they differ
+irreducibly (a mean/variance pair, a grid-weighted skew-normal mixture, a
+tabulated density) — but all three now satisfy a documented
+`LatentMarginals` protocol (`mean`/`variance`/`std`/`quantile`), exported
+from `pylgm.inference`. Separately, `GaussianResult`, `LaplaceResult`, and
+`INLAResult` now share a private `_BaseResult` carrying their common
+read-only properties, delegating methods, and constructor validation — they
+remain siblings, none inherits another. As part of the same slice,
+`predictive_variance` was made consistently the linear-predictor variance
+`Var(eta)` for every result type and for `predict()`; previously the
+exact-Gaussian path alone folded the observation variance `sigma^2` into it.
+This is a breaking change to reported Gaussian predictive variances (and
+standard deviations), reconstructible via the new
+`GaussianResult.observation_variance` (see the
+[project README](../../../README.md#the-predictive_variance-convention)).
+Still deferred from this slice:
+
+- **A single common marginal type** — the protocol documents the shared
+  contract; the three implementations are not merged into one class.
+- **The bounded-parameter bounds-block extraction in `compiler.py`** — the
+  `parameter_bounds[...] = _log_bounds(...)` pattern is duplicated across
+  every structured-effect branch rather than factored into a shared helper.
+- **The in-loop Newton decrement** — the Laplace mode-finder's decrement
+  rescue only fires in the post-loop failure branch, after a stalling solve
+  burns its full iteration budget; a decrement check gated on gradient
+  stagnation inside the loop would cut that cost several-fold without
+  relocating any mode.
+- **`_BaseResult` as a dataclass** — the ~106 lines of field declarations,
+  `__init__` signatures, and `_init_common` forwarding duplicated across the
+  three result types could shrink further, but converting `_BaseResult` to a
+  dataclass reorders fields, which is itself a declared-breaking change and
+  was left for a later slice.
 
 ### 4. Spatial effects
 
