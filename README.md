@@ -148,7 +148,11 @@ unchanged — they never included an observation variance, since those
 likelihoods have no such parameter.
 
 `GaussianResult` gains **`observation_variance`** (the Gaussian likelihood's
-`sigma^2`). The old, response-scale value is recovered exactly:
+`sigma^2`), and `INLAResult` carries it too when the conditional engine is
+Gaussian — there it is `E[sigma^2]` over the hyperparameter grid, so an
+integrated fit reconstructs the same way. It is `None` for a Laplace
+conditional engine, which has no observation variance. The old, response-scale
+value is recovered exactly:
 
 ```python
 response_scale_variance = result.predictive_variance + result.observation_variance

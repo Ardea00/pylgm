@@ -35,7 +35,9 @@ def test_pipeline_persists_resolved_run(tmp_path: Path) -> None:
     resolved = json.loads((output / "resolved_config.json").read_text())
     assert result.mean.shape == (1,)
     assert summary["engine"] == "exact_gaussian"
-    assert summary["artifact_schema_version"] == 1
+    # v2: predictive_variance became the linear-predictor variance and
+    # observation_variance was added, so a v1 artifact is not comparable.
+    assert summary["artifact_schema_version"] == 2
     assert summary["conditional_on_fixed_hyperparameters"] is True
     assert len(summary["data_fingerprint"]) == 64
     assert resolved["model"]["fixed_prior_precision"] == 1e-6

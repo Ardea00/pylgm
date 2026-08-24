@@ -211,7 +211,7 @@ def write_run(
     artifact_fingerprint = hashlib.sha256(
         _canonical_json(
             {
-                "artifact_schema_version": 1,
+                "artifact_schema_version": 2,
                 "data_fingerprint": data_fingerprint,
                 "resolved_config": resolved_config,
                 "result": {
@@ -220,14 +220,19 @@ def write_run(
                     "mean": _array_payload(result.mean),
                     "covariance": _array_payload(result.covariance),
                     "predictive_mean": _array_payload(result.predictive_mean),
+                    # v2: predictive_variance is now the linear-predictor
+                    # variance; the observation variance is recorded separately
+                    # so a persisted artifact still determines the response-scale
+                    # variance.
                     "predictive_variance": _array_payload(result.predictive_variance),
+                    "observation_variance": getattr(result, "observation_variance", None),
                 },
                 "environment": environment,
             }
         )
     ).hexdigest()
     summary = {
-        "artifact_schema_version": 1,
+        "artifact_schema_version": 2,
         "engine": "exact_gaussian",
         "conditional_on_fixed_hyperparameters": True,
         "data_fingerprint": data_fingerprint,

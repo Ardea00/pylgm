@@ -110,6 +110,7 @@ def _rebuild_result(
             fitted_mean=fitted_mean,
             link_name=result.link_name,
             latent_marginal_table=result.latent_marginal_table,
+            observation_variance=result.observation_variance,
             **common,
         )
     return GaussianResult(observation_variance=result.observation_variance, **common)

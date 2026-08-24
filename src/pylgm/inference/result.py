@@ -524,7 +524,9 @@ class _BaseResult:
                 f"{type(self).__name__} has no {name!r}: it was constructed without "
                 "calling _init_common(), which every result subclass must do"
             )
-        raise AttributeError(name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     def _init_common(
         self,
@@ -825,6 +827,10 @@ class LaplaceResult(_BaseResult):
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
     ) -> None:
+        def _store_laplace_extras() -> None:
+            object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
+            object.__setattr__(self, "link_name", str(link_name))
+
         self._init_common(
             labels=labels,
             mean=mean,
@@ -837,10 +843,7 @@ class LaplaceResult(_BaseResult):
             prediction_keys=prediction_keys,
             hyperparameters=hyperparameters,
             prediction_context=prediction_context,
-            extra_store=lambda: (
-                object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean)),
-                object.__setattr__(self, "link_name", str(link_name)),
-            ),
+            extra_store=_store_laplace_extras,
         )
 
     @property
@@ -865,6 +868,11 @@ def _readonly_hyperparameter_marginals(
 
 @dataclass(frozen=True, init=False)
 class INLAResult(_BaseResult):
+    #: ``E[sigma^2]`` over the hyperparameter grid for a Gaussian conditional
+    #: engine, so ``predictive_variance + observation_variance`` recovers the
+    #: response-scale variance as it does for a direct Gaussian fit. ``None``
+    #: for a Laplace conditional engine, which has no observation variance.
+    observation_variance: float | None
     _ENGINE = "inla"
 
     labels: tuple[str, ...]
@@ -903,6 +911,7 @@ class INLAResult(_BaseResult):
         hyperparameters: Mapping[str, float] | None = None,
         latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = None,
         prediction_context: object | None = None,
+        observation_variance: float | None = None,
     ) -> None:
         def _validate_inla_extras() -> None:
             if not isinstance(criteria, ModelCriteria):
@@ -930,6 +939,11 @@ class INLAResult(_BaseResult):
                 self, "link_name", str(link_name) if link_name is not None else None
             )
             object.__setattr__(self, "_latent_marginal_table", latent_marginal_table)
+            object.__setattr__(
+                self,
+                "observation_variance",
+                None if observation_variance is None else float(observation_variance),
+            )
 
         self._init_common(
             labels=labels,

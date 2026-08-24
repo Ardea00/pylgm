@@ -315,6 +315,9 @@ def integrate_inla(
     pm_acc = np.zeros_like(reference.predictive_mean)
     pv_acc = np.zeros_like(reference.predictive_variance)
     fitted_acc = np.zeros_like(reference.fitted_mean) if is_laplace else None
+    # E[sigma^2] over the grid, so an integrated Gaussian fit can still recover
+    # the response-scale variance as predictive_variance + observation_variance.
+    observation_acc = None if is_laplace else 0.0
     theta_mean = {name: 0.0 for name in names}
     theta_sq = {name: 0.0 for name in names}
 
@@ -327,6 +330,8 @@ def integrate_inla(
         pv_acc += w * (cond.predictive_variance + pm * pm)
         if is_laplace:
             fitted_acc += w * cond.fitted_mean
+        else:
+            observation_acc += w * float(cond.observation_variance)
         for name in names:
             theta_mean[name] += w * theta[name]
             theta_sq[name] += w * theta[name] * theta[name]
@@ -417,6 +422,7 @@ def integrate_inla(
         hyperparameter_marginals=hyper_marginals,
         criteria=criteria,
         fitted_mean=fitted_acc, link_name=link_name,
+        observation_variance=observation_acc,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
         latent_marginal_table=latent_marginal_table,
     )

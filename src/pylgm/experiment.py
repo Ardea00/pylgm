@@ -203,7 +203,11 @@ def _prediction_rows(
     keys = [*config.data.panel, config.data.time]
     predicted = panel.frame.loc[:, keys]
     predicted["mean"] = fit.predictive_mean
-    predicted["variance"] = fit.predictive_variance
+    # Backtest scoring is on the RESPONSE scale: evaluation.metrics feeds this
+    # column to norm.logpdf(actual, ...) and to the interval bounds, so it needs
+    # the observation noise that predictive_variance (the linear-predictor
+    # variance) deliberately excludes.
+    predicted["variance"] = fit.predictive_variance + fit.observation_variance
     target = fold.target_frame.loc[:, [*keys, config.data.response]].rename(
         columns={config.data.response: "actual"}
     )

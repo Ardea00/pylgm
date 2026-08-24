@@ -14,6 +14,7 @@ Regenerate the baseline (only ever on code you trust to be correct) with:
 """
 
 import json
+import sys
 import math
 from collections.abc import Mapping
 from pathlib import Path
@@ -657,7 +658,13 @@ def test_inla_constructor_error_messages_are_stable():
     )
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
+    # Gated: this overwrites a golden file whose whole value is being hard to
+    # change by accident. Run with --regenerate to mean it.
+    if "--regenerate" not in sys.argv:
+        raise SystemExit(
+            "refusing to overwrite the baseline; re-run with --regenerate"
+        )
     # One-off baseline generation: run on trusted, unmodified code only.
     matrix = _to_jsonable(_compute_surface_matrix())
     BASELINE_PATH.write_text(json.dumps(matrix, indent=2, sort_keys=True) + "\n")

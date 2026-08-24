@@ -335,3 +335,32 @@ def test_comparison_is_deterministic_and_tables_are_defensive(
     assert first.predictions.loc[0, "mean"] != -999.0
     with pytest.raises(TypeError):
         first.failures["new"] = ("failure",)  # type: ignore[index]
+
+
+def test_backtest_variance_is_on_the_response_scale(tmp_path: Path) -> None:
+    """The scored variance column must carry the observation noise.
+
+    ``evaluation.metrics`` feeds it to ``norm.logpdf(actual, ...)`` and to the
+    interval bounds, so it is a RESPONSE-scale variance -- whereas
+    ``predictive_variance`` is the linear-predictor variance and deliberately
+    excludes sigma^2. Passing it through unadjusted silently made every
+    probabilistic score wrong (log predictive density ~11x worse, intervals ~4x
+    too narrow) while the whole suite still passed, because nothing pinned this
+    column. The model's variance must exceed the bare linear-predictor variance
+    by exactly the fitted sigma^2.
+    """
+    experiment = Experiment.from_yaml(_write_config(tmp_path / "experiment.yaml"))
+    result = experiment.compare(_panel(), output=None)
+    predictions = result.predictions
+    model_rows = predictions[predictions["candidate"].eq("base")]
+    assert not model_rows.empty
+
+    variances = model_rows["variance"].to_numpy()
+    assert np.all(variances > 0.0)
+    # Dropping the observation noise shrinks these from ~0.75/0.96 to
+    # ~0.050/0.057 on this fixture -- more than an order of magnitude. 0.5
+    # separates the two regimes with wide margin without pinning exact values.
+    assert np.all(variances > 0.5), (
+        "scored variance looks like Var(eta) without the observation noise: "
+        f"{sorted(set(np.round(variances, 6)))}"
+    )

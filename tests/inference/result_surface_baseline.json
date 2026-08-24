@@ -189,6 +189,7 @@
         0.0940222876026,
         -0.0540164888324
       ],
+      "observation_variance": null,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -505,7 +506,7 @@
         ]
       }
     },
-    "repr": "INLAResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-14.803588059036729, link_name='logit', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.8905005390682823, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.180886115868841}))",
+    "repr": "INLAResult(observation_variance=None, labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-14.803588059036729, link_name='logit', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.8905005390682823, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.180886115868841}))",
     "type": "INLAResult"
   },
   "bernoulli_ar1_laplace_optimize_fixed_rho": {
@@ -1331,6 +1332,7 @@
         -0.740724446196,
         0.170120017026
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -1592,7 +1594,7 @@
         ]
       }
     },
-    "repr": "INLAResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-19.957753696395926, link_name=None, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.3390408041923254, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.3791212035689644}))",
+    "repr": "INLAResult(observation_variance=0.04000000000000008, labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7', 'trend:8', 'trend:9'), log_marginal_likelihood=-19.957753696395926, link_name=None, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 11, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.3390408041923254, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_trend.precision': 1.3791212035689644}))",
     "type": "INLAResult"
   },
   "gaussian_besag_plugin": {
@@ -1860,6 +1862,7 @@
         0.0840694136695,
         -0.187884258747
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -2071,7 +2074,7 @@
         ]
       }
     },
-    "repr": "INLAResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.576851332606383, link_name=None, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.109392503153815, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 4.406582354505306}))",
+    "repr": "INLAResult(observation_variance=0.040000000000000015, labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.576851332606383, link_name=None, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.109392503153815, 'inla_conditional_engine': 'exact_gaussian', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 4.406582354505306}))",
     "type": "INLAResult"
   },
   "gaussian_iid_optimize": {
@@ -3238,6 +3241,7 @@
         -0.251717483567,
         -0.00593677879712
       ],
+      "observation_variance": null,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -3422,7 +3426,7 @@
         ]
       }
     },
-    "repr": "INLAResult(labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-14.597482709637376, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.9238460140159366, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_region.precision': 1.5726791789275099}))",
+    "repr": "INLAResult(observation_variance=None, labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-14.597482709637376, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 4, 'inla_effective_weight': 2.9238460140159366, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_region.precision': 1.5726791789275099}))",
     "type": "INLAResult"
   },
   "poisson_iid_laplace_integrate_simplified_laplace": {
@@ -3493,6 +3497,7 @@
         -0.183477719348,
         -0.348690614827
       ],
+      "observation_variance": null,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -3735,7 +3740,7 @@
         ]
       }
     },
-    "repr": "INLAResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-22.22219537134888, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.1638152116014266, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 1.5442403740042585, 'skew_clamped': 0}))",
+    "repr": "INLAResult(observation_variance=None, labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-22.22219537134888, link_name='log', block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'inla_grid_points': 5, 'inla_effective_weight': 3.1638152116014266, 'inla_conditional_engine': 'laplace', 'inla_active_bounds': '', 'inla_collapsed': False, 'inla_mode_grp.precision': 1.5442403740042585, 'skew_clamped': 0}))",
     "type": "INLAResult"
   },
   "poisson_iid_laplace_plugin": {
