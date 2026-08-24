@@ -37,6 +37,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
 
     z = np.zeros(reduced_dim)
     gradient_norm = 0.0
+    newton_decrement = None
     iterations = 0
     converged = reduced_dim == 0
     if reduced_dim:
@@ -91,10 +92,10 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
                 hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
                 factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
                 decrement = -0.5 * float(gradient @ cho_solve(factor, -gradient))
-                if decrement < tolerance:
-                    converged = True
-                else:
+                if decrement >= tolerance:
                     raise InferenceConvergenceError(iterations, gradient_norm)
+                converged = True
+                newton_decrement = decrement
         eta = reduced_design @ z + offset_obs
         weights = likelihood.working_weights(eta, y_obs)
         hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
@@ -143,6 +144,9 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             "constraint_count": int(model.constraints.shape[0]),
             "newton_iterations": int(iterations),
             "final_gradient_norm": float(gradient_norm),
+            # Set only when the gradient test failed and the decrement carried
+            # the fit, so a rescued mode is auditable in the field.
+            "newton_decrement": newton_decrement,
         },
     )
 

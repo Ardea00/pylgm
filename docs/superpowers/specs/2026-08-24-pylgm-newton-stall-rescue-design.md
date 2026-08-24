@@ -55,8 +55,20 @@ the stalls, but it stops earlier than the gradient test on well-scaled problems
 and so relocates the mode slightly: two existing precision tests
 (`test_laplace_poisson_mode_solves_the_score_equation`,
 `test_laplace_bernoulli_intercept_matches_logit_of_rate`) fail under that
-variant. Confining it to the failure path means **every fit that converges
-today stops at the identical iterate**, and only genuine stalls change outcome.
+variant. Confining it to the failure path means **every inner Newton solve that
+converges today stops at the identical iterate**, and only genuine stalls change
+outcome.
+
+That identity holds at the *solver*; it does not mean user-visible results are
+unchanged. `optimize` never surfaced a stall either — `empirical_bayes.py`
+catches `InferenceError` and substitutes an invalid objective, so a stalled
+hyperparameter was silently treated as infeasible and searched around. With the
+rescue those points return real fits, so empirical-Bayes estimates move too.
+Measured over a 189-fit matrix: 179 were comparable (10 previously raised), of
+which 160 are byte-identical and 19 change — the largest by 4.9 nats of log
+marginal likelihood, and one AR1 `rho` posterior mean correcting from −0.9998 to
++0.91 on data simulated with `rho = 0.8`. Where comparable the new fit attains an
+equal or higher marginal likelihood, so these are corrections, not regressions.
 
 Verified with the change in place:
 
@@ -86,8 +98,10 @@ was about to raise, so the happy path is unchanged in cost.
   measurement, and silently dropping points could mask a genuinely broken
   model. Revisit only if failures reappear.
 - Relative/adaptive gradient tolerances as the primary criterion, and any
-  change to `max_iterations` or the line search.
-- The sparse Laplace path (this solver is the dense reference implementation).
+  change to `max_iterations` or the line search. Note a stalled solve still
+  burns the full iteration budget before the rescue fires (~26% of inner solves
+  in a stalling integrate run); a decrement check gated on gradient stagnation
+  *inside* the loop would cut that several-fold without relocating any mode.
 - Accepting a stalled *line search* as convergence — a different failure mode,
   still a `NumericalError`.
 
@@ -124,8 +138,10 @@ was about to raise, so the happy path is unchanged in cost.
 ## Acceptance criteria
 1. Poisson/Bernoulli models fit under `hyperparameters="integrate"` reliably;
    the previously-failing cases succeed.
-2. Every fit that converges today converges to the identical iterate — the full
-   suite passes with no test tolerance loosened.
+2. Every inner Newton solve that converges today converges to the identical
+   iterate — the full suite passes with no test tolerance loosened. User-visible
+   non-Gaussian results may change where a stall previously poisoned the
+   empirical-Bayes surface or aborted an integration; that is documented.
 3. The AR1 `xfail` becomes a real passing test; the docs no longer warn that
    non-Gaussian integrate is unreliable.
 4. A genuinely non-converged fit still raises `InferenceConvergenceError`.

@@ -85,8 +85,6 @@ def test_laplace_succeeds_within_its_actual_iteration_budget():
 
 def _stalling_poisson_model(seed=0, n=14):
     """A Poisson model whose Newton loop stalls above the absolute tolerance."""
-    import pandas as pd
-
     from pylgm import AR1, Fixed, Hyperparameter, LGM, Poisson
     from pylgm.priors import PCPrecision
 
@@ -123,34 +121,29 @@ def test_stalling_poisson_integrate_now_converges(seed):
 
 def test_rescued_fit_is_actually_at_the_mode():
     # The rescue must accept a genuinely optimal point, not merely relabel a
-    # failure. Check the score equation directly at the returned mode, scaled
-    # by the gradient the data can produce.
-    from pylgm.compiler import compile_lgm
-    from pylgm.data import CanonicalPanel
-    from pylgm.inference.laplace import fit_laplace
-
+    # failure. max_iterations=5 is chosen to land IN the rescue branch: the
+    # gradient test has not fired, so the decrement is what accepts the point.
+    # The iteration assertion pins that -- without it this test silently stops
+    # exercising the branch it exists to guard.
     model, frame = _stalling_poisson_model(0)
     panel = CanonicalPanel(frame, np.ones(len(frame), dtype=bool), ("t",), "y")
     compiled = compile_lgm(model, panel)
-    result = fit_laplace(compiled)
 
-    design = compiled.design.toarray()[compiled.observed]
-    eta = design @ result.mean + compiled.offset[compiled.observed]
-    y_obs = compiled.y[compiled.observed]
-    score = (
-        compiled.precision.toarray() @ result.mean
-        - design.T @ compiled.likelihood.gradient(eta, y_obs)
-    )
-    scale = max(1.0, float(np.max(np.abs(y_obs))))
-    assert np.max(np.abs(score)) / scale < 1e-6
+    rescued = fit_laplace(compiled, max_iterations=5)
+    assert rescued.diagnostics["newton_iterations"] == 5
+    assert rescued.diagnostics["final_gradient_norm"] > 1e-8  # gradient test did NOT fire
+
+    # Compare against a well-converged reference rather than a raw score
+    # threshold: the decrement scales the gradient by H^-1, so a stiff
+    # direction tolerates a large raw score for a negligible positional error.
+    reference = fit_laplace(compiled, max_iterations=200)
+    spread = np.sqrt(np.diag(reference.covariance))
+    assert np.max(np.abs(rescued.mean - reference.mean) / spread) < 1e-4
+    assert abs(rescued.log_marginal_likelihood - reference.log_marginal_likelihood) < 1e-4
 
 
 def test_genuine_non_convergence_still_raises():
     # The rescue must not swallow a fit that really has not converged.
-    from pylgm.compiler import compile_lgm
-    from pylgm.data import CanonicalPanel
-    from pylgm.exceptions import InferenceConvergenceError
-    from pylgm.inference.laplace import fit_laplace
 
     model, frame = _stalling_poisson_model(0)
     panel = CanonicalPanel(frame, np.ones(len(frame), dtype=bool), ("t",), "y")

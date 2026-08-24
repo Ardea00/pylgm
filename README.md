@@ -70,16 +70,6 @@ through a dedicated `engine="laplace"` Newton-Raphson mode-finder; the Gaussian
 likelihood keeps using `engine="exact_gaussian"` and `LGM.fit` rejects the
 mismatched engine/likelihood combination:
 
-The mode-finder stops on an absolute gradient threshold, and falls back to the
-**Newton decrement** `½·∇fᵀH⁻¹∇f` when that threshold is out of reach. The
-gradient's scale follows the data — for a Poisson model its components are of
-order the counts — so on many well-behaved problems the iteration reaches the
-mode and then stalls just above the threshold. The decrement is scale-invariant
-and bounds the actual suboptimality, so it accepts such a point instead of
-failing. This matters most under `hyperparameters="integrate"`, where a single
-grid point that failed to converge used to abort the whole integration.
-
-
 ```python
 from pylgm import Fixed, IID, LGM, Poisson
 
@@ -93,6 +83,26 @@ model = LGM(
 )
 result = model.fit(frame, engine="laplace")
 ```
+
+The mode-finder stops on an absolute gradient threshold, and falls back to the
+**Newton decrement** `½·∇fᵀH⁻¹∇f` when that threshold is out of reach. The
+gradient's scale follows the data — for a Poisson model its components are of
+order the counts — so on many well-behaved problems the iteration reaches the
+mode and then stalls just above the threshold, having already found it. The
+decrement is scale-invariant and closely estimates the remaining suboptimality,
+so such a point is accepted instead of raising. `result.diagnostics` records
+`newton_decrement` when that fallback carried a fit.
+
+**This changed non-Gaussian results in 0.3.x.** Before the fallback, a stalled
+inner fit raised — which aborted an entire `hyperparameters="integrate"` run,
+and, less visibly, made `hyperparameters="optimize"` treat that hyperparameter
+as infeasible and search around it. Both now see the converged fit, so
+previously-recorded Poisson and Bernoulli estimates can move, occasionally a
+lot: in our test matrix roughly one non-Gaussian fit in ten changed, the
+largest by 4.9 nats of log marginal likelihood, and in one case an AR1 `rho`
+posterior mean corrected from −0.9998 to +0.91 on data simulated with
+`rho = 0.8`. The new answers are the trustworthy ones; re-fit rather than
+comparing against stored output from an earlier version.
 
 `LGM.offset` names an optional column added directly to the linear predictor
 `eta` before the link (e.g. a log-exposure column for a Poisson rate model);
