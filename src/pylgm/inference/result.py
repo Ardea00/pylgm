@@ -474,39 +474,38 @@ class TabulatedMarginals:
         return TabulatedMarginals(self._x[selection], self._density[selection])
 
 
-@dataclass(frozen=True, init=False)
-class GaussianResult:
-    labels: tuple[str, ...]
-    _mean: np.ndarray = field(repr=False)
-    _covariance: np.ndarray = field(repr=False)
-    log_marginal_likelihood: float
-    _predictive_mean: np.ndarray = field(repr=False)
-    _predictive_variance: np.ndarray = field(repr=False)
-    _prediction_keys: pd.DataFrame | None = field(repr=False)
-    block_slices: Mapping[str, slice]
-    diagnostics: Mapping[str, object]
-    _hyperparameters: Mapping[str, float] | None = field(repr=False)
-    _prediction_context: object | None = field(repr=False)
+class _BaseResult:
+    """Shared read surface for the fitted-result types.
 
-    def __init__(
+    The three results (``GaussianResult``, ``LaplaceResult``, ``INLAResult``)
+    are SIBLINGS under this base: none inherits another. ``model._rebuild_result``
+    dispatches with isinstance and tests ``LaplaceResult`` before ``INLAResult``,
+    so making one a subclass of another would silently misroute every rebuild
+    of the more specific type.
+    """
+
+    def _init_common(
         self,
+        *,
         labels: tuple[str, ...],
         mean: np.ndarray,
         covariance: np.ndarray,
         log_marginal_likelihood: float,
         predictive_mean: np.ndarray,
         predictive_variance: np.ndarray,
-        block_slices: Mapping[str, slice] | None = None,
-        diagnostics: Mapping[str, object] | None = None,
-        prediction_keys: pd.DataFrame | None = None,
-        *,
-        hyperparameters: Mapping[str, float] | None = None,
-        prediction_context: object | None = None,
+        block_slices: Mapping[str, slice] | None,
+        diagnostics: Mapping[str, object] | None,
+        prediction_keys: pd.DataFrame | None,
+        hyperparameters: Mapping[str, float] | None,
+        prediction_context: object | None,
+        extra_validate=None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
         if diagnostics is not None and not isinstance(diagnostics, Mapping):
             raise TypeError("diagnostics must be a mapping")
+        if extra_validate is not None:
+            extra_validate()
         _validate_prediction_keys(prediction_keys, predictive_mean)
         covariance = np.asarray(covariance)
         if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
@@ -571,7 +570,7 @@ class GaussianResult:
 
     @property
     def engine(self) -> str:
-        return "exact_gaussian"
+        return self._ENGINE
 
     @property
     def converged(self) -> bool:
@@ -596,6 +595,52 @@ class GaussianResult:
                 "on results produced by LGM.fit"
             )
         return predict_from(self.prediction_context, self.mean, self.covariance, new_data)
+
+
+@dataclass(frozen=True, init=False)
+class GaussianResult(_BaseResult):
+    _ENGINE = "exact_gaussian"
+
+    labels: tuple[str, ...]
+    _mean: np.ndarray = field(repr=False)
+    _covariance: np.ndarray = field(repr=False)
+    log_marginal_likelihood: float
+    _predictive_mean: np.ndarray = field(repr=False)
+    _predictive_variance: np.ndarray = field(repr=False)
+    _prediction_keys: pd.DataFrame | None = field(repr=False)
+    block_slices: Mapping[str, slice]
+    diagnostics: Mapping[str, object]
+    _hyperparameters: Mapping[str, float] | None = field(repr=False)
+    _prediction_context: object | None = field(repr=False)
+
+    def __init__(
+        self,
+        labels: tuple[str, ...],
+        mean: np.ndarray,
+        covariance: np.ndarray,
+        log_marginal_likelihood: float,
+        predictive_mean: np.ndarray,
+        predictive_variance: np.ndarray,
+        block_slices: Mapping[str, slice] | None = None,
+        diagnostics: Mapping[str, object] | None = None,
+        prediction_keys: pd.DataFrame | None = None,
+        *,
+        hyperparameters: Mapping[str, float] | None = None,
+        prediction_context: object | None = None,
+    ) -> None:
+        self._init_common(
+            labels=labels,
+            mean=mean,
+            covariance=covariance,
+            log_marginal_likelihood=log_marginal_likelihood,
+            predictive_mean=predictive_mean,
+            predictive_variance=predictive_variance,
+            block_slices=block_slices,
+            diagnostics=diagnostics,
+            prediction_keys=prediction_keys,
+            hyperparameters=hyperparameters,
+            prediction_context=prediction_context,
+        )
 
 
 @dataclass(frozen=True, init=False)
@@ -674,7 +719,9 @@ def _validate_prediction_keys(
 
 
 @dataclass(frozen=True, init=False)
-class LaplaceResult:
+class LaplaceResult(_BaseResult):
+    _ENGINE = "laplace"
+
     labels: tuple[str, ...]
     _mean: np.ndarray = field(repr=False)
     _covariance: np.ndarray = field(repr=False)
@@ -706,55 +753,21 @@ class LaplaceResult:
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
     ) -> None:
-        if block_slices is not None and not isinstance(block_slices, Mapping):
-            raise TypeError("block_slices must be a mapping")
-        if diagnostics is not None and not isinstance(diagnostics, Mapping):
-            raise TypeError("diagnostics must be a mapping")
-        _validate_prediction_keys(prediction_keys, predictive_mean)
-        covariance = np.asarray(covariance)
-        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
-            covariance
-        ):
-            raise TypeError("covariance must have a real numeric dtype")
-        if not np.isfinite(covariance).all():
-            raise ValueError("covariance must be finite")
-        object.__setattr__(self, "labels", tuple(labels))
-        object.__setattr__(self, "_mean", _readonly_array(mean))
-        object.__setattr__(self, "_covariance", _readonly_array(covariance))
-        object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
-        object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
-        object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        self._init_common(
+            labels=labels,
+            mean=mean,
+            covariance=covariance,
+            log_marginal_likelihood=log_marginal_likelihood,
+            predictive_mean=predictive_mean,
+            predictive_variance=predictive_variance,
+            block_slices=block_slices,
+            diagnostics=diagnostics,
+            prediction_keys=prediction_keys,
+            hyperparameters=hyperparameters,
+            prediction_context=prediction_context,
+        )
         object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
         object.__setattr__(self, "link_name", str(link_name))
-        object.__setattr__(
-            self,
-            "_prediction_keys",
-            prediction_keys.copy(deep=True) if prediction_keys is not None else None,
-        )
-        object.__setattr__(
-            self, "block_slices", MappingProxyType(dict(block_slices or {}))
-        )
-        object.__setattr__(
-            self,
-            "diagnostics",
-            _readonly_diagnostics(diagnostics if diagnostics is not None else {}),
-        )
-        object.__setattr__(
-            self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
-        )
-        object.__setattr__(self, "_prediction_context", prediction_context)
-
-    @property
-    def mean(self) -> np.ndarray:
-        return _readonly_array(self._mean)
-
-    @property
-    def covariance(self) -> np.ndarray:
-        return _readonly_array(self._covariance)
-
-    @property
-    def predictive_mean(self) -> np.ndarray:
-        return _readonly_array(self._predictive_mean)
 
     @property
     def predictive_variance(self) -> np.ndarray:
@@ -764,48 +777,6 @@ class LaplaceResult:
     @property
     def fitted_mean(self) -> np.ndarray:
         return _readonly_array(self._fitted_mean)
-
-    @property
-    def prediction_keys(self) -> pd.DataFrame | None:
-        if self._prediction_keys is None:
-            return None
-        return self._prediction_keys.copy(deep=True)
-
-    @property
-    def hyperparameters(self) -> Mapping[str, float] | None:
-        return self._hyperparameters
-
-    @property
-    def prediction_context(self) -> object | None:
-        return self._prediction_context
-
-    @property
-    def engine(self) -> str:
-        return "laplace"
-
-    @property
-    def converged(self) -> bool:
-        return True
-
-    def latent_marginals(self, block: str | None = None) -> GaussianMarginals:
-        return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
-
-    def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
-        return MappingProxyType({})
-
-    def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
-        return linear_combinations_from(self._mean, self._covariance, weights)
-
-    def predict(self, new_data):
-        """Score new rows with the fitted latent posterior."""
-        from pylgm.inference.prediction import predict_from
-
-        if self.prediction_context is None:
-            raise ValueError(
-                "this result carries no prediction context; predict() is available "
-                "on results produced by LGM.fit"
-            )
-        return predict_from(self.prediction_context, self.mean, self.covariance, new_data)
 
 
 def _readonly_hyperparameter_marginals(
@@ -824,7 +795,9 @@ def _readonly_hyperparameter_marginals(
 
 
 @dataclass(frozen=True, init=False)
-class INLAResult:
+class INLAResult(_BaseResult):
+    _ENGINE = "inla"
+
     labels: tuple[str, ...]
     _mean: np.ndarray = field(repr=False)
     _covariance: np.ndarray = field(repr=False)
@@ -862,32 +835,30 @@ class INLAResult:
         latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = None,
         prediction_context: object | None = None,
     ) -> None:
-        if block_slices is not None and not isinstance(block_slices, Mapping):
-            raise TypeError("block_slices must be a mapping")
-        if diagnostics is not None and not isinstance(diagnostics, Mapping):
-            raise TypeError("diagnostics must be a mapping")
-        if not isinstance(criteria, ModelCriteria):
-            raise TypeError("criteria must be a ModelCriteria")
-        if latent_marginal_table is not None and not isinstance(
-            latent_marginal_table, (SkewNormalMarginals, TabulatedMarginals)
-        ):
-            raise TypeError(
-                "latent_marginal_table must be a SkewNormalMarginals or TabulatedMarginals"
-            )
-        _validate_prediction_keys(prediction_keys, predictive_mean)
-        covariance = np.asarray(covariance)
-        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
-            covariance
-        ):
-            raise TypeError("covariance must have a real numeric dtype")
-        if not np.isfinite(covariance).all():
-            raise ValueError("covariance must be finite")
-        object.__setattr__(self, "labels", tuple(labels))
-        object.__setattr__(self, "_mean", _readonly_array(mean))
-        object.__setattr__(self, "_covariance", _readonly_array(covariance))
-        object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
-        object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
-        object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        def _validate_inla_extras() -> None:
+            if not isinstance(criteria, ModelCriteria):
+                raise TypeError("criteria must be a ModelCriteria")
+            if latent_marginal_table is not None and not isinstance(
+                latent_marginal_table, (SkewNormalMarginals, TabulatedMarginals)
+            ):
+                raise TypeError(
+                    "latent_marginal_table must be a SkewNormalMarginals or TabulatedMarginals"
+                )
+
+        self._init_common(
+            labels=labels,
+            mean=mean,
+            covariance=covariance,
+            log_marginal_likelihood=log_marginal_likelihood,
+            predictive_mean=predictive_mean,
+            predictive_variance=predictive_variance,
+            block_slices=block_slices,
+            diagnostics=diagnostics,
+            prediction_keys=prediction_keys,
+            hyperparameters=hyperparameters,
+            prediction_context=prediction_context,
+            extra_validate=_validate_inla_extras,
+        )
         object.__setattr__(
             self,
             "_hyperparameter_marginals",
@@ -900,40 +871,7 @@ class INLAResult:
             _readonly_array(fitted_mean) if fitted_mean is not None else None,
         )
         object.__setattr__(self, "link_name", str(link_name) if link_name is not None else None)
-        object.__setattr__(
-            self,
-            "_prediction_keys",
-            prediction_keys.copy(deep=True) if prediction_keys is not None else None,
-        )
-        object.__setattr__(
-            self, "block_slices", MappingProxyType(dict(block_slices or {}))
-        )
-        object.__setattr__(
-            self,
-            "diagnostics",
-            _readonly_diagnostics(diagnostics if diagnostics is not None else {}),
-        )
-        object.__setattr__(
-            self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
-        )
         object.__setattr__(self, "_latent_marginal_table", latent_marginal_table)
-        object.__setattr__(self, "_prediction_context", prediction_context)
-
-    @property
-    def mean(self) -> np.ndarray:
-        return _readonly_array(self._mean)
-
-    @property
-    def covariance(self) -> np.ndarray:
-        return _readonly_array(self._covariance)
-
-    @property
-    def predictive_mean(self) -> np.ndarray:
-        return _readonly_array(self._predictive_mean)
-
-    @property
-    def predictive_variance(self) -> np.ndarray:
-        return _readonly_array(self._predictive_variance)
 
     @property
     def fitted_mean(self) -> np.ndarray | None:
@@ -942,30 +880,8 @@ class INLAResult:
         return _readonly_array(self._fitted_mean)
 
     @property
-    def prediction_keys(self) -> pd.DataFrame | None:
-        if self._prediction_keys is None:
-            return None
-        return self._prediction_keys.copy(deep=True)
-
-    @property
-    def hyperparameters(self) -> Mapping[str, float] | None:
-        return self._hyperparameters
-
-    @property
-    def prediction_context(self) -> object | None:
-        return self._prediction_context
-
-    @property
     def latent_marginal_table(self) -> "SkewNormalMarginals | TabulatedMarginals | None":
         return self._latent_marginal_table
-
-    @property
-    def engine(self) -> str:
-        return "inla"
-
-    @property
-    def converged(self) -> bool:
-        return True
 
     def latent_marginals(
         self, block: str | None = None
@@ -987,9 +903,6 @@ class INLAResult:
     @property
     def criteria(self) -> ModelCriteria:
         return self._criteria
-
-    def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
-        return linear_combinations_from(self._mean, self._covariance, weights)
 
     def predict(self, new_data):
         """Score new rows with the fitted, hyperparameter-integrated latent posterior."""
