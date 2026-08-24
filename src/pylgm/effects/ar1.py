@@ -15,6 +15,8 @@ def ar1_structure(level_count: int, rho: float) -> np.ndarray:
     diagonal and ``-rho`` off it, so ``precision * ar1_structure(...)`` inverts
     to ``(1 / precision) * rho ** |i - j|``.
     """
+    # Guards direct callers; build_ar1 checks first, with a message naming
+    # the effect.
     if level_count < 2:
         raise ValueError("AR1 requires at least two ordered levels")
     if not np.isfinite(rho) or not -1.0 < rho < 1.0:
