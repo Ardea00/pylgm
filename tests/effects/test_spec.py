@@ -192,3 +192,48 @@ def test_bym2_composes_in_predictor():
     predictor = Fixed("1") + BYM2("region", index="region", graph=PATH_GRAPH)
     assert isinstance(predictor, Predictor)
     assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "BYM2"]
+
+
+def test_ar1_defaults():
+    from pylgm.effects import AR1
+
+    effect = AR1("trend", index="t")
+    assert effect.name == "trend"
+    assert effect.index == "t"
+    assert effect.precision == 1.0
+    assert effect.rho == 0.5
+
+
+def test_ar1_accepts_hyperparameter_rho_and_precision():
+    from pylgm.effects import AR1
+
+    rho = Hyperparameter("trend.rho", initial=0.0, transform="logit")
+    tau = Hyperparameter("trend.precision", initial=1.0)
+    effect = AR1("trend", index="t", precision=tau, rho=rho)
+    assert effect.rho is rho
+    assert effect.precision is tau
+
+
+@pytest.mark.parametrize("rho", [-1.0, 1.0, 1.5, float("nan")])
+def test_ar1_rejects_rho_outside_the_open_unit_interval(rho):
+    from pylgm.effects import AR1
+
+    with pytest.raises(ValueError, match="rho"):
+        AR1("trend", index="t", rho=rho)
+
+
+def test_ar1_is_frozen_and_hashable():
+    from pylgm.effects import AR1
+
+    effect = AR1("trend", index="t")
+    assert hash(effect) == hash(AR1("trend", index="t"))
+    with pytest.raises(FrozenInstanceError):
+        effect.rho = 0.1
+
+
+def test_ar1_composes_in_predictor():
+    from pylgm.effects import AR1, Predictor
+
+    predictor = Fixed("1") + AR1("trend", index="t")
+    assert isinstance(predictor, Predictor)
+    assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "AR1"]

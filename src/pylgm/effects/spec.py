@@ -179,7 +179,29 @@ class BYM2(_ComposableEffect):
         object.__setattr__(self, "graph", canonical_graph(self.graph))
 
 
-EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | Besag | ProperCAR | BYM2
+@dataclass(frozen=True)
+class AR1(_ComposableEffect):
+    """A stationary first-order autoregressive latent effect."""
+
+    name: str
+    index: str
+    precision: float | Hyperparameter = 1.0
+    rho: float | Hyperparameter = 0.5
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        if not isinstance(self.rho, Hyperparameter):
+            rho = _finite_real(self.rho, "rho")
+            if not -1.0 < rho < 1.0:
+                raise ValueError("rho must lie strictly inside (-1, 1)")
+            object.__setattr__(self, "rho", rho)
+
+
+EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2
 
 
 @dataclass(frozen=True)
@@ -194,7 +216,7 @@ class Predictor:
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
         if any(
-            not isinstance(effect, (Fixed, IID, RW1, RW2, Besag, ProperCAR, BYM2))
+            not isinstance(effect, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2))
             for effect in effects
         ):
             raise TypeError("effects must contain only effect specifications")
@@ -206,9 +228,9 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2, Besag, ProperCAR, BYM2)):
+        if isinstance(other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2)):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
 
-__all__ = ["Besag", "BYM2", "Fixed", "IID", "Predictor", "ProperCAR", "RW1", "RW2"]
+__all__ = ["AR1", "Besag", "BYM2", "Fixed", "IID", "Predictor", "ProperCAR", "RW1", "RW2"]
