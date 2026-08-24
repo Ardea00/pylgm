@@ -23,7 +23,12 @@ import pandas as pd
 import pytest
 
 from pylgm import AR1, Besag, Bernoulli, Fixed, Gaussian, Hyperparameter, IID, LGM, Poisson, RW1
-from pylgm.inference.result import GaussianResult, INLAResult, LaplaceResult
+from pylgm.inference.result import (
+    GaussianResult,
+    INLAResult,
+    LaplaceResult,
+    ModelCriteria,
+)
 from pylgm.priors import PCPrecision
 
 BASELINE_PATH = Path(__file__).parent / "result_surface_baseline.json"
@@ -535,7 +540,6 @@ def _construct(result_type, **overrides):
         kwargs = _common_kwargs(fitted_mean=np.array([0.0, 0.0]), link_name="identity")
         kwargs.update(overrides)
         return LaplaceResult(**kwargs)
-    from pylgm.inference.result import ModelCriteria
 
     criteria = ModelCriteria(
         dic=1.0, dic_effective_parameters=1.0, waic=1.0, waic_effective_parameters=1.0,
@@ -656,3 +660,80 @@ if __name__ == "__main__":
     matrix = _to_jsonable(_compute_surface_matrix())
     BASELINE_PATH.write_text(json.dumps(matrix, indent=2, sort_keys=True) + "\n")
     print(f"wrote {BASELINE_PATH} ({BASELINE_PATH.stat().st_size} bytes)")
+
+
+def test_validation_order_across_the_shared_per_type_boundary_is_stable():
+    """Pin which error wins when a SHARED and a PER-TYPE precondition both fail.
+
+    ``test_constructor_validation_order_is_stable`` only pins pairs whose checks
+    both live in the shared prologue, so their relative order survives any
+    refactor trivially. The boundary a shared ``_init_common`` actually moves is
+    the one between shared and per-type work -- and the shared *storage* is not
+    inert (``_readonly_diagnostics`` and ``_readonly_hyperparameters`` validate),
+    so hoisting it ahead of the subclass's own field handling silently changes
+    which exception a doubly-malformed construction raises. These cases pin that
+    boundary; they are the ones that caught it.
+    """
+    base = dict(
+        labels=("a",),
+        mean=np.zeros(1),
+        covariance=np.zeros((1, 1)),
+        log_marginal_likelihood=0.0,
+        predictive_mean=np.zeros(1),
+        predictive_variance=np.zeros(1),
+    )
+    criteria = ModelCriteria(
+        dic=0.0,
+        dic_effective_parameters=0.0,
+        waic=0.0,
+        waic_effective_parameters=0.0,
+        cpo=np.ones(1),
+        pit=np.zeros(1),
+        cpo_failures=0,
+        log_cpo_sum=0.0,
+    )
+    ragged = [[1.0], [1.0, 2.0]]
+
+    cases = [
+        # per-type field bad + shared diagnostics bad -> the PER-TYPE error wins
+        (
+            "laplace fitted_mean vs diagnostics",
+            lambda: LaplaceResult(
+                **base, fitted_mean=ragged, link_name="log", diagnostics={"k": [1, 2]}
+            ),
+            ValueError,
+            "setting an array element",
+        ),
+        # per-type field bad + shared hyperparameters bad -> PER-TYPE wins
+        (
+            "laplace fitted_mean vs hyperparameters",
+            lambda: LaplaceResult(
+                **base, fitted_mean=ragged, link_name="log",
+                hyperparameters={"s": float("inf")},
+            ),
+            ValueError,
+            "setting an array element",
+        ),
+        (
+            "inla hyperparameter_marginals vs hyperparameters",
+            lambda: INLAResult(
+                **base, criteria=criteria, hyperparameter_marginals="nope",
+                hyperparameters={"s": float("inf")},
+            ),
+            TypeError,
+            "hyperparameter_marginals must be a mapping",
+        ),
+        (
+            "inla hyperparameter_marginals vs diagnostics",
+            lambda: INLAResult(
+                **base, criteria=criteria, hyperparameter_marginals={"a": "x"},
+                diagnostics={"k": [1, 2]},
+            ),
+            TypeError,
+            "hyperparameter_marginals values must be",
+        ),
+    ]
+    for name, build, error_type, fragment in cases:
+        with pytest.raises(error_type) as excinfo:
+            build()
+        assert fragment in str(excinfo.value), name

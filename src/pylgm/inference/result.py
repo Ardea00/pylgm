@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
@@ -482,7 +482,49 @@ class _BaseResult:
     dispatches with isinstance and tests ``LaplaceResult`` before ``INLAResult``,
     so making one a subclass of another would silently misroute every rebuild
     of the more specific type.
+
+    Every subclass MUST call :meth:`_init_common` from its ``__init__``; the
+    read surface below is backed by the attributes it sets.
     """
+
+    #: Attributes ``_init_common`` sets, plus the public names whose property
+    #: getters read them. Both are needed: an ``AttributeError`` raised inside a
+    #: property getter re-enters ``__getattr__`` under the OUTER name, so a
+    #: missing ``_mean`` arrives here as ``"mean"``.
+    _BACKING_FIELDS = frozenset(
+        {
+            "labels",
+            "_mean",
+            "mean",
+            "_covariance",
+            "covariance",
+            "log_marginal_likelihood",
+            "_predictive_mean",
+            "predictive_mean",
+            "_predictive_variance",
+            "predictive_variance",
+            "_prediction_keys",
+            "prediction_keys",
+            "block_slices",
+            "diagnostics",
+            "_hyperparameters",
+            "hyperparameters",
+            "_prediction_context",
+            "prediction_context",
+        }
+    )
+
+    def __getattr__(self, name: str):
+        # Reached only when normal lookup fails. A subclass that forgets to call
+        # _init_common otherwise constructs fine, reprs fine, and answers engine
+        # and converged -- then raises a bare AttributeError on the first real
+        # read. Say what actually went wrong instead.
+        if name in _BaseResult._BACKING_FIELDS:
+            raise AttributeError(
+                f"{type(self).__name__} has no {name!r}: it was constructed without "
+                "calling _init_common(), which every result subclass must do"
+            )
+        raise AttributeError(name)
 
     def _init_common(
         self,
@@ -498,7 +540,8 @@ class _BaseResult:
         prediction_keys: pd.DataFrame | None,
         hyperparameters: Mapping[str, float] | None,
         prediction_context: object | None,
-        extra_validate=None,
+        extra_validate: "Callable[[], None] | None" = None,
+        extra_store: "Callable[[], None] | None" = None,
     ) -> None:
         if block_slices is not None and not isinstance(block_slices, Mapping):
             raise TypeError("block_slices must be a mapping")
@@ -520,6 +563,13 @@ class _BaseResult:
         object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
         object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
         object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        # The subclasses' own fields are stored HERE, not after this call: the
+        # storage below is not inert -- _readonly_diagnostics and
+        # _readonly_hyperparameters both validate -- so running it first would
+        # change which error surfaces when a shared and a per-type precondition
+        # are violated together.
+        if extra_store is not None:
+            extra_store()
         object.__setattr__(
             self,
             "_prediction_keys",
@@ -765,9 +815,11 @@ class LaplaceResult(_BaseResult):
             prediction_keys=prediction_keys,
             hyperparameters=hyperparameters,
             prediction_context=prediction_context,
+            extra_store=lambda: (
+                object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean)),
+                object.__setattr__(self, "link_name", str(link_name)),
+            ),
         )
-        object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
-        object.__setattr__(self, "link_name", str(link_name))
 
     @property
     def predictive_variance(self) -> np.ndarray:
@@ -845,6 +897,23 @@ class INLAResult(_BaseResult):
                     "latent_marginal_table must be a SkewNormalMarginals or TabulatedMarginals"
                 )
 
+        def _store_inla_extras() -> None:
+            object.__setattr__(
+                self,
+                "_hyperparameter_marginals",
+                _readonly_hyperparameter_marginals(hyperparameter_marginals),
+            )
+            object.__setattr__(self, "_criteria", criteria)
+            object.__setattr__(
+                self,
+                "_fitted_mean",
+                _readonly_array(fitted_mean) if fitted_mean is not None else None,
+            )
+            object.__setattr__(
+                self, "link_name", str(link_name) if link_name is not None else None
+            )
+            object.__setattr__(self, "_latent_marginal_table", latent_marginal_table)
+
         self._init_common(
             labels=labels,
             mean=mean,
@@ -858,20 +927,8 @@ class INLAResult(_BaseResult):
             hyperparameters=hyperparameters,
             prediction_context=prediction_context,
             extra_validate=_validate_inla_extras,
+            extra_store=_store_inla_extras,
         )
-        object.__setattr__(
-            self,
-            "_hyperparameter_marginals",
-            _readonly_hyperparameter_marginals(hyperparameter_marginals),
-        )
-        object.__setattr__(self, "_criteria", criteria)
-        object.__setattr__(
-            self,
-            "_fitted_mean",
-            _readonly_array(fitted_mean) if fitted_mean is not None else None,
-        )
-        object.__setattr__(self, "link_name", str(link_name) if link_name is not None else None)
-        object.__setattr__(self, "_latent_marginal_table", latent_marginal_table)
 
     @property
     def fitted_mean(self) -> np.ndarray | None:
@@ -880,12 +937,12 @@ class INLAResult(_BaseResult):
         return _readonly_array(self._fitted_mean)
 
     @property
-    def latent_marginal_table(self) -> "SkewNormalMarginals | TabulatedMarginals | None":
+    def latent_marginal_table(self) -> "LatentMarginals | None":
         return self._latent_marginal_table
 
     def latent_marginals(
         self, block: str | None = None
-    ) -> "GaussianMarginals | SkewNormalMarginals | TabulatedMarginals":
+    ) -> "LatentMarginals":
         if self._latent_marginal_table is not None:
             if block is None:
                 selection = slice(None)
