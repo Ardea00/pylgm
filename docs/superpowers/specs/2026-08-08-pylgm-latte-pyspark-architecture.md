@@ -346,23 +346,61 @@ This is a breaking change to reported Gaussian predictive variances (and
 standard deviations), reconstructible via the new
 `GaussianResult.observation_variance` (see the
 [project README](../../../README.md#the-predictive_variance-convention)).
+
+**Follow-up cleanup — shipped.** The bounded-parameter bounds-block
+construction duplicated across proper CAR's `rho`, BYM2's `phi`, and AR1's
+`rho` (`parameter_bounds[...] = _log_bounds(...)`, repeated once per
+structured-effect branch) is now one shared `_bounded_parameter` helper in
+`compiler.py`; the three effects' out-of-range error messages are uniform
+(each still names the effect and the interval it enforces), and the
+proper-CAR message now reports the interval actually enforced rather than
+the graph's slightly wider raw interval — an incidental fix, since the two
+previously differed only by the boundary inset. `_BaseResult` is now a
+dataclass: the eleven shared result fields are declared once instead of
+three times, and `result.py` shrank from 993 to 973 lines. **This is a
+breaking change to `repr()` output only** — shared fields now print before
+type-specific ones; no value, attribute name, or behaviour changed (see the
+[project README](../../../README.md#the-predictive_variance-convention) for
+the user-facing note). A test now derives `_BaseResult._BACKING_FIELDS` from
+the class's own dataclass fields and properties, so a new shared field can
+no longer add only its private or public name and silently escape the
+`__getattr__` guard. `_BaseResult.predict`'s docstring now says the posterior
+it scores against is whatever the result carries — the hyperparameter-
+integrated one for `INLAResult` — rather than implying a single fixed
+posterior. Separately, `compile_family` now wraps effect-builder failures as
+`CompilationError` naming the effect, matching `compile_lgm`: previously the
+same malformed effect (e.g. a single-level AR1) raised a bare `ValueError` on
+one compilation path and a `CompilationError` on the other, depending on
+whether a `Hyperparameter` happened to be declared.
+
+**Attempted and reverted: an in-loop Newton decrement exit.** An early exit
+for a stalled Newton solve, gated on gradient stagnation inside the
+mode-finder's loop (rather than only in the existing post-loop failure
+branch), was implemented and then reverted. It cut a stalling `integrate`
+run from 4344 to 1896 Newton iterations, but review found it relocates modes
+once composed with the outer empirical-Bayes optimiser: the Newton decrement
+bounds `f(z) - f*` but not `||z - z*||` on an ill-conditioned Hessian, so the
+~1e-8 latent-mode displacement it leaves behind is the same order as
+L-BFGS-B's finite-difference step — truncating intermediate trial points at
+that displacement corrupts the outer gradient. A plain
+`hyperparameters="optimize"` Poisson AR1 fit moved by 7e-3 in the mean and
+0.283 nats in log marginal likelihood under the in-loop version, and results
+became sensitive to prior in-process computation, which the merge-base is
+not. The existing post-loop decrement rescue (documented in the
+[project README](../../../README.md#non-gaussian-likelihoods-laplace)) is
+unaffected and remains the only early-exit path. **What a real fix would
+need:** the outer empirical-Bayes optimiser would have to move off
+finite-difference gradients at this scale — an analytic or
+automatic-differentiation gradient robust to ~1e-8 latent-mode
+displacement — before an in-loop Newton exit could be composed safely with
+it; that is a separate, larger design question than this cleanup slice, so
+the in-loop exit stays deferred and the revert is recorded here rather than
+re-attempted piecemeal.
+
 Still deferred from this slice:
 
 - **A single common marginal type** — the protocol documents the shared
   contract; the three implementations are not merged into one class.
-- **The bounded-parameter bounds-block extraction in `compiler.py`** — the
-  `parameter_bounds[...] = _log_bounds(...)` pattern is duplicated across
-  every structured-effect branch rather than factored into a shared helper.
-- **The in-loop Newton decrement** — the Laplace mode-finder's decrement
-  rescue only fires in the post-loop failure branch, after a stalling solve
-  burns its full iteration budget; a decrement check gated on gradient
-  stagnation inside the loop would cut that cost several-fold without
-  relocating any mode.
-- **`_BaseResult` as a dataclass** — the ~106 lines of field declarations,
-  `__init__` signatures, and `_init_common` forwarding duplicated across the
-  three result types could shrink further, but converting `_BaseResult` to a
-  dataclass reorders fields, which is itself a declared-breaking change and
-  was left for a later slice.
 
 ### 4. Spatial effects
 

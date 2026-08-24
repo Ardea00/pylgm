@@ -179,6 +179,13 @@ removed, or moved. The three latent-marginal types (`GaussianMarginals`,
 `LatentMarginals` protocol, exported from `pylgm.inference`, formalizing the
 `mean`/`variance`/`std`/`quantile` surface they already shared.
 
+`_BaseResult` is now a dataclass declaring its eleven shared fields once
+instead of once per result type. **This changed `repr()` output**: printed
+fields now list the shared ones first, then each result type's own fields,
+rather than interleaved in the previous per-type order. No value, attribute
+name, or other behaviour changed — this affects only what `repr(result)`
+prints.
+
 ## Empirical Bayes
 
 Declaring an effect's precision (or a Gaussian likelihood's `sigma`) as a
