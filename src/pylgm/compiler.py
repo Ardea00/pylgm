@@ -397,7 +397,14 @@ def _compiled_block(name: str, builder, *args) -> object:
     """
     try:
         return builder(*args)
-    except (DataContractError, ModelValidationError, TypeError, ValueError) as error:
+    except (
+        DataContractError,
+        FormulaicError,
+        ModelValidationError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise CompilationError(f"failed to compile effect {name!r}: {error}") from error
 
 

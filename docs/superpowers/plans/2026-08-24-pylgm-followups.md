@@ -160,7 +160,7 @@ git commit -m "perf: exit a stalled Newton solve once it stops improving"
 - Modify: `src/pylgm/inference/result.py`
 - Modify: `tests/inference/result_surface_baseline.json` (deliberately)
 
-**Context.** Each result type still declares the same eleven shared fields and forwards them through an eleven-keyword `_init_common(...)` call — roughly 106 duplicated lines. Making `_BaseResult` a dataclass lets the shared fields be declared once, with subclass fields appended after.
+**Context.** Each result type still declares the same eleven shared fields and forwards them through an eleven-keyword `_init_common(...)` call — roughly 106 duplicated lines. (Outcome: only ~14 were actually removable — the bulk is the explicit `__init__` signatures and keyword forwarding, which the task's own constraints keep.) Making `_BaseResult` a dataclass lets the shared fields be declared once, with subclass fields appended after.
 
 **This reorders `dataclasses.fields()` and therefore `repr`.** That is the breaking part, and the only thing that may change.
 

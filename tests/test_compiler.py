@@ -652,3 +652,40 @@ def test_bounded_parameter_rejects_out_of_interval_initial(
     hp = Hyperparameter("bounded", initial=5.0, transform="logit")
     with pytest.raises(CompilationError, match=f"{label}.*must lie in"):
         build_model(hp).fit(frame_factory())
+
+
+def test_missing_index_column_is_a_compilation_error_via_both_compile_paths() -> None:
+    """The asymmetry Task 4 set out to remove, for the case users actually hit.
+
+    ``_compiled_block`` originally caught a narrower exception set than
+    ``compile_lgm`` -- no ``KeyError``, no ``FormulaicError`` -- so a missing
+    index column or an unknown formula variable still escaped unwrapped
+    whenever a ``Hyperparameter`` was declared, because ``LGM.fit`` tries
+    ``compile_family`` first. The single-level AR1 case happened to raise
+    ``ValueError`` and so did not expose it.
+    """
+    import pandas as pd
+
+    from pylgm import Fixed, Gaussian, Hyperparameter, IID, LGM
+    from pylgm.exceptions import CompilationError
+
+    frame = pd.DataFrame({"y": [0.5, 1.5, 2.5, 3.5], "grp": ["a", "b", "a", "b"]})
+
+    for precision in (1.0, Hyperparameter("grp.precision", initial=1.0)):
+        model = LGM(
+            response="y",
+            predictor=Fixed("1") + IID("grp", index="nope", precision=precision),
+            likelihood=Gaussian(sigma=0.5),
+        )
+        with pytest.raises(CompilationError, match="failed to compile effect 'grp'"):
+            model.fit(frame)
+
+    for precision in (1.0, Hyperparameter("grp.precision", initial=1.0)):
+        model = LGM(
+            response="y",
+            predictor=Fixed("1 + no_such_col")
+            + IID("grp", index="grp", precision=precision),
+            likelihood=Gaussian(sigma=0.5),
+        )
+        with pytest.raises(CompilationError, match="failed to compile effect 'fixed'"):
+            model.fit(frame)

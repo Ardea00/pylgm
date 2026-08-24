@@ -354,10 +354,14 @@ structured-effect branch) is now one shared `_bounded_parameter` helper in
 `compiler.py`; the three effects' out-of-range error messages are uniform
 (each still names the effect and the interval it enforces), and the
 proper-CAR message now reports the interval actually enforced rather than
-the graph's slightly wider raw interval — an incidental fix, since the two
-previously differed only by the boundary inset. `_BaseResult` is now a
-dataclass: the eleven shared result fields are declared once instead of
-three times, and `result.py` shrank from 993 to 973 lines. **This is a
+the graph's raw one — an incidental fix. The two differ by the boundary inset
+in the default case, but by far more when a user narrows the bounds: the old
+message would tell someone who set `(0.1, 0.5)` that their value must lie in
+`(-1, 1)`. `_BaseResult` is now a dataclass: the eleven shared result fields
+are declared once instead of three times, and `result.py` shrank from 993 to
+979 lines. The saving is modest because each subclass deliberately keeps its
+explicit `__init__` signature and its keyword forwarding — collapsing those
+too would obscure the call sites. **This is a
 breaking change to `repr()` output only** — shared fields now print before
 type-specific ones; no value, attribute name, or behaviour changed (see the
 [project README](../../../README.md#the-predictive_variance-convention) for
