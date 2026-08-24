@@ -42,6 +42,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     converged = reduced_dim == 0
     if reduced_dim:
         current = objective(z)
+        stall_count = 0
         for iterations in range(1, max_iterations + 1):
             eta = reduced_design @ z + offset_obs
             grad_ll = likelihood.gradient(eta, y_obs)
@@ -67,8 +68,43 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
                 scale *= 0.5
             else:
                 raise NumericalError("Laplace line search failed to reduce the objective")
+            previous = current
             z = candidate
             current = candidate_obj
+
+            # A stalled solve (gradient scale unreachable by an absolute
+            # tolerance, see the rescue comment below) keeps taking steps
+            # that move the objective by less than floating point can
+            # represent, burning the rest of max_iterations for nothing.
+            # Catch that here -- but only once the iterate has genuinely
+            # stopped moving for a while: a single flat step is not proof of
+            # a stall on its own, because a well-scaled fit converging
+            # quadratically also shows an exactly-flat objective on the step
+            # immediately before its gradient crosses the tolerance (f - f*
+            # shrinks quadratically faster than the gradient does, so it
+            # hits the float64 floor first, typically within the first
+            # handful of iterations). That fit is caught by the ordinary
+            # gradient test one iteration later regardless, so this waits
+            # past a small fixed number of iterations -- comfortably beyond
+            # how long any currently-converging fit in this codebase takes
+            # -- and additionally requires the flatness to persist for two
+            # consecutive iterations, together with the same scale-invariant
+            # Newton-decrement bound the post-loop rescue uses. Both guards
+            # exist only to keep this from ever tripping on a fit that would
+            # have converged normally in a handful more steps; a genuine
+            # stall sits flat for tens of iterations, so neither costs it
+            # anything. The decrement is -0.5 * slope, already computed for
+            # the line search, at no extra cost.
+            decrement = -0.5 * slope
+            stagnant = abs(current - previous) <= 8 * np.finfo(float).eps * max(abs(current), 1.0)
+            if iterations > 30 and stagnant and decrement < tolerance:
+                stall_count += 1
+                if stall_count >= 2:
+                    converged = True
+                    newton_decrement = decrement
+                    break
+            else:
+                stall_count = 0
         if not converged:
             eta = reduced_design @ z + offset_obs
             gradient = reduced_precision @ z - reduced_design.T @ likelihood.gradient(eta, y_obs)

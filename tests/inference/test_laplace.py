@@ -142,6 +142,20 @@ def test_rescued_fit_is_actually_at_the_mode():
     assert abs(rescued.log_marginal_likelihood - reference.log_marginal_likelihood) < 1e-4
 
 
+def test_a_stalled_solve_stops_early_instead_of_burning_the_budget():
+    model, frame = _stalling_poisson_model(0)
+    panel = CanonicalPanel(frame, np.ones(len(frame), dtype=bool), ("t",), "y")
+    compiled = compile_lgm(model, panel)
+
+    result = fit_laplace(compiled, max_iterations=100)
+    # It converges (the rescue or the early exit accepts it) ...
+    assert result.diagnostics["newton_iterations"] < 100
+    # ... and lands on the same mode as a long run.
+    reference = fit_laplace(compiled, max_iterations=400)
+    spread = np.sqrt(np.diag(reference.covariance))
+    assert np.max(np.abs(result.mean - reference.mean) / spread) < 1e-4
+
+
 def test_genuine_non_convergence_still_raises():
     # The rescue must not swallow a fit that really has not converged.
 
