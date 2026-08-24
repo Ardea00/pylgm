@@ -190,7 +190,14 @@ not a marginal. Out-of-sample prediction has since shipped:
 posterior on `GaussianResult`, `LaplaceResult`, and `INLAResult`; Spark
 `new_data`, a prior-based fallback for unseen index levels, predictive
 quantiles/simulation, and a future-frame construction helper remain
-deferred. AR1 and parameterized IR metadata are still explicitly deferred.
+deferred. The stationary `AR1` effect has since shipped: `Q = τ/(1−ρ²)·T`
+(marginal precision τ, correlation ρ fixed or estimated with
+`transform="logit"` and integrated over jointly with τ under INLA); being
+proper/full-rank it carries no constraint and works under all three latent
+strategies, including full Laplace, unlike `RW1`/`RW2`. Irregular spacing
+(`ρ^Δt`), a config-file `ar1` effect type, AR(p)/seasonal effects, and
+group-wise AR1 (a separate series per panel unit) remain deferred.
+Parameterized IR metadata is still explicitly deferred.
 The hyperparameter integration core (grid quadrature, section 3a) and
 model-assessment criteria (DIC/WAIC/CPO/PIT,
 section 3b) have since shipped; the simplified-Laplace latent strategy
@@ -505,7 +512,10 @@ mathematical correctness.
 
 ## Non-goals for the First Refactor
 
-- AR1 effects;
+- AR1 effects (was a non-goal of the first refactor; the stationary `AR1`
+  effect has since shipped as its own sub-slice — see section 1 above;
+  irregular spacing, a config-file `ar1` effect type, AR(p)/seasonal
+  effects, and group-wise AR1 remain deferred);
 - the PySpark adapter (was a non-goal of the first refactor; has since shipped
   as its own Gaussian-only data-boundary slice);
 - `result.predict(new_data)` (was a non-goal of the first refactor; has since

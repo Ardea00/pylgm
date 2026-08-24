@@ -40,8 +40,9 @@ hyperparameter's native scale with no Jacobian correction for `transform`.
 `PCPrecision` and `GaussianPrior` drive both point estimation and, under
 ["INLA integration"](#inla-integration), the integrated (marginal) posterior.
 
-AR1 effects, parameterized IR metadata, sparse production engines, and HMC
-are deferred to later slices. The spatial (CAR)
+Parameterized IR metadata, sparse production engines, and HMC are deferred to
+later slices. The stationary `AR1` effect has shipped — see
+["AR1 effect"](#ar1-effect) below. The spatial (CAR)
 effect family is now complete for the dense reference regime: `Besag`
 (intrinsic CAR/ICAR), `ProperCAR` (proper CAR, with its spatial-dependence
 parameter `ρ` either fixed or estimated), and `BYM2` (the structured +
@@ -511,6 +512,84 @@ not supported. **Not shipped**: a prior-based fallback for unseen levels,
 predictive quantiles or simulation, response-scale predictive variance for
 non-Gaussian links, and an automatic future-frame construction helper (the
 `NaN`-response rows above are built by hand).
+
+## AR1 effect
+
+`AR1(name, index, precision=1.0, rho=0.5)` declares a stationary first-order
+autoregressive latent effect on the ordered, observed levels of `index` (the
+same level-ordering rule as `RW1`/`RW2`; at least two levels are required).
+Its precision is `Q = τ/(1−ρ²)·T`, with `T` tridiagonal (unit corners,
+`1+ρ²` on the interior diagonal, `−ρ` off it), which inverts to
+`Cov[i, j] = (1/τ)·ρ^|i−j|`. **`τ` is the marginal precision** — INLA's
+convention — so the marginal variance of every level is exactly `1/τ`,
+directly comparable to an `IID` effect's precision or `BYM2`'s `τ`, *not* an
+innovation precision. `ρ = 0` collapses `Q` to exactly `τ·I` (independent
+levels); as `ρ → 1` the effect approaches the intrinsic `RW1` limit.
+
+```python
+import numpy as np
+import pandas as pd
+from pylgm import AR1, Fixed, Gaussian, LGM
+
+frame = pd.DataFrame({
+    "t": range(10),
+    "y": [1.0, 1.4, 1.1, 1.6, 1.3, 1.8, 1.5, 2.0, 1.7, 2.2],
+})
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + AR1("trend", index="t", precision=2.0, rho=0.7),
+    likelihood=Gaussian(sigma=0.3),
+)
+result = model.fit(frame)
+print(np.round(result.latent_marginals("trend").mean, 3))
+# [-0.466 -0.244 -0.358 -0.065 -0.166  0.129  0.027  0.322  0.22   0.506]
+```
+
+`rho` accepts either a fixed float strictly inside `(-1, 1)` (plug-in, shown
+above) or a declared `Hyperparameter` with `transform="logit"`, in which case
+ρ is **estimated** by empirical Bayes and, under
+`hyperparameters="integrate"`, integrated over jointly with τ by INLA — a
+non-logit `Hyperparameter` for `rho` raises `CompilationError`. The interval
+is the fixed `(-1, 1)` inset by `1e-6` (no graph-derived bound, unlike
+`ProperCAR`'s ρ).
+
+```python
+from pylgm import AR1, Fixed, Gaussian, Hyperparameter, LGM
+from pylgm.priors import PCPrecision
+
+rho = Hyperparameter("trend.rho", initial=0.0, transform="logit")
+tau = Hyperparameter("trend.precision", initial=1.0, prior=PCPrecision(upper_sd=1.0, alpha=0.01))
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + AR1("trend", index="t", precision=tau, rho=rho),
+    likelihood=Gaussian(sigma=0.3),
+)
+eb = model.fit(frame)                                 # empirical Bayes
+eb.hyperparameters["trend.rho"]                        # point estimate of rho
+
+post = model.fit(frame, hyperparameters="integrate")   # INLA over (tau, rho)
+post.hyperparameter_marginals()["trend.rho"].mean      # rho marginal
+```
+
+Unlike `RW1`/`RW2`, `AR1` is proper/full-rank, so it carries **no
+sum-to-zero constraint**: it works under all three latent strategies,
+including `latent_strategy="laplace"` (full Laplace), where `RW1`/`RW2` are
+rejected because they are intrinsic/constrained. `result.predict(new_data)`
+works on `AR1` exactly as described in
+["Predicting new rows"](#predicting-new-rows) above; an unseen time level
+raises the same `ValueError` pointing at the `NaN`-response workflow.
+
+**Regular spacing is assumed.** `AR1` relates *consecutive* ordered levels —
+it has no notion of the gap between them — so a missing period (a skipped
+month, say) is silently treated as a single step, understating the true
+elapsed time and its correlation decay. If a period is absent from the data
+but should count as a step, include it as a row with a `NaN` response at
+`fit` time: it contributes no likelihood but still creates its latent column
+and restores regular spacing, exactly like the future-period rows in
+["Predicting new rows"](#predicting-new-rows) above. **Not shipped**:
+irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type,
+AR(p)/seasonal effects, and group-wise AR1 (a separate series per panel
+unit).
 
 ## Besag / intrinsic CAR (ICAR) spatial effect
 
