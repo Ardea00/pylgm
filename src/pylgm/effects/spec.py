@@ -106,6 +106,26 @@ class RW2(_ComposableEffect):
 
 
 @dataclass(frozen=True)
+class AR1(_ComposableEffect):
+    """A stationary first-order autoregressive latent effect."""
+
+    name: str
+    index: str
+    precision: float | Hyperparameter = 1.0
+    rho: float | Hyperparameter = 0.5
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        if not isinstance(self.rho, Hyperparameter):
+            rho = _finite_real(self.rho, "rho")
+            if not -1.0 < rho < 1.0:
+                raise ValueError("rho must lie strictly inside (-1, 1)")
+            object.__setattr__(self, "rho", rho)
+@dataclass(frozen=True)
 class Besag(_ComposableEffect):
     """A Besag / intrinsic CAR (ICAR) spatial latent effect."""
 
@@ -179,26 +199,6 @@ class BYM2(_ComposableEffect):
         object.__setattr__(self, "graph", canonical_graph(self.graph))
 
 
-@dataclass(frozen=True)
-class AR1(_ComposableEffect):
-    """A stationary first-order autoregressive latent effect."""
-
-    name: str
-    index: str
-    precision: float | Hyperparameter = 1.0
-    rho: float | Hyperparameter = 0.5
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
-        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
-        object.__setattr__(
-            self, "precision", _positive_precision(self.precision, "precision")
-        )
-        if not isinstance(self.rho, Hyperparameter):
-            rho = _finite_real(self.rho, "rho")
-            if not -1.0 < rho < 1.0:
-                raise ValueError("rho must lie strictly inside (-1, 1)")
-            object.__setattr__(self, "rho", rho)
 
 
 EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2
