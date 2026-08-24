@@ -8,7 +8,9 @@ from scipy.sparse import block_diag, csr_matrix, diags, hstack
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
 from pylgm.data import CanonicalPanel
+from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects import (
+    AR1,
     Besag,
     BYM2,
     Fixed,
@@ -16,6 +18,7 @@ from pylgm.effects import (
     ProperCAR,
     RW1,
     RW2,
+    build_ar1,
     build_besag,
     build_bym2,
     build_fixed,
@@ -24,6 +27,7 @@ from pylgm.effects import (
     build_random_walk,
     normalize_graph,
 )
+from pylgm.effects.ar1 import ar1_structure
 from pylgm.effects.bym2 import bym2_precision, bym2_spectrum
 from pylgm.effects.proper_car import car_rho_interval
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
@@ -221,6 +225,11 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.index, dict(effect.graph), precision, phi
                 )
                 precisions[effect.name] = precision
+            elif isinstance(effect, AR1):
+                precision = _resolved_precision(effect.precision)
+                rho = _resolved_precision(effect.rho) if isinstance(effect.rho, Hyperparameter) else effect.rho
+                block = build_ar1(frame, effect.name, effect.index, precision, rho)
+                precisions[effect.name] = precision
             elif isinstance(effect, (RW1, RW2)):
                 precision = _resolved_precision(effect.precision)
                 order = 1 if isinstance(effect, RW1) else 2
@@ -325,6 +334,8 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
             found.append((effect.name, effect.rho))
         if isinstance(effect, BYM2) and isinstance(effect.phi, Hyperparameter):
             found.append((effect.name, effect.phi))
+        if isinstance(effect, AR1) and isinstance(effect.rho, Hyperparameter):
+            found.append((effect.name, effect.rho))
     return found
 
 
@@ -507,6 +518,58 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 parameter_priors[phi_name] = effect.phi.prior.bind(positive)
             elif effect.phi.prior is not None:
                 parameter_priors[phi_name] = effect.phi.prior
+            continue
+        if isinstance(effect, AR1):
+            rho_is_hp = isinstance(effect.rho, Hyperparameter)
+            if not rho_is_hp:
+                block = build_ar1(frame, effect.name, effect.index, value, effect.rho)
+                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+                if optimized:
+                    parameter_names.append(precision.name)
+                    parameter_bounds[precision.name] = _log_bounds(precision)
+                continue
+            if effect.rho.transform != "logit":
+                raise CompilationError(
+                    f"AR1 rho {effect.rho.name!r} must be declared with "
+                    f"transform='logit' (it is a correlation on (-1, 1)); got "
+                    f"transform={effect.rho.transform!r}"
+                )
+            inset = 1e-6
+            rho_lower = -1.0 + inset if effect.rho.lower is None else max(effect.rho.lower, -1.0 + inset)
+            rho_upper = 1.0 - inset if effect.rho.upper is None else min(effect.rho.upper, 1.0 - inset)
+            if not rho_lower <= effect.rho.initial <= rho_upper:
+                raise CompilationError(
+                    f"initial value for AR1 rho {effect.rho.name!r} must lie in "
+                    f"({rho_lower:.6g}, {rho_upper:.6g}); got {effect.rho.initial}"
+                )
+            level_count = len(ordered_observed_levels(frame[effect.index]))
+            template = build_ar1(
+                frame, effect.name, effect.index, value, float(effect.rho.initial)
+            )
+            tau_name = precision.name if optimized else None
+            tau_fixed = None if optimized else value
+            rho_name = effect.rho.name
+
+            def build(
+                values,
+                level_count=level_count,
+                tau_name=tau_name,
+                tau_fixed=tau_fixed,
+                rho_name=rho_name,
+            ) -> csr_matrix:
+                tau = values[tau_name] if tau_name else tau_fixed
+                return csr_matrix(tau * ar1_structure(level_count, values[rho_name]))
+
+            params = tuple(n for n in (tau_name, rho_name) if n)
+            scalable.append(ParametricBlock(template, params, build))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            parameter_names.append(rho_name)
+            parameter_bounds[rho_name] = OptimizationBounds(
+                float(effect.rho.initial), rho_lower, rho_upper,
+                transform=LogitTransform(-1.0, 1.0),
+            )
             continue
         if isinstance(effect, IID):
             block = build_iid(frame, effect.name, effect.index, value)
