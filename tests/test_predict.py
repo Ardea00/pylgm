@@ -131,3 +131,35 @@ def test_offset_is_read_from_the_new_rows():
     low = result.predict(pd.DataFrame({"region": ["a"], "logexp": [0.0]}))
     high = result.predict(pd.DataFrame({"region": ["a"], "logexp": [1.0]}))
     assert high.predictive_mean[0] == pytest.approx(low.predictive_mean[0] + 1.0)
+
+
+def test_integrated_nonlinear_link_fitted_mean_is_a_documented_approximation():
+    # integrate_inla mixes the TRANSFORMED per-theta values,
+    #   fitted = sum_k w_k * g(mu_k, s_k),
+    # while predict() transforms the INTEGRATED moments,
+    #   fitted = g(sum_k w_k mu_k, Var_mixture).
+    # For a non-linear g (the Poisson lognormal mean) Jensen makes these differ.
+    # eta mean/variance stay exact; only the response transform is approximate.
+    frame = pd.DataFrame({
+        "y": [2.0, 3.0, 5.0, 4.0],
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "region": ["a", "b", "a", "b"],
+    })
+    model = LGM(
+        response="y",
+        predictor=Fixed("1 + x")
+        + IID("region", index="region",
+              precision=Hyperparameter("region.precision", initial=1.0,
+                                       prior=PCPrecision(upper_sd=1.0, alpha=0.01))),
+        likelihood=Poisson(),
+    )
+    result = model.fit(frame, engine="laplace", hyperparameters="integrate")
+    prediction = result.predict(frame)
+
+    # the linear-predictor quantities remain exact
+    assert np.allclose(prediction.predictive_mean, result.predictive_mean, atol=1e-12)
+    assert np.allclose(prediction.predictive_variance, result.predictive_variance, atol=1e-12)
+
+    # the response scale agrees closely but NOT exactly, by construction
+    assert not np.allclose(prediction.fitted_mean, result.fitted_mean, atol=1e-12)
+    assert np.allclose(prediction.fitted_mean, result.fitted_mean, rtol=5e-3)

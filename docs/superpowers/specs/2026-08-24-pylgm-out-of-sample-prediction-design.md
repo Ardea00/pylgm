@@ -198,7 +198,15 @@ prediction.to_frame()             # DataFrame aligned to new_data
 ## Acceptance criteria
 1. `result.predict(new_data)` returns a `Prediction` for all three result types
    and both engines, using the fitted latent posterior.
-2. Predicting the fit rows reproduces the fit-row predictions exactly.
+2. Predicting the fit rows reproduces the fit-row `predictive_mean` and
+   `predictive_variance` exactly, and `fitted_mean` exactly for the identity
+   link and for all plug-in / empirical-Bayes fits. For an **integrated** fit
+   with a non-linear link, `fitted_mean` is a documented moment-matched
+   approximation: `integrate_inla` mixes the transformed per-θ values while
+   `predict` transforms the integrated moments, and Jensen's inequality
+   separates them by an amount that scales with the hyperparameter
+   uncertainty. Reproducing it exactly would require retaining every grid
+   point's latent covariance.
 3. The fitted categorical encoding is reproduced on new data via the retained
    `ModelSpec`.
 4. Unseen index levels raise a directed error pointing to the NaN-response

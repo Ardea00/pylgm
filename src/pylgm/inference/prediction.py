@@ -8,8 +8,22 @@ domain is an error rather than a silently dropped or zero-filled contribution.
 Response-scale conventions (``predictive_variance`` / ``fitted_mean``) are not
 re-derived here: they call the same likelihood methods
 (``likelihood.variance``, ``likelihood.response_prediction``) that
-``pylgm.inference.gaussian`` and ``pylgm.inference.laplace`` use, so a
-fit-row round trip matches the fitted result exactly.
+``pylgm.inference.gaussian`` and ``pylgm.inference.laplace`` use, so a fit-row
+round trip reproduces the fitted result exactly -- with one documented
+exception.
+
+**Integrated fits with a non-linear link.** ``integrate_inla`` builds
+``fitted_mean`` by mixing the *transformed* per-hyperparameter values,
+``sum_k w_k g(mu_k, s_k)``, whereas prediction transforms the *integrated*
+moments, ``g(sum_k w_k mu_k, Var_mixture)``. For a non-linear ``g`` (the
+Poisson log link's lognormal mean, say) Jensen's inequality makes these differ
+slightly, so ``predict().fitted_mean`` is a moment-matched approximation of
+``INLAResult.fitted_mean`` rather than an exact reproduction; the gap scales
+with the hyperparameter uncertainty. Reproducing it exactly would require
+retaining every grid point's latent covariance, which is not affordable for a
+wide latent field. ``predictive_mean`` and ``predictive_variance`` are exact in
+every case, as is ``fitted_mean`` for the identity link and for all plug-in and
+empirical-Bayes fits.
 """
 
 from dataclasses import dataclass, field

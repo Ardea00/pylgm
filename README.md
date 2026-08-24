@@ -494,6 +494,17 @@ variance) for the Bernoulli logit link — see
 ["Non-Gaussian likelihoods (Laplace)"](#non-gaussian-likelihoods-laplace)
 above.
 
+One exception is worth knowing about. Under `hyperparameters="integrate"`
+with a **non-linear link**, the integrated `result.fitted_mean` mixes the
+*transformed* per-hyperparameter values (`Σₖ wₖ·g(μₖ, σ²ₖ)`), while `predict`
+transforms the *integrated* moments (`g(Σₖ wₖμₖ, Var)`). Jensen's inequality
+separates the two by an amount that grows with the hyperparameter
+uncertainty, so `predict().fitted_mean` is a moment-matched approximation of
+`result.fitted_mean` there rather than an exact match (reproducing it exactly
+would mean retaining every grid point's latent covariance). `predictive_mean`
+and `predictive_variance` are exact in every case, as is `fitted_mean` for the
+identity link and for all plug-in and empirical-Bayes fits.
+
 `predict` works on a result fitted from either Pandas or a Spark DataFrame,
 but `new_data` itself must always be a Pandas DataFrame — Spark `new_data` is
 not supported. **Not shipped**: a prior-based fallback for unseen levels,
