@@ -659,7 +659,13 @@ class _BaseResult:
         return linear_combinations_from(self._mean, self._covariance, weights)
 
     def predict(self, new_data):
-        """Score new rows with the fitted latent posterior."""
+        """Score new rows against this result's latent posterior.
+
+        Scores against whatever posterior ``self.mean``/``self.covariance``
+        carry -- for ``INLAResult`` that is the hyperparameter-integrated
+        posterior (marginalized over the hyperparameter grid), not a
+        posterior conditional on a single hyperparameter value.
+        """
         from pylgm.inference.prediction import predict_from
 
         if self.prediction_context is None:

@@ -388,6 +388,19 @@ def _bounded_parameter(
     )
 
 
+def _compiled_block(name: str, builder, *args) -> object:
+    """Call an effect builder, wrapping failures the same way ``compile_lgm`` does.
+
+    Without this, the same malformed effect (e.g. a single-level AR1) raises a
+    bare exception here but a ``CompilationError`` naming the effect from
+    ``compile_lgm`` -- purely because this one declares a ``Hyperparameter``.
+    """
+    try:
+        return builder(*args)
+    except (DataContractError, ModelValidationError, TypeError, ValueError) as error:
+        raise CompilationError(f"failed to compile effect {name!r}: {error}") from error
+
+
 def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
     """Build an optimisable family, or None when no Hyperparameter is declared."""
     if not _model_hyperparameters(model):
@@ -408,15 +421,18 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     parameter_priors: dict[str, object] = {}
     for effect in model.predictor.effects:
         if isinstance(effect, Fixed):
-            block = build_fixed(frame, effect.formula, effect.prior_precision)
+            block = _compiled_block(
+                effect.name, build_fixed, frame, effect.formula, effect.prior_precision
+            )
             scalable.append(ScalableBlock(block, None, 1.0))
             continue
         precision = effect.precision
         optimized = isinstance(precision, Hyperparameter)
         value = 1.0 if optimized else precision
         if isinstance(effect, Besag):
-            block = build_besag(
-                frame, effect.name, effect.index, dict(effect.graph), value, effect.scale
+            block = _compiled_block(
+                effect.name, build_besag,
+                frame, effect.name, effect.index, dict(effect.graph), value, effect.scale,
             )
             scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
             if optimized:
@@ -426,8 +442,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         if isinstance(effect, ProperCAR):
             rho_is_hp = isinstance(effect.rho, Hyperparameter)
             if not rho_is_hp:
-                block = build_proper_car(
-                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, value
+                block = _compiled_block(
+                    effect.name, build_proper_car,
+                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, value,
                 )
                 scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
                 if optimized:
@@ -443,7 +460,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 effect.rho, a, b, label="proper CAR rho", inset=1e-6 * (b - a)
             )
             rho_initial = float(effect.rho.initial)
-            template = build_proper_car(
+            template = _compiled_block(
+                effect.name, build_proper_car,
                 frame, effect.name, effect.index, dict(effect.graph),
                 rho_initial, value if not optimized else 1.0,
             )
@@ -476,8 +494,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         if isinstance(effect, BYM2):
             phi_is_hp = isinstance(effect.phi, Hyperparameter)
             if not phi_is_hp:
-                block = build_bym2(
-                    frame, effect.name, effect.index, dict(effect.graph), value, effect.phi
+                block = _compiled_block(
+                    effect.name, build_bym2,
+                    frame, effect.name, effect.index, dict(effect.graph), value, effect.phi,
                 )
                 scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
                 if optimized:
@@ -489,7 +508,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             # interval to resolve, unlike proper CAR's rho).
             vectors, values_ = bym2_spectrum(dict(effect.graph))
             phi_bounds = _bounded_parameter(effect.phi, 0.0, 1.0, label="BYM2 phi", inset=1e-6)
-            template = build_bym2(
+            template = _compiled_block(
+                effect.name, build_bym2,
                 frame, effect.name, effect.index, dict(effect.graph),
                 value, float(effect.phi.initial),
             )
@@ -524,7 +544,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         if isinstance(effect, AR1):
             rho_is_hp = isinstance(effect.rho, Hyperparameter)
             if not rho_is_hp:
-                block = build_ar1(frame, effect.name, effect.index, value, effect.rho)
+                block = _compiled_block(
+                    effect.name, build_ar1, frame, effect.name, effect.index, value, effect.rho
+                )
                 scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
                 if optimized:
                     parameter_names.append(precision.name)
@@ -532,8 +554,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 continue
             rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="AR1 rho", inset=1e-6)
             level_count = len(ordered_observed_levels(frame[effect.index]))
-            template = build_ar1(
-                frame, effect.name, effect.index, value, float(effect.rho.initial)
+            template = _compiled_block(
+                effect.name, build_ar1,
+                frame, effect.name, effect.index, value, float(effect.rho.initial),
             )
             tau_name = precision.name if optimized else None
             tau_fixed = None if optimized else value
@@ -558,10 +581,12 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             parameter_bounds[rho_name] = rho_bounds
             continue
         if isinstance(effect, IID):
-            block = build_iid(frame, effect.name, effect.index, value)
+            block = _compiled_block(effect.name, build_iid, frame, effect.name, effect.index, value)
         elif isinstance(effect, (RW1, RW2)):
             order = 1 if isinstance(effect, RW1) else 2
-            block = build_random_walk(frame, effect.name, effect.index, value, order)
+            block = _compiled_block(
+                effect.name, build_random_walk, frame, effect.name, effect.index, value, order
+            )
         else:
             # As in compile_lgm: never let an unrecognized effect become an RW2.
             raise CompilationError(f"unsupported effect type: {type(effect).__name__}")

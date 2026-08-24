@@ -13,6 +13,7 @@ Regenerate the baseline (only ever on code you trust to be correct) with:
     PYTHONPATH=src python tests/inference/test_result_surface.py
 """
 
+import dataclasses
 import json
 import sys
 import math
@@ -29,6 +30,7 @@ from pylgm.inference.result import (
     INLAResult,
     LaplaceResult,
     ModelCriteria,
+    _BaseResult,
 )
 from pylgm.priors import PCPrecision
 
@@ -578,6 +580,25 @@ def test_result_types_are_siblings():
             assert not isinstance(right_instance, left_type), (
                 f"{right_type.__name__} instance must not be an instance of {left_type.__name__}"
             )
+
+
+def test_backing_fields_pairs_every_private_field_with_its_public_property():
+    """``_BACKING_FIELDS`` is hand-maintained -- nothing enforces that a newly
+    added shared field is listed under BOTH its private (dataclass) name and,
+    when a property exposes it, the public property name too. A field added
+    under only one of the two names would silently escape the ``__getattr__``
+    guard (see its docstring: an ``AttributeError`` inside a property getter
+    re-enters ``__getattr__`` under the OUTER/public name). Derive the expected
+    set from ``_BaseResult`` itself so the hand-list and the class cannot drift.
+    """
+    expected: set[str] = set()
+    for declared_field in dataclasses.fields(_BaseResult):
+        expected.add(declared_field.name)
+        if declared_field.name.startswith("_"):
+            public_name = declared_field.name[1:]
+            if isinstance(getattr(_BaseResult, public_name, None), property):
+                expected.add(public_name)
+    assert _BaseResult._BACKING_FIELDS == frozenset(expected)
 
 
 @pytest.mark.parametrize("result_type", [GaussianResult, LaplaceResult, INLAResult])

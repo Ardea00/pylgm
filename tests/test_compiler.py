@@ -488,6 +488,28 @@ def test_unrecognized_effect_is_rejected_not_compiled_as_a_random_walk():
         compile_family(model, panel)
 
 
+def test_ar1_builder_failure_is_a_compilation_error_via_both_compile_paths() -> None:
+    """A single-level AR1 fails the same way whether or not a Hyperparameter is declared.
+
+    ``compile_lgm`` wraps builder failures as ``CompilationError``; before this
+    fix, ``compile_family`` had no equivalent wrapping, so the identical
+    malformed effect raised a bare ``ValueError`` there merely because a
+    precision ``Hyperparameter`` routes it through ``compile_family`` too.
+    """
+    frame = pd.DataFrame({"t": [1], "y": [1.0]})
+    model = LGM(
+        response="y", likelihood=Gaussian(sigma=0.5),
+        predictor=Fixed("1") + AR1(
+            "trend", index="t", precision=Hyperparameter("trend.precision", initial=1.0), rho=0.5
+        ),
+    )
+    panel = _panel(frame)
+    with pytest.raises(CompilationError, match="failed to compile effect 'trend'"):
+        compile_family(model, panel)
+    with pytest.raises(CompilationError, match="failed to compile effect 'trend'"):
+        compile_lgm(model, panel)
+
+
 def test_build_prediction_context_matches_the_compiled_blocks():
     import pandas as pd
 
