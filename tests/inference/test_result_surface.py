@@ -208,6 +208,36 @@ def _bernoulli_ar1_laplace_optimize_fixed_rho():
     return model, frame, dict(engine="laplace", hyperparameters="optimize")
 
 
+def _poisson_iid_laplace_integrate_simplified_laplace():
+    # Exercises the SkewNormalMarginals branch of INLAResult.latent_marginal_table
+    # (latent_strategy="simplified_laplace"): every other integrate fit in this
+    # matrix leaves the table None, so that branch is otherwise dead code here.
+    frame = _iid_frame(5, "poisson")
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + IID("grp", index="grp", precision=_precision_hyperparameter("grp.precision")),
+    )
+    return model, frame, dict(
+        engine="laplace", hyperparameters="integrate", latent_strategy="simplified_laplace"
+    )
+
+
+def _bernoulli_ar1_laplace_integrate_full_laplace():
+    # Exercises the TabulatedMarginals branch (latent_strategy="laplace"). Full
+    # Laplace rejects constrained (RW/Besag) effects, so this uses AR1, which is
+    # unconstrained.
+    frame = _ar1_frame(9, "bernoulli", rho=0.5)
+    model = LGM(
+        response="y", likelihood=Bernoulli(),
+        predictor=Fixed("1") + AR1(
+            "trend", index="t", precision=_precision_hyperparameter("trend.precision"), rho=0.5
+        ),
+    )
+    return model, frame, dict(
+        engine="laplace", hyperparameters="integrate", latent_strategy="laplace"
+    )
+
+
 MATRIX: list[tuple[str, "callable"]] = [
     ("gaussian_iid_plugin", _gaussian_iid_plugin),
     ("gaussian_iid_optimize", _gaussian_iid_optimize),
@@ -221,14 +251,27 @@ MATRIX: list[tuple[str, "callable"]] = [
     ("poisson_besag_laplace_integrate", _poisson_besag_laplace_integrate),
     ("bernoulli_iid_laplace_plugin", _bernoulli_iid_laplace_plugin),
     ("bernoulli_ar1_laplace_optimize_fixed_rho", _bernoulli_ar1_laplace_optimize_fixed_rho),
+    (
+        "poisson_iid_laplace_integrate_simplified_laplace",
+        _poisson_iid_laplace_integrate_simplified_laplace,
+    ),
+    (
+        "bernoulli_ar1_laplace_integrate_full_laplace",
+        _bernoulli_ar1_laplace_integrate_full_laplace,
+    ),
 ]
 
 
-def _build(name: str):
+def _build(name: str) -> tuple[object, pd.DataFrame]:
+    """Return ``(result, frame)`` -- the fitted result and the frame it was fit on.
+
+    The frame is needed alongside the result so ``_surface`` can exercise
+    ``result.predict()`` against the same rows the model saw at fit time.
+    """
     for candidate, builder in MATRIX:
         if candidate == name:
             model, frame, fit_kwargs = builder()
-            return model.fit(frame, **fit_kwargs)
+            return model.fit(frame, **fit_kwargs), frame
     raise KeyError(name)  # pragma: no cover - defensive
 
 
@@ -284,6 +327,22 @@ def _linear_combination_weights(dimension: int) -> np.ndarray:
     return np.vstack([average, spread])
 
 
+def _prediction_context_summary(context: object | None) -> dict | None:
+    """A stable summary of a ``PredictionContext`` -- never the object itself.
+
+    Records only the number of design-block entries and their names, which is
+    enough to catch a dropped/rebuilt ``prediction_context`` without pinning
+    internals (``ModelSpec``, compiled likelihood objects) that aren't part of
+    the public result surface.
+    """
+    if context is None:
+        return None
+    block_names = [
+        payload[0] if kind == "structured" else kind for kind, payload in context.entries
+    ]
+    return {"entry_count": len(context.entries), "block_names": block_names}
+
+
 def _marginals_surface(marginals) -> dict:
     return {
         "mean": _to_jsonable(marginals.mean),
@@ -295,7 +354,7 @@ def _marginals_surface(marginals) -> dict:
     }
 
 
-def _surface(result) -> dict:
+def _surface(result, frame: pd.DataFrame) -> dict:
     """Capture the full public surface of a fitted result as a JSON-able dict."""
     attributes: dict[str, object] = {
         "labels": _to_jsonable(result.labels),
@@ -307,6 +366,7 @@ def _surface(result) -> dict:
         "engine": result.engine,
         "converged": bool(result.converged),
         "hyperparameters": _to_jsonable(result.hyperparameters) if result.hyperparameters is not None else None,
+        "prediction_context": _prediction_context_summary(result.prediction_context),
     }
     if hasattr(result, "fitted_mean"):
         attributes["fitted_mean"] = (
@@ -331,11 +391,46 @@ def _surface(result) -> dict:
     weights = _linear_combination_weights(len(result.mean))
     combined = result.linear_combinations(weights)
 
+    latent_by_block = {
+        name: _marginals_surface(result.latent_marginals(block=name))
+        for name in sorted(result.block_slices)
+    }
+    try:
+        result.latent_marginals(block="__unknown_block__")
+    except Exception as error:  # noqa: BLE001 - the error identity is exactly what's pinned
+        unknown_block_error = {"type": type(error).__name__, "message": str(error)}
+    else:  # pragma: no cover - would mean an unknown block silently resolves
+        unknown_block_error = None
+
+    prediction = result.predict(frame)
+
     methods: dict[str, object] = {
         "latent_marginals": _marginals_surface(latent),
+        "latent_marginals_by_block": latent_by_block,
+        "latent_marginals_unknown_block_error": unknown_block_error,
         "hyperparameter_marginals": hyperparameter_marginals,
         "linear_combinations": _marginals_surface(combined),
+        "predict": {
+            "predictive_mean": _to_jsonable(prediction.predictive_mean),
+            "predictive_variance": _to_jsonable(prediction.predictive_variance),
+            "fitted_mean": _to_jsonable(prediction.fitted_mean),
+            "to_frame_columns": list(prediction.to_frame().columns),
+        },
     }
+    if hasattr(result, "latent_marginal_table"):
+        table = result.latent_marginal_table
+        if table is None:
+            methods["latent_marginal_table"] = None
+        else:
+            table_surface: dict[str, object] = {
+                "type": type(table).__name__,
+                "mean": _to_jsonable(table.mean),
+                "variance": _to_jsonable(table.variance),
+                "std": _to_jsonable(table.std),
+            }
+            if hasattr(table, "skewness"):
+                table_surface["skewness"] = _to_jsonable(table.skewness)
+            methods["latent_marginal_table"] = table_surface
     if hasattr(result, "criteria"):
         criteria = result.criteria
         methods["criteria"] = {
@@ -362,7 +457,7 @@ def _surface(result) -> dict:
 
 
 def _compute_surface_matrix() -> dict:
-    return {name: _surface(_build(name)) for name, _ in MATRIX}
+    return {name: _surface(*_build(name)) for name, _ in MATRIX}
 
 
 # ---------------------------------------------------------------------------
@@ -371,9 +466,11 @@ def _compute_surface_matrix() -> dict:
 
 
 def _first_difference(expected: object, actual: object, path: str = "$") -> str | None:
-    if type(expected) is not type(actual) and not (
-        isinstance(expected, (int, float)) and isinstance(actual, (int, float))
-    ):
+    # Exact type match -- no int/float/bool blurring. ``_to_jsonable`` already
+    # tags every numeric leaf with its real Python type (numpy ints -> int,
+    # numpy floats -> float, numpy bools -> bool), so a float that quietly
+    # became an int (a dtype regression) is a real divergence, not noise.
+    if type(expected) is not type(actual):
         return f"{path}: type mismatch, baseline={type(expected).__name__} actual={type(actual).__name__}"
     if isinstance(expected, dict):
         expected_keys = set(expected)
@@ -395,6 +492,12 @@ def _first_difference(expected: object, actual: object, path: str = "$") -> str 
             if difference is not None:
                 return difference
         return None
+    if isinstance(expected, float):
+        # ``-0.0 == 0.0`` is True in Python, which would hide a sign-of-zero
+        # regression (e.g. a subtraction order flip). Compare the sign bit too.
+        if expected != actual or math.copysign(1.0, expected) != math.copysign(1.0, actual):
+            return f"{path}: value mismatch, baseline={expected!r} actual={actual!r}"
+        return None
     if expected != actual:
         return f"{path}: value mismatch, baseline={expected!r} actual={actual!r}"
     return None
@@ -410,25 +513,6 @@ def test_result_surface_matches_baseline():
     actual = _to_jsonable(_compute_surface_matrix())
     difference = _first_difference(baseline, actual)
     assert difference is None, f"result surface diverged from baseline at {difference}"
-
-
-def test_result_types_are_siblings():
-    """Pins the invariant that ``LGM._rebuild_result``'s isinstance dispatch depends on."""
-    instances = {
-        GaussianResult: _build("gaussian_iid_plugin"),
-        LaplaceResult: _build("poisson_iid_laplace_plugin"),
-        INLAResult: _build("gaussian_iid_integrate"),
-    }
-    for left_type, left_instance in instances.items():
-        for right_type, right_instance in instances.items():
-            if left_type is right_type:
-                continue
-            assert not isinstance(left_instance, right_type), (
-                f"{left_type.__name__} instance must not be an instance of {right_type.__name__}"
-            )
-            assert not isinstance(right_instance, left_type), (
-                f"{right_type.__name__} instance must not be an instance of {left_type.__name__}"
-            )
 
 
 def _common_kwargs(**overrides):
@@ -462,12 +546,42 @@ def _construct(result_type, **overrides):
     return INLAResult(**kwargs)
 
 
+def test_result_types_are_siblings():
+    """Pins the invariant that ``LGM._rebuild_result``'s isinstance dispatch depends on.
+
+    Built by direct, minimal-argument construction (``_construct``) rather than
+    through ``LGM.fit`` / the matrix above: if a reviewer makes ``INLAResult``
+    inherit ``LaplaceResult`` (or any such cross-inheritance), that alone
+    should fail *this* test's assertions. Going through the fit matrix instead
+    would let a dispatch or fixture crash elsewhere abort the test before it
+    ever reaches them, silently shadowing the real failure.
+    """
+    instances = {
+        GaussianResult: _construct(GaussianResult),
+        LaplaceResult: _construct(LaplaceResult),
+        INLAResult: _construct(INLAResult),
+    }
+    for left_type, left_instance in instances.items():
+        for right_type, right_instance in instances.items():
+            if left_type is right_type:
+                continue
+            assert not isinstance(left_instance, right_type), (
+                f"{left_type.__name__} instance must not be an instance of {right_type.__name__}"
+            )
+            assert not isinstance(right_instance, left_type), (
+                f"{right_type.__name__} instance must not be an instance of {left_type.__name__}"
+            )
+
+
 @pytest.mark.parametrize("result_type", [GaussianResult, LaplaceResult, INLAResult])
 def test_constructor_error_messages_are_stable(result_type):
-    # Wrong ndim: a diagnostics value that is not an immutable scalar (an array).
-    with pytest.raises(TypeError) as wrong_shape:
+    # Diagnostics-value check: not a shape/ndim check at all -- a diagnostics
+    # value must be an immutable scalar, and an ndarray (of any shape) fails
+    # this the same way. It's exercised here as the one "malformed payload"
+    # precondition shared verbatim by all three constructors today.
+    with pytest.raises(TypeError) as bad_diagnostics:
         _construct(result_type, diagnostics={"payload": np.array([1, 2])})
-    assert str(wrong_shape.value) == "diagnostics values must be immutable scalar values"
+    assert str(bad_diagnostics.value) == "diagnostics values must be immutable scalar values"
 
     # Non-finite: a covariance entry that is NaN.
     with pytest.raises(ValueError) as non_finite:
@@ -478,6 +592,51 @@ def test_constructor_error_messages_are_stable(result_type):
     with pytest.raises(ValueError) as mismatched:
         _construct(result_type, prediction_keys=pd.DataFrame({"row": [1]}))
     assert str(mismatched.value) == "prediction keys row count must match predictive results"
+
+
+@pytest.mark.parametrize("result_type", [GaussianResult, LaplaceResult, INLAResult])
+def test_constructor_validation_order_is_stable(result_type):
+    """Pins which precondition wins when two are violated at once.
+
+    Today, every constructor validates ``prediction_keys`` *before* checking
+    covariance finiteness, so a non-finite covariance combined with a
+    mismatched ``prediction_keys`` row count surfaces the prediction-keys
+    message, not the finiteness one. A shared ``_init_common`` extracted by
+    the refactor could easily reorder these checks -- e.g. validate the
+    array-shaped arguments first -- and silently change which error a caller
+    sees for a doubly-malformed construction. This test only holds if that
+    order is preserved; it is not a claim about which order is "correct".
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _construct(
+            result_type,
+            covariance=np.array([[np.nan, 0.0], [0.0, 1.0]]),
+            prediction_keys=pd.DataFrame({"row": [1]}),
+        )
+    assert str(excinfo.value) == "prediction keys row count must match predictive results"
+
+
+@pytest.mark.parametrize("result_type", [GaussianResult, LaplaceResult, INLAResult])
+def test_malformed_shapes_are_currently_accepted_without_validation(result_type):
+    """Pins today's permissive (and arguably wrong) construction-time behaviour.
+
+    None of the three constructors validates that ``mean`` is one-dimensional,
+    nor that ``covariance``'s size actually matches ``mean``'s. A 2-D ``mean``
+    paired with a ``covariance`` of an unrelated size constructs without
+    complaint; the mismatch would only surface later, inside
+    ``latent_marginals`` or ``linear_combinations``. If the refactor's shared
+    ``_init_common`` "helpfully" adds shape validation, that is a real,
+    user-visible behaviour change (a construction that used to succeed would
+    now raise) and must be called out explicitly rather than slipping in
+    unannounced -- which is exactly what a failure here would flag.
+    """
+    result = _construct(
+        result_type,
+        mean=np.zeros((2, 2)),
+        covariance=np.eye(5),
+    )
+    assert result.mean.shape == (2, 2)
+    assert result.covariance.shape == (5, 5)
 
 
 def test_inla_constructor_error_messages_are_stable():
