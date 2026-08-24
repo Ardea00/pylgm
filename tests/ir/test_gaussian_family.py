@@ -232,7 +232,8 @@ def test_sigma_only_zero_block_family_materializes_and_exactly_fits() -> None:
     assert model.blocks == ()
     assert model.sigma == 0.5
     np.testing.assert_allclose(result.predictive_mean, [0.0])
-    np.testing.assert_allclose(result.predictive_variance, [0.25])
+    np.testing.assert_allclose(result.predictive_variance, [0.0])
+    assert result.observation_variance == pytest.approx(0.25)
 
 
 @pytest.mark.parametrize(

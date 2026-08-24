@@ -5,12 +5,12 @@ passed to ``fit`` and reuses the already-fitted posterior mean/covariance. It
 cannot create a new latent column, so an index level absent from the fitted
 domain is an error rather than a silently dropped or zero-filled contribution.
 
-Response-scale conventions (``predictive_variance`` / ``fitted_mean``) are not
-re-derived here: they call the same likelihood methods
-(``likelihood.variance``, ``likelihood.response_prediction``) that
-``pylgm.inference.gaussian`` and ``pylgm.inference.laplace`` use, so a fit-row
-round trip reproduces the fitted result exactly -- with one documented
-exception.
+``predictive_variance`` is the linear-predictor (eta) posterior variance for
+every likelihood, computed the same way ``pylgm.inference.gaussian`` and
+``pylgm.inference.laplace`` compute it. ``fitted_mean`` is not re-derived
+either: it calls the same ``likelihood.response_prediction`` method those
+modules use, so a fit-row round trip reproduces the fitted result exactly --
+with one documented exception.
 
 **Integrated fits with a non-linear link.** ``integrate_inla`` builds
 ``fitted_mean`` by mixing the *transformed* per-hyperparameter values,
@@ -35,7 +35,6 @@ from formulaic import ModelSpec
 
 from pylgm.exceptions import NumericalError
 from pylgm.inference.result import _readonly_array
-from pylgm.likelihoods import CompiledGaussian
 
 
 @dataclass(frozen=True)
@@ -172,13 +171,9 @@ def predict_from(
     offset = _offset_for(context, new_data)
 
     eta = np.asarray(design @ mean + offset, dtype=float)
-    eta_variance = np.einsum("ij,jk,ik->i", design, covariance, design)
+    predictive_variance = np.einsum("ij,jk,ik->i", design, covariance, design)
 
     likelihood = context.likelihood
-    if isinstance(likelihood, CompiledGaussian):
-        predictive_variance = eta_variance + likelihood.variance
-    else:
-        predictive_variance = eta_variance
     fitted_mean = np.asarray(likelihood.response_prediction(eta, predictive_variance), dtype=float)
 
     _require_finite("predictive mean", eta)

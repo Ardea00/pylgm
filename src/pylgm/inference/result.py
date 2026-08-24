@@ -602,6 +602,14 @@ class _BaseResult:
 
     @property
     def predictive_variance(self) -> np.ndarray:
+        """Linear-predictor (eta) posterior variance; excludes response-scale observation noise.
+
+        This is ``Var(eta)`` for every result type, matching R-INLA's
+        ``summary.linear.predictor`` convention. It is the only quantity definable
+        for likelihoods with no observation-scale variance (Poisson, Bernoulli).
+        For a Gaussian likelihood, add ``GaussianResult.observation_variance`` to
+        recover the response-scale (fitted-value) predictive variance.
+        """
         return _readonly_array(self._predictive_variance)
 
     @property
@@ -657,6 +665,7 @@ class GaussianResult(_BaseResult):
     log_marginal_likelihood: float
     _predictive_mean: np.ndarray = field(repr=False)
     _predictive_variance: np.ndarray = field(repr=False)
+    observation_variance: float | None
     _prediction_keys: pd.DataFrame | None = field(repr=False)
     block_slices: Mapping[str, slice]
     diagnostics: Mapping[str, object]
@@ -671,6 +680,7 @@ class GaussianResult(_BaseResult):
         log_marginal_likelihood: float,
         predictive_mean: np.ndarray,
         predictive_variance: np.ndarray,
+        observation_variance: float | None = None,
         block_slices: Mapping[str, slice] | None = None,
         diagnostics: Mapping[str, object] | None = None,
         prediction_keys: pd.DataFrame | None = None,
@@ -678,6 +688,12 @@ class GaussianResult(_BaseResult):
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
     ) -> None:
+        def _validate_observation_variance() -> None:
+            if observation_variance is None:
+                return
+            if not np.isfinite(observation_variance) or observation_variance < 0:
+                raise ValueError("observation_variance must be finite and non-negative")
+
         self._init_common(
             labels=labels,
             mean=mean,
@@ -690,6 +706,12 @@ class GaussianResult(_BaseResult):
             prediction_keys=prediction_keys,
             hyperparameters=hyperparameters,
             prediction_context=prediction_context,
+            extra_validate=_validate_observation_variance,
+            extra_store=lambda: object.__setattr__(
+                self,
+                "observation_variance",
+                None if observation_variance is None else float(observation_variance),
+            ),
         )
 
 
@@ -820,11 +842,6 @@ class LaplaceResult(_BaseResult):
                 object.__setattr__(self, "link_name", str(link_name)),
             ),
         )
-
-    @property
-    def predictive_variance(self) -> np.ndarray:
-        """Linear-predictor (eta) posterior variance; excludes response-scale observation noise."""
-        return _readonly_array(self._predictive_variance)
 
     @property
     def fitted_mean(self) -> np.ndarray:
@@ -960,14 +977,3 @@ class INLAResult(_BaseResult):
     @property
     def criteria(self) -> ModelCriteria:
         return self._criteria
-
-    def predict(self, new_data):
-        """Score new rows with the fitted, hyperparameter-integrated latent posterior."""
-        from pylgm.inference.prediction import predict_from
-
-        if self.prediction_context is None:
-            raise ValueError(
-                "this result carries no prediction context; predict() is available "
-                "on results produced by LGM.fit"
-            )
-        return predict_from(self.prediction_context, self.mean, self.covariance, new_data)

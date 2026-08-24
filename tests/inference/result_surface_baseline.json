@@ -1351,16 +1351,16 @@
         0.771784875844
       ],
       "predictive_variance": [
-        0.0803437339486,
-        0.0758357367278,
-        0.0751040652296,
-        0.0751408128917,
-        0.0752003942148,
-        0.0751119691912,
-        0.075407855515,
-        0.0752104282851,
-        0.0756301001347,
-        0.0771048161413
+        0.0403437339486,
+        0.0358357367278,
+        0.0351040652296,
+        0.0351408128917,
+        0.0352003942148,
+        0.0351119691912,
+        0.035407855515,
+        0.0352104282851,
+        0.0356301001347,
+        0.0371048161413
       ]
     },
     "immutability": {
@@ -1574,16 +1574,16 @@
           0.771784875844
         ],
         "predictive_variance": [
-          0.0803437339486,
-          0.0758357367278,
-          0.0751040652296,
-          0.0751408128917,
-          0.0752003942148,
-          0.0751119691912,
-          0.075407855515,
-          0.0752104282851,
-          0.0756301001347,
-          0.0771048161413
+          0.0403437339486,
+          0.0358357367278,
+          0.0351040652296,
+          0.0351408128917,
+          0.0352003942148,
+          0.0351119691912,
+          0.035407855515,
+          0.0352104282851,
+          0.0356301001347,
+          0.0371048161413
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -1652,6 +1652,7 @@
         0.317346392324,
         -0.293250919141
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -1666,10 +1667,10 @@
         0.112862700408
       ],
       "predictive_variance": [
-        0.0791232233602,
-        0.0782844626124,
-        0.0782844626124,
-        0.0791232233602
+        0.0391232233602,
+        0.0382844626124,
+        0.0382844626124,
+        0.0391232233602
       ]
     },
     "immutability": {
@@ -1785,10 +1786,10 @@
           0.112862700408
         ],
         "predictive_variance": [
-          0.0791232233602,
-          0.0782844626124,
-          0.0782844626124,
-          0.0791232233602
+          0.0391232233602,
+          0.0382844626124,
+          0.0382844626124,
+          0.0391232233602
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -1797,7 +1798,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-11.735794863303763, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 4, 'constraint_count': 1}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'region:0', 'region:1', 'region:2', 'region:3'), log_marginal_likelihood=-11.735794863303763, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'region': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 4, 'constraint_count': 1}))",
     "type": "GaussianResult"
   },
   "gaussian_iid_integrate": {
@@ -1877,14 +1878,14 @@
         0.391935293883
       ],
       "predictive_variance": [
-        0.0595610183326,
-        0.0582351485734,
-        0.0572061537254,
-        0.0578487916577,
-        0.0595610183326,
-        0.0582351485734,
-        0.0572061537254,
-        0.0578487916577
+        0.0195610183326,
+        0.0182351485734,
+        0.0172061537254,
+        0.0178487916577,
+        0.0195610183326,
+        0.0182351485734,
+        0.0172061537254,
+        0.0178487916577
       ]
     },
     "immutability": {
@@ -2054,14 +2055,14 @@
           0.391935293883
         ],
         "predictive_variance": [
-          0.0595610183326,
-          0.0582351485734,
-          0.0572061537254,
-          0.0578487916577,
-          0.0595610183326,
-          0.0582351485734,
-          0.0572061537254,
-          0.0578487916577
+          0.0195610183326,
+          0.0182351485734,
+          0.0172061537254,
+          0.0178487916577,
+          0.0195610183326,
+          0.0182351485734,
+          0.0172061537254,
+          0.0178487916577
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -2132,6 +2133,7 @@
         0.0962123895905,
         -0.215022214718
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -2150,14 +2152,14 @@
         0.364797327388
       ],
       "predictive_variance": [
-        0.0587850966957,
-        0.0587850966957,
-        0.0587850966957,
-        0.0587850966957,
-        0.0587850966957,
-        0.0587850966957,
-        0.0587850966957,
-        0.0587850966957
+        0.0187850966957,
+        0.0187850966957,
+        0.0187850966957,
+        0.0187850966957,
+        0.0187850966957,
+        0.0187850966957,
+        0.0187850966957,
+        0.0187850966957
       ]
     },
     "immutability": {
@@ -2281,14 +2283,14 @@
           0.364797327388
         ],
         "predictive_variance": [
-          0.0587850966957,
-          0.0587850966957,
-          0.0587850966957,
-          0.0587850966957,
-          0.0587850966957,
-          0.0587850966957,
-          0.0587850966957,
-          0.0587850966957
+          0.0187850966957,
+          0.0187850966957,
+          0.0187850966957,
+          0.0187850966957,
+          0.0187850966957,
+          0.0187850966957,
+          0.0187850966957,
+          0.0187850966957
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -2297,7 +2299,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.11618694792178, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 14, 'hyperparameter_penalized': True}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.11618694792178, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 14, 'hyperparameter_penalized': True}))",
     "type": "GaussianResult"
   },
   "gaussian_iid_plugin": {
@@ -2357,6 +2359,7 @@
         0.100665178402,
         -0.224973497192
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -2375,14 +2378,14 @@
         0.354846005332
       ],
       "predictive_variance": [
-        0.0594230768981,
-        0.0594230768981,
-        0.0594230768981,
-        0.0594230768981,
-        0.0594230768981,
-        0.0594230768981,
-        0.0594230768981,
-        0.0594230768981
+        0.0194230768981,
+        0.0194230768981,
+        0.0194230768981,
+        0.0194230768981,
+        0.0194230768981,
+        0.0194230768981,
+        0.0194230768981,
+        0.0194230768981
       ]
     },
     "immutability": {
@@ -2506,14 +2509,14 @@
           0.354846005332
         ],
         "predictive_variance": [
-          0.0594230768981,
-          0.0594230768981,
-          0.0594230768981,
-          0.0594230768981,
-          0.0594230768981,
-          0.0594230768981,
-          0.0594230768981,
-          0.0594230768981
+          0.0194230768981,
+          0.0194230768981,
+          0.0194230768981,
+          0.0194230768981,
+          0.0194230768981,
+          0.0194230768981,
+          0.0194230768981,
+          0.0194230768981
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -2522,7 +2525,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.894947379652649, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'grp:a', 'grp:b', 'grp:c', 'grp:d'), log_marginal_likelihood=-9.894947379652649, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'grp': slice(1, 5, None)}), diagnostics=mappingproxy({'latent_dimension': 5, 'observed_count': 8, 'constraint_count': 0}))",
     "type": "GaussianResult"
   },
   "gaussian_rw1_optimize": {
@@ -2656,6 +2659,7 @@
         0.145150035791,
         0.238722308881
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -2674,14 +2678,14 @@
         0.717547888091
       ],
       "predictive_variance": [
-        0.0690554695385,
-        0.0632807237228,
-        0.062848415395,
-        0.0628162313503,
-        0.0628162313503,
-        0.062848415395,
-        0.0632807237228,
-        0.0690554695385
+        0.0290554695385,
+        0.0232807237228,
+        0.022848415395,
+        0.0228162313503,
+        0.0228162313503,
+        0.022848415395,
+        0.0232807237228,
+        0.0290554695385
       ]
     },
     "immutability": {
@@ -2829,14 +2833,14 @@
           0.717547888091
         ],
         "predictive_variance": [
-          0.0690554695385,
-          0.0632807237228,
-          0.062848415395,
-          0.0628162313503,
-          0.0628162313503,
-          0.062848415395,
-          0.0632807237228,
-          0.0690554695385
+          0.0290554695385,
+          0.0232807237228,
+          0.022848415395,
+          0.0228162313503,
+          0.0228162313503,
+          0.022848415395,
+          0.0232807237228,
+          0.0290554695385
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -2845,7 +2849,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-9.324013633469107, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 118, 'hyperparameter_penalized': True}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-9.324013633469107, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1, 'empirical_bayes_converged': True, 'empirical_bayes_evaluations': 118, 'hyperparameter_penalized': True}))",
     "type": "GaussianResult"
   },
   "gaussian_rw1_plugin": {
@@ -2977,6 +2981,7 @@
         0.0920104634515,
         0.276194371898
       ],
+      "observation_variance": 0.04,
       "prediction_context": {
         "block_names": [
           "fixed",
@@ -2995,14 +3000,14 @@
         0.755019951108
       ],
       "predictive_variance": [
-        0.077850957497,
-        0.0759266310086,
-        0.0759210764599,
-        0.0759210604269,
-        0.0759210604269,
-        0.0759210764599,
-        0.0759266310086,
-        0.077850957497
+        0.037850957497,
+        0.0359266310086,
+        0.0359210764599,
+        0.0359210604269,
+        0.0359210604269,
+        0.0359210764599,
+        0.0359266310086,
+        0.037850957497
       ]
     },
     "immutability": {
@@ -3150,14 +3155,14 @@
           0.755019951108
         ],
         "predictive_variance": [
-          0.077850957497,
-          0.0759266310086,
-          0.0759210764599,
-          0.0759210604269,
-          0.0759210604269,
-          0.0759210764599,
-          0.0759266310086,
-          0.077850957497
+          0.037850957497,
+          0.0359266310086,
+          0.0359210764599,
+          0.0359210604269,
+          0.0359210604269,
+          0.0359210764599,
+          0.0359266310086,
+          0.037850957497
         ],
         "to_frame_columns": [
           "predictive_mean",
@@ -3166,7 +3171,7 @@
         ]
       }
     },
-    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-13.62733918843533, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1}))",
+    "repr": "GaussianResult(labels=('fixed:Intercept', 'trend:0', 'trend:1', 'trend:2', 'trend:3', 'trend:4', 'trend:5', 'trend:6', 'trend:7'), log_marginal_likelihood=-13.62733918843533, observation_variance=0.04000000000000001, block_slices=mappingproxy({'fixed': slice(0, 1, None), 'trend': slice(1, 9, None)}), diagnostics=mappingproxy({'latent_dimension': 9, 'observed_count': 8, 'constraint_count': 1}))",
     "type": "GaussianResult"
   },
   "poisson_besag_laplace_integrate": {

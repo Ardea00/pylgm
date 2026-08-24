@@ -379,6 +379,8 @@ def _surface(result, frame: pd.DataFrame) -> dict:
         )
     if hasattr(result, "link_name"):
         attributes["link_name"] = result.link_name
+    if hasattr(result, "observation_variance"):
+        attributes["observation_variance"] = _to_jsonable(result.observation_variance)
 
     immutability: dict[str, object] = {
         "mean": _raises_on_write(result.mean),

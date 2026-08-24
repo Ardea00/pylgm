@@ -112,7 +112,7 @@ def _rebuild_result(
             latent_marginal_table=result.latent_marginal_table,
             **common,
         )
-    return GaussianResult(**common)
+    return GaussianResult(observation_variance=result.observation_variance, **common)
 
 
 def _align_predictions_with_source_rows(

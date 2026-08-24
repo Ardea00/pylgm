@@ -29,7 +29,7 @@ def test_predicts_linear_predictor_mean_and_variance():
     # design: [1, x, region==a, region==b]
     design = np.array([[1.0, 1.0, 1.0, 0.0], [1.0, 2.0, 0.0, 1.0]])
     expected_mean = design @ mean
-    expected_var = np.einsum("ij,jk,ik->i", design, covariance, design) + 0.5**2
+    expected_var = np.einsum("ij,jk,ik->i", design, covariance, design)
     assert np.allclose(prediction.predictive_mean, expected_mean)
     assert np.allclose(prediction.predictive_variance, expected_var)
 

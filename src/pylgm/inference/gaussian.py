@@ -134,9 +134,7 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     )
     predictive_mean = np.asarray(offset + design @ mean).reshape(-1)
     design_dense = design.toarray()
-    predictive_variance = (
-        np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense) + variance
-    )
+    predictive_variance = np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense)
 
     _require_finite("posterior mean", mean)
     _require_finite("posterior covariance", covariance)
@@ -150,6 +148,7 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
+        observation_variance=variance,
         block_slices=_block_slices(model),
         diagnostics={
             "latent_dimension": int(latent_size),

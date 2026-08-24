@@ -53,7 +53,8 @@ def test_scalar_gaussian_matches_conjugate_solution() -> None:
     np.testing.assert_allclose(result.mean, [1.0])
     np.testing.assert_allclose(result.covariance, [[0.5]])
     np.testing.assert_allclose(result.predictive_mean, [1.0])
-    np.testing.assert_allclose(result.predictive_variance, [1.5])
+    np.testing.assert_allclose(result.predictive_variance, [0.5])
+    assert result.observation_variance == pytest.approx(1.0)
     np.testing.assert_allclose(
         result.log_marginal_likelihood, -0.5 * (np.log(4.0 * np.pi) + 2.0)
     )
@@ -127,7 +128,7 @@ def test_missing_observation_is_excluded_from_posterior_and_likelihood() -> None
 
     np.testing.assert_allclose(result.mean, [1.0])
     np.testing.assert_allclose(result.predictive_mean, [1.0, 3.0])
-    np.testing.assert_allclose(result.predictive_variance, [1.5, 5.5])
+    np.testing.assert_allclose(result.predictive_variance, [0.5, 4.5])
     np.testing.assert_allclose(
         result.log_marginal_likelihood, -0.5 * (np.log(4.0 * np.pi) + 2.0)
     )
@@ -151,7 +152,8 @@ def test_fully_constrained_latent_space_uses_noise_only_likelihood() -> None:
     np.testing.assert_allclose(result.mean, [0.0])
     np.testing.assert_allclose(result.covariance, [[0.0]])
     np.testing.assert_allclose(result.predictive_mean, [0.5])
-    np.testing.assert_allclose(result.predictive_variance, [4.0])
+    np.testing.assert_allclose(result.predictive_variance, [0.0])
+    assert result.observation_variance == pytest.approx(4.0)
     np.testing.assert_allclose(
         result.log_marginal_likelihood,
         -0.5 * (np.log(8.0 * np.pi) + 1.5**2 / 4.0),

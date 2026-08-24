@@ -67,7 +67,7 @@ def test_declarative_predictions_align_with_unsorted_caller_rows():
     )
     np.testing.assert_allclose(
         result.predictive_variance,
-        1.0 + np.array([16.0, 1.0, 9.0, 4.0]) / 31.0,
+        np.array([16.0, 1.0, 9.0, 4.0]) / 31.0,
     )
 
 
@@ -133,7 +133,7 @@ def test_model_without_time_preserves_caller_order_prediction_values():
     )
     np.testing.assert_allclose(
         result.predictive_variance,
-        1.0 + np.array([16.0, 1.0, 9.0]) / 27.0,
+        np.array([16.0, 1.0, 9.0]) / 27.0,
     )
 
 
