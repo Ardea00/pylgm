@@ -349,8 +349,8 @@ def _log_bounds(hp: Hyperparameter) -> OptimizationBounds:
     if hp.transform == "logit":
         raise CompilationError(
             f"hyperparameter {hp.name!r} declares transform='logit' but is not attached "
-            "to an effect that supplies a bounded interval; only a proper CAR rho "
-            "resolves its interval (from the graph)"
+            "to an effect that supplies a bounded interval; only a bounded effect "
+            "parameter (proper CAR rho, BYM2 phi, AR1 rho) resolves one"
         )
     return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=LogTransform())
 

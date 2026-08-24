@@ -164,8 +164,13 @@ post.hyperparameter_marginals()["trend.rho"].mean
 
 ## Acceptance criteria
 1. `AR1(name, index, precision, rho)` composes like any effect and fits under
-   plug-in, optimise, and integrate, for Gaussian and non-Gaussian likelihoods,
-   implementing `Q = τ/(1−ρ²)·T`.
+   plug-in and optimise for Gaussian and non-Gaussian likelihoods, and under
+   integrate for Gaussian, implementing `Q = τ/(1−ρ²)·T`. **Non-Gaussian +
+   integrate is unreliable and not claimed**: the dense Laplace Newton loop
+   stalls just above its absolute gradient tolerance at some grid point and one
+   bad point aborts the integration. This is pre-existing and not AR1-specific
+   — measured on main for every structured effect (RW1 3/10, IID 5/10,
+   ProperCAR 6/10, BYM2 8/10 failures) — and is pinned by an `xfail` test.
 2. `inv(Q)` equals `(1/τ)ρ^{|i−j|}`; τ is the marginal precision; `ρ=0` gives `τI`.
 3. ρ declared as a `Hyperparameter(transform="logit")` is estimated and
    integrated jointly with τ, and recovery tracks simulated truth.

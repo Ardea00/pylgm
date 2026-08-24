@@ -551,7 +551,20 @@ above) or a declared `Hyperparameter` with `transform="logit"`, in which case
 `hyperparameters="integrate"`, integrated over jointly with τ by INLA — a
 non-logit `Hyperparameter` for `rho` raises `CompilationError`. The interval
 is the fixed `(-1, 1)` inset by `1e-6` (no graph-derived bound, unlike
-`ProperCAR`'s ρ).
+`ProperCAR`'s ρ); a `Hyperparameter`'s own `lower`/`upper` narrow it further if
+you set them.
+
+Two caveats on that interval. **Conditioning degrades as ρ approaches the
+bound and as the series grows** — `cond(Q)` runs roughly `2e6·n` at the inset
+edge, so a 1000-level series fitted at ρ ≈ 1 retains only about seven
+significant digits. Nothing fails, but treat an ρ̂ pinned at the bound on a long
+series as "the data want a random walk" and consider `RW1` instead. And
+`hyperparameters="integrate"` is currently **reliable only for a Gaussian
+likelihood**: with Poisson or Bernoulli the dense Laplace inner loop stalls just
+above its gradient tolerance at some grid point and aborts the integration.
+That limitation is pre-existing and affects every structured effect, not just
+AR1; use `hyperparameters="optimize"` for non-Gaussian temporal models until it
+is fixed.
 
 ```python
 from pylgm import AR1, Fixed, Gaussian, Hyperparameter, LGM

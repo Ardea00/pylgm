@@ -93,3 +93,35 @@ def test_predict_works_and_unseen_level_points_at_the_nan_workflow():
     assert np.allclose(prediction.predictive_mean, result.predictive_mean)
     with pytest.raises(ValueError, match="NaN response"):
         result.predict(pd.DataFrame({"t": [999]}))
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Pre-existing, not AR1-specific: under hyperparameters='integrate' with a "
+        "non-Gaussian likelihood, the dense Laplace Newton loop stalls just above "
+        "its absolute 1e-8 gradient tolerance at some grid point, and one bad "
+        "point aborts the whole integration. Measured on main for every "
+        "structured effect (RW1 3/10, IID 5/10, ProperCAR 6/10, BYM2 8/10 "
+        "failures); AR1 sits in the same range. Pinned here so the gap is "
+        "visible rather than merely undocumented -- the fix is a relative "
+        "gradient tolerance in the Newton loop, tracked separately."
+    ),
+)
+def test_poisson_integrate_is_currently_unreliable():
+    rng = np.random.default_rng(0)
+    n = 14
+    signal = np.zeros(n)
+    for i in range(1, n):
+        signal[i] = 0.8 * signal[i - 1] + rng.normal(scale=0.3)
+    frame = pd.DataFrame({
+        "t": list(range(n)),
+        "y": rng.poisson(np.exp(1.5 + signal)).astype(float),
+    })
+    rho = Hyperparameter("trend.rho", initial=0.0, transform="logit")
+    tau = Hyperparameter("trend.precision", initial=1.0,
+                         prior=PCPrecision(upper_sd=1.0, alpha=0.01))
+    result = _model(rho, tau, likelihood=Poisson()).fit(
+        frame, engine="laplace", hyperparameters="integrate"
+    )
+    assert np.all(np.isfinite(result.latent_marginals("trend").mean))

@@ -37,8 +37,11 @@ def test_no_constraints_and_positive_definite():
         cho_factor(block.precision.toarray())
 
 
-def test_structure_is_tridiagonal_and_symmetric():
-    structure = ar1_structure(5, 0.6)
+def test_structure_is_sparse_tridiagonal_and_symmetric():
+    sparse = ar1_structure(5, 0.6)
+    # built sparsely, like the other structured effect builders
+    assert hasattr(sparse, "toarray")
+    structure = sparse.toarray()
     assert np.allclose(structure, structure.T)
     # everything more than one step from the diagonal is zero
     index = np.arange(5)

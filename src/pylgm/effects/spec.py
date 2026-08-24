@@ -125,6 +125,8 @@ class AR1(_ComposableEffect):
             if not -1.0 < rho < 1.0:
                 raise ValueError("rho must lie strictly inside (-1, 1)")
             object.__setattr__(self, "rho", rho)
+
+
 @dataclass(frozen=True)
 class Besag(_ComposableEffect):
     """A Besag / intrinsic CAR (ICAR) spatial latent effect."""
@@ -197,8 +199,6 @@ class BYM2(_ComposableEffect):
                 raise ValueError("phi must lie strictly inside (0, 1)")
             object.__setattr__(self, "phi", phi)
         object.__setattr__(self, "graph", canonical_graph(self.graph))
-
-
 
 
 EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2
