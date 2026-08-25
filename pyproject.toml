@@ -34,6 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.9"]
+docs = ["mkdocs-material>=9.5"]
 spark = ["pyspark>=3.5"]
 
 [project.urls]
