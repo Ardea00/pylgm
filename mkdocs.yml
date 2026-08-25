@@ -36,6 +36,10 @@ nav:
       - INLA integration: inla.md
       - Prediction: prediction.md
       - Spark: spark.md
+  - Examples:
+      - Disease mapping (spatial): examples-disease-mapping.md
+      - Count regression: examples-count-regression.md
+  - Theory: theory.md
   - Internals & release policy: internals.md
   - Roadmap: roadmap.md
   - Development: development.md

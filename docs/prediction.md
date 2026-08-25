@@ -13,6 +13,13 @@ indexed like `new_data` with columns `predictive_mean`, `predictive_sd`, and
 `index` column, every variable used in a `Fixed` formula, and the `offset`
 column when the model declares one — but **not** the response column.
 
+!!! tip "Which array do I want?"
+    Compare against **observed responses** (counts, 0/1, y) with
+    `fitted_mean` — it is on the response scale (`exp` of the linear predictor
+    for a Poisson log link, `logit⁻¹` for Bernoulli, identity for Gaussian).
+    `predictive_mean`/`predictive_variance` are on the **linear-predictor**
+    (`η`) scale. See ["scale conventions"](#scale-conventions) below.
+
 ```python
 import pandas as pd
 from pylgm import Fixed, Gaussian, IID, LGM
@@ -100,6 +107,8 @@ couples the whole chain including the unobserved tail).
 | --- | --- |
 | new covariate values / scenarios on **known** index levels | `result.predict(new_data)` |
 | **new** time points, regions, or groups | `NaN`-response rows at `fit` time |
+
+## Scale conventions
 
 `predictive_variance` and `fitted_mean` follow exactly the same conventions
 `predict` mirrors from the fit-row outputs: `predictive_variance` is the

@@ -48,9 +48,17 @@ print(result.fitted_mean.round(3).tolist())
 | [INLA integration](inla.md) | Grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT |
 | [Prediction](prediction.md) | Fit-row and out-of-sample prediction |
 | [Spark](spark.md) | Spark / Databricks data boundary |
+| [Theory](theory.md) | The LGM class, Laplace/INLA inference, the CAR family, PC priors, with references |
 | [Internals & release policy](internals.md) | 0.3 scope, compiled-IR policy, artifact publication, release gate |
 | [Roadmap](roadmap.md) | What's shipped and what's next |
 | [Development](development.md) | Working on pyLGM itself |
+
+## Worked examples, benchmarked against standard regression
+
+| Example | Shows |
+|---|---|
+| [Disease mapping](examples-disease-mapping.md) | Besag spatial smoothing on Scotland lip cancer — fit to observed counts jumps 0.63 → 0.96 vs a non-spatial GLM |
+| [Count regression](examples-count-regression.md) | Horseshoe-crab Poisson GLM matching `statsmodels`, plus estimated overdispersion for honest uncertainty |
 
 Runnable scripts for every feature live under
 [`examples/`](https://github.com/Ardea00/pylgm/tree/main/examples) in the repository.
