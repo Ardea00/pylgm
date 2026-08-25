@@ -194,8 +194,16 @@ def test_object_fingerprint_supports_exact_numpy_complex_and_longdouble_scalars(
     first = np.longdouble(1)
     second = np.nextafter(first, np.longdouble(2))
     if second != first:
-        longdouble_first = pd.DataFrame({"month": [1], "y": [1.0], "value": [first]})
-        longdouble_second = pd.DataFrame({"month": [1], "y": [1.0], "value": [second]})
+        # Force object dtype: where longdouble is wider than float64, newer pandas
+        # downcasts a longdouble scalar to a float64 column on construction, which
+        # collapses this sub-ULP step and is faithfully fingerprinted as equal. An
+        # object column keeps the longdouble scalar so the encoder sees all 16 bytes.
+        longdouble_first = pd.DataFrame(
+            {"month": [1], "y": [1.0], "value": pd.Series([first], dtype=object)}
+        )
+        longdouble_second = pd.DataFrame(
+            {"month": [1], "y": [1.0], "value": pd.Series([second], dtype=object)}
+        )
         assert _fingerprint(longdouble_first) != _fingerprint(longdouble_second)
 
 
