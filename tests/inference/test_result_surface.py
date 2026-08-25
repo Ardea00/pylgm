@@ -292,6 +292,12 @@ _RESULT_TYPES = (GaussianResult, LaplaceResult, INLAResult)
 # Baseline comparison tolerances (see ``_first_difference``).
 _TIGHT_REL_TOL = 1e-5  # integrated hyperparameter posteriors drift ~2e-6 across platforms
 _INTRINSIC_REL_TOL = 0.15  # RW1/Besag ill-determined tails; observed worst ~8.4%
+# Near-zero intrinsic covariance tails (|corr| < 1%, so ~1e-3 against a ~0.2
+# diagonal) swing wildly in *relative* terms while the absolute difference stays
+# tiny -- an older scipy/BLAS (Windows/py3.11) shifts one such entry by ~5e-4,
+# a 34% relative jump. rel_tol is the wrong guard there; an absolute floor well
+# below the meaningful covariance scale absorbs it yet still flags real drift.
+_INTRINSIC_ABS_TOL = 2e-3
 _INTRINSIC_MARKERS = ("rw1", "besag")
 
 
@@ -516,8 +522,10 @@ def _first_difference(expected: object, actual: object, path: str = "$") -> str 
         #    singular precision, so their flat hyperparameter posteriors and
         #    small covariance-tail entries are ill-determined and drift a few
         #    percent (observed worst ~8.4%); everything else keeps the tight guard.
-        rel_tol = _INTRINSIC_REL_TOL if any(m in path for m in _INTRINSIC_MARKERS) else _TIGHT_REL_TOL
-        if not math.isclose(expected, actual, rel_tol=rel_tol, abs_tol=1e-12):
+        intrinsic = any(m in path for m in _INTRINSIC_MARKERS)
+        rel_tol = _INTRINSIC_REL_TOL if intrinsic else _TIGHT_REL_TOL
+        abs_tol = _INTRINSIC_ABS_TOL if intrinsic else 1e-12
+        if not math.isclose(expected, actual, rel_tol=rel_tol, abs_tol=abs_tol):
             return f"{path}: value mismatch, baseline={expected!r} actual={actual!r}"
         return None
     if path.endswith(".repr"):

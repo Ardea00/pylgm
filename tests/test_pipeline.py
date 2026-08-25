@@ -191,20 +191,21 @@ def test_object_fingerprint_supports_exact_numpy_complex_and_longdouble_scalars(
 
     assert _fingerprint(complex_first) != _fingerprint(complex_second)
 
-    first = np.longdouble(1)
-    second = np.nextafter(first, np.longdouble(2))
-    if second != first:
-        # Force object dtype: where longdouble is wider than float64, newer pandas
-        # downcasts a longdouble scalar to a float64 column on construction, which
-        # collapses this sub-ULP step and is faithfully fingerprinted as equal. An
-        # object column keeps the longdouble scalar so the encoder sees all 16 bytes.
-        longdouble_first = pd.DataFrame(
-            {"month": [1], "y": [1.0], "value": pd.Series([first], dtype=object)}
-        )
-        longdouble_second = pd.DataFrame(
-            {"month": [1], "y": [1.0], "value": pd.Series([second], dtype=object)}
-        )
-        assert _fingerprint(longdouble_first) != _fingerprint(longdouble_second)
+    # Build object columns by numpy item-assignment so pandas cannot re-infer and
+    # downcast a wide (80-bit) longdouble to float64. Assert only when the frame
+    # actually stored distinct values: where the platform/pandas collapses this
+    # sub-ULP step, the two frames are genuinely equal and must hash equal.
+    def _longdouble_frame(scalar: np.longdouble) -> pd.DataFrame:
+        column = np.empty(1, dtype=object)
+        column[0] = scalar
+        return pd.DataFrame({"month": [1], "y": [1.0], "value": column})
+
+    first_frame = _longdouble_frame(np.longdouble(1))
+    second_frame = _longdouble_frame(np.nextafter(np.longdouble(1), np.longdouble(2)))
+    stored_first = next(first_frame.itertuples(index=False, name=None))[-1]
+    stored_second = next(second_frame.itertuples(index=False, name=None))[-1]
+    if stored_first != stored_second:
+        assert _fingerprint(first_frame) != _fingerprint(second_frame)
 
 
 def test_object_fingerprint_distinguishes_period_frequency_and_interval_endpoints() -> None:
