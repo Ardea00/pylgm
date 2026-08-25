@@ -8,8 +8,19 @@ version = "0.3.0"
 description = "General-purpose latent Gaussian models for Python"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Andrea Panozzo" }]
+keywords = ["latent gaussian models", "bayesian", "inla", "laplace approximation", "statistics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Operating System :: OS Independent",
+]
 dependencies = [
   "formulaic>=1.1",
   "numpy>=2.0",
@@ -23,7 +34,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.9"]
+docs = ["mkdocs-material>=9.5"]
 spark = ["pyspark>=3.5"]
+
+[project.urls]
+Homepage = "https://github.com/Ardea00/pylgm"
+Repository = "https://github.com/Ardea00/pylgm"
+Issues = "https://github.com/Ardea00/pylgm/issues"
 
 [project.scripts]
 pylgm = "pylgm.cli:app"

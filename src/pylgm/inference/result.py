@@ -635,6 +635,17 @@ class _BaseResult:
 
     @property
     def hyperparameters(self) -> Mapping[str, float] | None:
+        """Estimated hyperparameters keyed by name, or ``None`` when none were estimated.
+
+        A model whose hyperparameters are all fixed (e.g. an exact-Gaussian fit
+        with a known ``sigma``, or effects given literal ``precision`` values)
+        reports ``None`` here, distinct from an empty mapping. Guard reads with a
+        truthiness check rather than iterating unconditionally::
+
+            if result.hyperparameters:
+                for name, value in result.hyperparameters.items():
+                    ...
+        """
         return self._hyperparameters
 
     @property
