@@ -47,6 +47,43 @@ def test_scaling_gives_unit_geometric_mean_variance():
     assert np.isclose(np.exp(np.mean(np.log(variances))), 1.0, atol=1e-8)
 
 
+def _robust_marginal_variances(r):
+    # Generalized inverse of a connected ICAR Laplacian: drop the single null
+    # eigenvalue explicitly. Unlike np.linalg.pinv's default tolerance, this
+    # stays correct as the component grows (see the large-ring test below).
+    eigenvalues, eigenvectors = np.linalg.eigh(r)
+    inverse = np.zeros_like(eigenvalues)
+    inverse[1:] = 1.0 / eigenvalues[1:]
+    return np.einsum("ij,j,ij->i", eigenvectors, inverse, eigenvectors)
+
+
+def test_scaling_stays_finite_on_a_large_connected_component():
+    # Regression: on an irregular component beyond a handful of nodes,
+    # np.linalg.pinv's default tolerance failed to discard the ICAR null
+    # eigenvalue and produced huge negative marginal variances, aborting the
+    # scaling. A 7x8 lattice (56 nodes) reproduces that exactly; the fixed
+    # scaling yields finite, positive variances whose geometric mean is 1
+    # (the Sørbye-Rue property).
+    rows, cols = 7, 8
+    labels = [f"N{r}_{c}" for r in range(rows) for c in range(cols)]
+    grid: dict[str, list[str]] = {label: [] for label in labels}
+    for r in range(rows):
+        for c in range(cols):
+            here = f"N{r}_{c}"
+            if c + 1 < cols:
+                right = f"N{r}_{c + 1}"
+                grid[here].append(right)
+                grid[right].append(here)
+            if r + 1 < rows:
+                down = f"N{r + 1}_{c}"
+                grid[here].append(down)
+                grid[down].append(here)
+    block = build_besag(_frame(labels), "region", "region", grid, 1.0, scale=True)
+    variances = _robust_marginal_variances(block.precision.toarray())
+    assert np.all(np.isfinite(variances)) and np.all(variances > 0)
+    assert np.isclose(np.exp(np.mean(np.log(variances))), 1.0, atol=1e-8)
+
+
 def test_scale_false_leaves_raw_laplacian():
     block = build_besag(_frame(["A", "B", "C"]), "region", "region", PATH, 2.0, scale=False)
     expected = 2.0 * np.array([[1, -1, 0], [-1, 2, -1], [0, -1, 1]], dtype=float)
