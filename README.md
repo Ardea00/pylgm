@@ -1019,6 +1019,27 @@ Pandas input is unaffected: it keeps caller-row prediction order and no
 `prediction_keys`. A runnable example lives at
 [`examples/general_lgm/run_spark.py`](examples/general_lgm/README.md).
 
+### On Databricks
+
+The cluster runtime already ships PySpark, so install **plain `pylgm`** — the
+`[spark]` extra would pull a second PySpark into the notebook environment and
+can shadow the runtime's:
+
+```python
+%pip install pylgm
+```
+
+Pass the DataFrame straight to `fit` using the notebook's pre-provided `spark`
+session. Inference runs on the **driver**, so the collected table must fit in
+driver memory — keep `max_driver_rows` sane and size the driver node
+accordingly:
+
+```python
+sdf = spark.read.table("catalog.schema.panel")
+result = model.fit(sdf, max_driver_rows=1_000_000)
+keys = result.prediction_keys            # join predictions back to the source table
+```
+
 ## Internal compiled IR policy
 
 `pylgm.ir` remains importable for engine and advanced integration work, but it
