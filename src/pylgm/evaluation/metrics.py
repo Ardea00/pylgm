@@ -67,7 +67,7 @@ def _benchmark_identity(frame: pd.DataFrame) -> pd.Series:
     values = frame["is_benchmark"]
     if not values.map(lambda value: isinstance(value, (bool, np.bool_))).all():
         raise DataContractError("is_benchmark must contain booleans")
-    return values.astype(bool, copy=True)
+    return values.astype(bool)
 
 
 def _evaluation_modes(frame: pd.DataFrame) -> tuple[str, ...]:

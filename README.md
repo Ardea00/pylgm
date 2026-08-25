@@ -736,9 +736,28 @@ Because it is a constrained effect (like `RW1`/`RW2`), `latent_strategy="laplace
 (full Laplace) rejects it with `UnsupportedEngineError`, the same restriction
 already documented above for `RW`/intrinsic effects.
 
+**From YAML:** the standalone `load_model` frontend declares `besag`,
+`proper_car`, and `bym2` effects, with the neighbour graph given inline as
+`graph:` or as a path to an R-INLA `.graph` file via `graph_file:` (resolved
+relative to the YAML file). Fixed values only — `precision`, `rho` (required
+for `proper_car`), `phi` (`bym2`), and `scale` (`besag`); estimating a
+hyperparameter stays Python-API-only. Example:
+
+```yaml
+response: cases
+likelihood: {family: poisson}
+data: {panel: [region], time: year}
+predictor:
+  fixed: "1 + urbanicity"
+  effects:
+    - {name: spatial, type: besag, index: region, precision: 1.0, graph_file: adjacency.graph}
+```
+
+The legacy `ModelConfig` frontend (used by the `fit`/`compare` CLI) does not
+declare spatial effects.
+
 **Not yet built:** spatial autocorrelation diagnostics and shapefile/GeoJSON
-graph construction. The YAML `ModelConfig` frontend also does not yet have a
-`besag` effect type — see the
+graph construction — see the
 [spatial roadmap](docs/superpowers/specs/2026-08-08-pylgm-latte-pyspark-architecture.md#4-spatial-effects)
 for what's next.
 
@@ -1019,6 +1038,27 @@ Pandas input is unaffected: it keeps caller-row prediction order and no
 `prediction_keys`. A runnable example lives at
 [`examples/general_lgm/run_spark.py`](examples/general_lgm/README.md).
 
+### On Databricks
+
+The cluster runtime already ships PySpark, so install **plain `pylgm`** — the
+`[spark]` extra would pull a second PySpark into the notebook environment and
+can shadow the runtime's:
+
+```python
+%pip install pylgm
+```
+
+Pass the DataFrame straight to `fit` using the notebook's pre-provided `spark`
+session. Inference runs on the **driver**, so the collected table must fit in
+driver memory — keep `max_driver_rows` sane and size the driver node
+accordingly:
+
+```python
+sdf = spark.read.table("catalog.schema.panel")
+result = model.fit(sdf, max_driver_rows=1_000_000)
+keys = result.prediction_keys            # join predictions back to the source table
+```
+
 ## Internal compiled IR policy
 
 `pylgm.ir` remains importable for engine and advanced integration work, but it
@@ -1106,9 +1146,10 @@ python -m pip install -e . --no-deps
 pylgm --help
 ```
 
-This repository currently has no CI workflow to extend cleanly. The offline
-0.3 review environment also lacks `hatchling`, so a clean build or editable
-installation cannot run there without downloading the build backend; that
-environment uses `PYTHONPATH=src` only for tests, lint, and CLI smoke checks.
-The clean install plus installed-CLI smoke remains a required release gate in a
-provisioned, networked build environment.
+CI runs this as the `release-gate` job in `.github/workflows/test.yml`: a
+non-editable `python -m pip install .` (exercising the real hatchling build)
+followed by `pylgm --help`. The `core` job runs the test suite and lint across
+`{ubuntu, windows, macos} × {3.11, 3.12, 3.13}`. An offline environment lacking
+`hatchling` can substitute `PYTHONPATH=src` for tests, lint, and CLI smoke
+checks, but the clean install plus installed-CLI smoke remains the required
+release gate in a provisioned, networked build environment.

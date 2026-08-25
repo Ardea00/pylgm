@@ -398,7 +398,7 @@ class TabulatedMarginals:
         # Normalize each density row
         normalized_density = density.copy()
         for i in range(x.shape[0]):
-            integral = np.trapz(density[i], x[i])
+            integral = np.trapezoid(density[i], x[i])
             if integral == 0:
                 raise ValueError(f"density row {i} cannot be all-zero")
             normalized_density[i] = density[i] / integral
@@ -418,7 +418,7 @@ class TabulatedMarginals:
     def mean(self) -> np.ndarray:
         result = np.zeros(self._x.shape[0])
         for i in range(self._x.shape[0]):
-            result[i] = np.trapz(self._x[i] * self._density[i], self._x[i])
+            result[i] = np.trapezoid(self._x[i] * self._density[i], self._x[i])
         return _readonly_array(result)
 
     @property
@@ -427,7 +427,7 @@ class TabulatedMarginals:
         result = np.zeros(self._x.shape[0])
         for i in range(self._x.shape[0]):
             centered_sq = (self._x[i] - mean[i]) ** 2
-            result[i] = np.trapz(centered_sq * self._density[i], self._x[i])
+            result[i] = np.trapezoid(centered_sq * self._density[i], self._x[i])
         return _readonly_array(result)
 
     @property
@@ -441,7 +441,7 @@ class TabulatedMarginals:
         result = np.zeros(self._x.shape[0])
         for i in range(self._x.shape[0]):
             centered_cubed = (self._x[i] - mean[i]) ** 3
-            mu3 = np.trapz(centered_cubed * self._density[i], self._x[i])
+            mu3 = np.trapezoid(centered_cubed * self._density[i], self._x[i])
             result[i] = mu3 / (std[i] ** 3)
         return _readonly_array(result)
 
