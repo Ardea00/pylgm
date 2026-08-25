@@ -253,7 +253,11 @@ def test_pipeline_rejects_dangling_symlink_output(tmp_path: Path) -> None:
     config = tmp_path / "config.yaml"
     _write_config(config)
     output = tmp_path / "run"
-    output.symlink_to(tmp_path / "missing")
+    try:
+        output.symlink_to(tmp_path / "missing")
+    except (OSError, NotImplementedError) as error:
+        # Windows blocks symlink creation without Developer Mode / admin.
+        pytest.skip(f"symlinks unavailable on this platform: {error}")
 
     with pytest.raises(FileExistsError):
         Pipeline.from_yaml(config).run(pd.DataFrame({"month": [1, 2], "y": [1.0, 2.0]}), output)

@@ -28,6 +28,6 @@ def test_tabulated_matches_skewnormal_skewness():
 def test_tabulated_normalizes_and_is_immutable():
     x = np.linspace(-5, 5, 2001)
     m = TabulatedMarginals(x[None, :], norm.pdf(x)[None, :] * 7.0)  # unnormalized
-    np.testing.assert_allclose(np.trapz(m.density[0], m.x[0]), 1.0, atol=1e-6)
+    np.testing.assert_allclose(np.trapezoid(m.density[0], m.x[0]), 1.0, atol=1e-6)
     with __import__("pytest").raises(ValueError):
         m.density[0, 0] = 1.0
