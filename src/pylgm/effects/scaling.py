@@ -15,7 +15,8 @@ def sorbye_rue_scale(structure: np.ndarray, null_dim: int) -> np.ndarray:
     """
     eigenvalues, eigenvectors = np.linalg.eigh(structure)
     inverse = np.zeros_like(eigenvalues)
-    inverse[null_dim:] = 1.0 / eigenvalues[null_dim:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inverse[null_dim:] = 1.0 / eigenvalues[null_dim:]
     variances = np.einsum("ij,j,ij->i", eigenvectors, inverse, eigenvectors)
     if not np.all(np.isfinite(variances)) or np.any(variances <= 0):
         raise ValueError("Sørbye-Rue scaling produced a non-positive marginal variance")
