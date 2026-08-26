@@ -7,7 +7,19 @@ from pylgm.effects.iid import build_iid
 from pylgm.effects.midas import build_midas, midas_penalty
 from pylgm.effects.proper_car import build_proper_car
 from pylgm.effects.random_walk import build_random_walk, difference_operator
-from pylgm.effects.spec import AR1, Besag, BYM2, Fixed, IID, MIDAS, Predictor, ProperCAR, RW1, RW2
+from pylgm.effects.spec import (
+    AR1,
+    Besag,
+    BYM2,
+    Fixed,
+    IID,
+    MIDAS,
+    Predictor,
+    ProperCAR,
+    RW1,
+    RW2,
+    SpaceTime,
+)
 
 __all__ = [
     "AR1",
@@ -20,6 +32,7 @@ __all__ = [
     "ProperCAR",
     "RW1",
     "RW2",
+    "SpaceTime",
     "build_ar1",
     "build_besag",
     "build_bym2",

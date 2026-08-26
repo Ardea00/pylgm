@@ -230,7 +230,50 @@ class MIDAS(_ComposableEffect):
         object.__setattr__(self, "ridge", _positive_real(self.ridge, "ridge"))
 
 
-EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2 | MIDAS
+@dataclass(frozen=True)
+class SpaceTime(_ComposableEffect):
+    """A Knorr-Held space-time interaction effect (interaction types I-IV)."""
+
+    name: str
+    space: str
+    time: str
+    graph: Mapping | None = None
+    interaction: str = "IV"
+    order: int = 1
+    precision: float | Hyperparameter = 1.0
+    scale: bool = True
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.graph import canonical_graph
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "space", _non_empty_string(self.space, "space"))
+        object.__setattr__(self, "time", _non_empty_string(self.time, "time"))
+        if self.interaction not in ("I", "II", "III", "IV"):
+            raise ValueError("interaction must be one of 'I', 'II', 'III', 'IV'")
+        if type(self.order) is not int or self.order not in (1, 2):
+            raise ValueError("order must be 1 or 2")
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        if not isinstance(self.scale, bool):
+            raise ValueError("scale must be a boolean")
+        if self.interaction in ("III", "IV") and self.graph is None:
+            raise ValueError(
+                f"interaction {self.interaction!r} needs a spatial neighbour graph; "
+                "pass graph=..."
+            )
+        if self.graph is not None:
+            object.__setattr__(self, "graph", canonical_graph(self.graph))
+
+    @property
+    def index(self) -> str:
+        return self.space
+
+
+EffectSpec: TypeAlias = (
+    Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2 | MIDAS | SpaceTime
+)
 
 
 @dataclass(frozen=True)
@@ -245,7 +288,9 @@ class Predictor:
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
         if any(
-            not isinstance(effect, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS))
+            not isinstance(
+                effect, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, SpaceTime)
+            )
             for effect in effects
         ):
             raise TypeError("effects must contain only effect specifications")
@@ -257,9 +302,21 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS)):
+        if isinstance(other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, SpaceTime)):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
 
-__all__ = ["AR1", "Besag", "BYM2", "Fixed", "IID", "MIDAS", "Predictor", "ProperCAR", "RW1", "RW2"]
+__all__ = [
+    "AR1",
+    "Besag",
+    "BYM2",
+    "Fixed",
+    "IID",
+    "MIDAS",
+    "Predictor",
+    "ProperCAR",
+    "RW1",
+    "RW2",
+    "SpaceTime",
+]
