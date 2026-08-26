@@ -7,6 +7,7 @@ from pylgm.effects.iid import build_iid
 from pylgm.effects.midas import build_midas, midas_penalty
 from pylgm.effects.proper_car import build_proper_car
 from pylgm.effects.random_walk import build_random_walk, difference_operator
+from pylgm.effects.spacetime import build_spacetime
 from pylgm.effects.spec import (
     AR1,
     Besag,
@@ -41,6 +42,7 @@ __all__ = [
     "build_midas",
     "build_proper_car",
     "build_random_walk",
+    "build_spacetime",
     "difference_operator",
     "midas_penalty",
     "canonical_graph",
