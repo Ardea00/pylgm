@@ -50,6 +50,35 @@ if TYPE_CHECKING:
     from pylgm.model import LGM
 
 
+def resolve_constraints(
+    rows: tuple[tuple[dict[str, float], float], ...], labels: tuple[str, ...]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Turn label-keyed ``A x = e`` constraints into a raw ``(m, width)`` matrix and rhs.
+
+    ``labels`` are the qualified latent labels in column order; each row is a
+    ``(mapping, rhs)`` pair mapping those labels to coefficients. Unknown labels
+    are rejected here because this is the first point where the full latent
+    ordering is known.
+    """
+    width = len(labels)
+    if not rows:
+        return np.empty((0, width)), np.empty(0)
+    index = {label: position for position, label in enumerate(labels)}
+    matrix = np.zeros((len(rows), width))
+    rhs = np.zeros(len(rows))
+    for position, (row, row_rhs) in enumerate(rows):
+        rhs[position] = row_rhs
+        for label, coefficient in row.items():
+            column = index.get(label)
+            if column is None:
+                raise CompilationError(
+                    f"constraint references unknown latent label {label!r}; "
+                    "labels are qualified as 'effect:level'"
+                )
+            matrix[position, column] = coefficient
+    return matrix, rhs
+
+
 def _structured_blocks(
     model: ModelConfig,
     panel: CanonicalPanel,
@@ -262,6 +291,7 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             f"latent block design row count does not match the panel: {wrong_rows}"
         )
     labels = _qualified_labels(blocks)
+    extra_constraints, extra_constraint_rhs = resolve_constraints(model.constraints, labels)
 
     if model.offset is not None and model.offset not in frame.columns:
         raise DataContractError(f"offset column not found: {model.offset!r}")
@@ -288,6 +318,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 blocks=tuple(ScalableBlock(block, None, 1.0) for block in blocks),
                 parameter_names=(),
                 initial=Hyperparameters(sigma=sigma, precisions=precisions),
+                extra_constraints=extra_constraints,
+                extra_constraint_rhs=extra_constraint_rhs,
             )
             return family.materialize({})
         except (TypeError, ValueError) as error:
@@ -303,6 +335,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         design = hstack([block.design for block in blocks], format="csr")
         precision = block_diag([block.precision for block in blocks], format="csr")
         constraints = _block_constraints(tuple(blocks), width)
+        if extra_constraints.shape[0]:
+            constraints = np.vstack([constraints, extra_constraints])
         try:
             return CompiledLGM(
                 y=y,
@@ -314,6 +348,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 labels=labels,
                 likelihood=compiled_likelihood,
                 blocks=tuple(blocks),
+                extra_constraints=extra_constraints,
+                extra_constraint_rhs=extra_constraint_rhs,
             )
         except (TypeError, ValueError, ModelValidationError) as error:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
@@ -621,6 +657,10 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         def factory(resolved: dict, likelihood: object = likelihood) -> object:
             return likelihood.materialize({})
 
+    constraint_labels = _qualified_labels([item.block for item in scalable])
+    extra_constraints, extra_constraint_rhs = resolve_constraints(
+        model.constraints, constraint_labels
+    )
     return CompiledFamily(
         y=y,
         observed=panel.observed,
@@ -630,6 +670,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         likelihood_factory=factory,
         parameter_bounds=parameter_bounds,
         parameter_priors=parameter_priors,
+        extra_constraints=extra_constraints,
+        extra_constraint_rhs=extra_constraint_rhs,
     )
 
 

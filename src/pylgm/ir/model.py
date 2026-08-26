@@ -147,6 +147,8 @@ class CompiledLGM:
     labels: tuple[str, ...]
     likelihood: object
     blocks: tuple[LatentBlock, ...]
+    _extra_constraints: np.ndarray = field(repr=False)
+    _constraint_rhs: np.ndarray = field(repr=False)
 
     def __init__(
         self,
@@ -159,6 +161,8 @@ class CompiledLGM:
         labels: tuple[str, ...],
         likelihood: object,
         blocks: tuple[LatentBlock, ...],
+        extra_constraints: np.ndarray | None = None,
+        extra_constraint_rhs: np.ndarray | None = None,
     ) -> None:
         y = _numeric_array(y, "y", 1, require_finite=False)
         observed = _array(observed, "observed")
@@ -192,6 +196,22 @@ class CompiledLGM:
         _validate_symmetric(precision, "precision")
         if constraints.shape[1] != width:
             raise ModelValidationError("constraints must align with the design width")
+        if extra_constraints is None:
+            extra_constraints = np.empty((0, width))
+        extra_constraints = _numeric_array(extra_constraints, "extra constraints", 2)
+        if extra_constraints.shape[1] != width:
+            raise ModelValidationError("extra constraints must align with the design width")
+        if extra_constraint_rhs is None:
+            extra_constraint_rhs = np.zeros(extra_constraints.shape[0])
+        extra_constraint_rhs = _numeric_array(extra_constraint_rhs, "extra constraint rhs", 1)
+        if extra_constraint_rhs.shape[0] != extra_constraints.shape[0]:
+            raise ModelValidationError(
+                "extra constraint rhs must have one entry per extra constraint row"
+            )
+        # Block-level constraints (Besag sum-to-zero, RW anchors) are intrinsically
+        # homogeneous, so the full rhs is zeros for those rows and e for the extra rows.
+        block_rows = constraints.shape[0] - extra_constraints.shape[0]
+        constraint_rhs = np.concatenate([np.zeros(block_rows), extra_constraint_rhs])
         if len(labels) != width:
             raise ModelValidationError("labels must align with the design width")
         if any(not isinstance(label, str) for label in labels):
@@ -229,17 +249,23 @@ class CompiledLGM:
             )
             if not _sparse_matches(precision, expected_precision):
                 raise ModelValidationError("precision must match the latent blocks")
-            expected_constraints = _block_constraints(blocks, width)
+            expected_constraints = np.vstack(
+                [_block_constraints(blocks, width), extra_constraints]
+            )
             if constraints.shape != expected_constraints.shape or not np.allclose(
                 constraints, expected_constraints, rtol=1e-12, atol=1e-14
             ):
-                raise ModelValidationError("constraints must match the latent blocks")
+                raise ModelValidationError(
+                    "constraints must match the latent blocks and extra constraints"
+                )
         object.__setattr__(self, "_y", _readonly_array(y))
         object.__setattr__(self, "_observed", _readonly_array(observed))
         object.__setattr__(self, "_offset", _readonly_array(offset))
         object.__setattr__(self, "_design", _readonly_csr_matrix(design))
         object.__setattr__(self, "_precision", _readonly_csr_matrix(precision))
         object.__setattr__(self, "_constraints", _readonly_array(constraints))
+        object.__setattr__(self, "_extra_constraints", _readonly_array(extra_constraints))
+        object.__setattr__(self, "_constraint_rhs", _readonly_array(constraint_rhs))
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "likelihood", likelihood)
         object.__setattr__(self, "blocks", blocks)
@@ -267,6 +293,16 @@ class CompiledLGM:
     @property
     def constraints(self) -> np.ndarray:
         return _readonly_array(self._constraints)
+
+    @property
+    def extra_constraints(self) -> np.ndarray:
+        """The model-level ``A x = e`` rows appended after the per-block constraints."""
+        return _readonly_array(self._extra_constraints)
+
+    @property
+    def constraint_rhs(self) -> np.ndarray:
+        """Right-hand side ``e`` aligned with ``constraints`` rows (0 for block rows)."""
+        return _readonly_array(self._constraint_rhs)
 
     @property
     def sigma(self) -> float:

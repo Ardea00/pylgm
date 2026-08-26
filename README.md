@@ -57,6 +57,7 @@ scripts under [`examples/`](examples/).
 | **Likelihoods** | Gaussian (exact), Poisson & Bernoulli (Laplace) | [likelihoods](docs/likelihoods.md) |
 | **Effects** | `Fixed`, `IID`, `RW1`/`RW2`, stationary `AR1` | [effects](docs/effects.md) |
 | **Spatial** | `Besag` (ICAR), `ProperCAR` (with ρ), `BYM2` (with φ) | [spatial effects](docs/spatial-effects.md) |
+| **Constraints** | arbitrary linear constraints `A x = e` (R-INLA `extraconstr`) | [effects](docs/effects.md#linear-constraints-extraconstr) |
 | **Hyperparameters** | Empirical Bayes (type-II ML), MAP-II priors, bounds | [empirical bayes](docs/empirical-bayes.md) |
 | **Integration** | INLA-style grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT | [INLA](docs/inla.md) |
 | **Prediction** | fit-row and out-of-sample `result.predict(new_data)` | [prediction](docs/prediction.md) |

@@ -146,6 +146,34 @@ class ParametricBlock:
         )
 
 
+def _family_extra_constraints(value: object, total_width: int) -> np.ndarray:
+    """Validate a family's raw ``A x = e`` matrix against the latent width."""
+    if value is None:
+        return np.empty((0, total_width))
+    matrix = np.asarray(value, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[1] != total_width:
+        raise ModelValidationError(
+            "family extra constraints must be a 2D array aligned with the latent width"
+        )
+    if not np.isfinite(matrix).all():
+        raise ModelValidationError("family extra constraints must be finite")
+    return matrix
+
+
+def _family_extra_constraint_rhs(value: object, rows: int) -> np.ndarray:
+    """Validate a family's raw ``e`` vector against the number of extra rows."""
+    if value is None:
+        return np.zeros(rows)
+    vector = np.asarray(value, dtype=float)
+    if vector.ndim != 1 or vector.shape[0] != rows:
+        raise ModelValidationError(
+            "family extra constraint rhs must be a 1D array with one entry per extra row"
+        )
+    if not np.isfinite(vector).all():
+        raise ModelValidationError("family extra constraint rhs must be finite")
+    return vector
+
+
 def _qualified_labels(blocks: tuple[LatentBlock, ...]) -> tuple[str, ...]:
     labels = tuple(
         f"{block.name}:{label}" for block in blocks for label in block.labels
@@ -188,6 +216,8 @@ def _assemble_compiled_model(
     offset: np.ndarray,
     blocks: tuple[LatentBlock, ...],
     likelihood: object,
+    extra_constraints: np.ndarray | None = None,
+    extra_constraint_rhs: np.ndarray | None = None,
 ) -> CompiledLGM:
     if not blocks:
         return CompiledLGM(
@@ -200,6 +230,8 @@ def _assemble_compiled_model(
             labels=(),
             likelihood=likelihood,
             blocks=(),
+            extra_constraints=extra_constraints,
+            extra_constraint_rhs=extra_constraint_rhs,
         )
     widths = [block.design.shape[1] for block in blocks]
     total = sum(widths)
@@ -214,6 +246,8 @@ def _assemble_compiled_model(
     constraints = (
         np.vstack(constraint_rows) if constraint_rows else np.empty((0, total))
     )
+    if extra_constraints is not None and extra_constraints.shape[0]:
+        constraints = np.vstack([constraints, extra_constraints])
     return CompiledLGM(
         y=y,
         observed=observed,
@@ -224,6 +258,8 @@ def _assemble_compiled_model(
         labels=_qualified_labels(blocks),
         likelihood=likelihood,
         blocks=blocks,
+        extra_constraints=extra_constraints,
+        extra_constraint_rhs=extra_constraint_rhs,
     )
 
 
@@ -237,6 +273,8 @@ class CompiledGaussianFamily:
     initial: Hyperparameters
     parameter_bounds: Mapping[str, object]
     parameter_priors: Mapping[str, object]
+    _extra_constraints: np.ndarray = field(repr=False)
+    _extra_constraint_rhs: np.ndarray = field(repr=False)
 
     def __init__(
         self,
@@ -248,6 +286,8 @@ class CompiledGaussianFamily:
         initial: Hyperparameters,
         parameter_bounds: Mapping[str, object] = MappingProxyType({}),
         parameter_priors: Mapping[str, object] = MappingProxyType({}),
+        extra_constraints: np.ndarray | None = None,
+        extra_constraint_rhs: np.ndarray | None = None,
     ) -> None:
         y_value = np.asarray(y)
         observed_value = np.asarray(observed)
@@ -331,6 +371,14 @@ class CompiledGaussianFamily:
         object.__setattr__(self, "initial", initial)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
         object.__setattr__(self, "parameter_priors", MappingProxyType(dict(parameter_priors)))
+        total_width = sum(item.block.design.shape[1] for item in block_values)
+        extra = _family_extra_constraints(extra_constraints, total_width)
+        object.__setattr__(self, "_extra_constraints", _readonly_array(extra))
+        object.__setattr__(
+            self,
+            "_extra_constraint_rhs",
+            _readonly_array(_family_extra_constraint_rhs(extra_constraint_rhs, extra.shape[0])),
+        )
 
     @property
     def y(self) -> np.ndarray:
@@ -357,7 +405,9 @@ class CompiledGaussianFamily:
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = CompiledGaussian(resolved.get("sigma", self.initial.sigma))
         return _assemble_compiled_model(
-            self._y, self._observed, self._offset, blocks, likelihood
+            self._y, self._observed, self._offset, blocks, likelihood,
+            extra_constraints=self._extra_constraints,
+            extra_constraint_rhs=self._extra_constraint_rhs,
         )
 
     def block_slice(self, name: str) -> slice:
@@ -382,6 +432,8 @@ class CompiledFamily:
     likelihood_factory: Callable[[Mapping[str, float]], object] = field(repr=False)
     parameter_bounds: Mapping[str, object]
     parameter_priors: Mapping[str, object]
+    _extra_constraints: np.ndarray = field(repr=False)
+    _extra_constraint_rhs: np.ndarray = field(repr=False)
 
     def __init__(
         self,
@@ -393,6 +445,8 @@ class CompiledFamily:
         likelihood_factory: Callable[[Mapping[str, float]], object],
         parameter_bounds: Mapping[str, object] = MappingProxyType({}),
         parameter_priors: Mapping[str, object] = MappingProxyType({}),
+        extra_constraints: np.ndarray | None = None,
+        extra_constraint_rhs: np.ndarray | None = None,
     ) -> None:
         y_value = np.asarray(y)
         observed_value = np.asarray(observed)
@@ -450,6 +504,14 @@ class CompiledFamily:
         object.__setattr__(self, "likelihood_factory", likelihood_factory)
         object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
         object.__setattr__(self, "parameter_priors", MappingProxyType(dict(parameter_priors)))
+        total_width = sum(item.block.design.shape[1] for item in block_values)
+        extra = _family_extra_constraints(extra_constraints, total_width)
+        object.__setattr__(self, "_extra_constraints", _readonly_array(extra))
+        object.__setattr__(
+            self,
+            "_extra_constraint_rhs",
+            _readonly_array(_family_extra_constraint_rhs(extra_constraint_rhs, extra.shape[0])),
+        )
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(
@@ -458,5 +520,7 @@ class CompiledFamily:
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = self.likelihood_factory(resolved)
         return _assemble_compiled_model(
-            self._y, self._observed, self._offset, blocks, likelihood
+            self._y, self._observed, self._offset, blocks, likelihood,
+            extra_constraints=self._extra_constraints,
+            extra_constraint_rhs=self._extra_constraint_rhs,
         )

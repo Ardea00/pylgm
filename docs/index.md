@@ -44,6 +44,7 @@ print(result.fitted_mean.round(3).tolist())
 | [Likelihoods](likelihoods.md) | Gaussian (exact), Poisson & Bernoulli (Laplace), the `predictive_variance` convention, exact-Gaussian reference limits |
 | [Effects](effects.md) | `Fixed`, `IID`, `RW1`/`RW2`, stationary `AR1` |
 | [Spatial effects](spatial-effects.md) | `Besag` (ICAR), `ProperCAR` (with ρ), `BYM2` (with φ) |
+| [Effects → Constraints](effects.md#linear-constraints-extraconstr) | Arbitrary linear constraints `A x = e` (R-INLA `extraconstr`) |
 | [Empirical Bayes and priors](empirical-bayes.md) | Type-II ML, MAP-II priors, bounded hyperparameters |
 | [INLA integration](inla.md) | Grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT |
 | [Prediction](prediction.md) | Fit-row and out-of-sample prediction |

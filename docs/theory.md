@@ -127,6 +127,25 @@ of the marginal variance that is spatially structured. Both parameters are
 identifiable and prior-friendly, which the original BYM parameterisation was
 not. See [spatial effects](spatial-effects.md).
 
+## Linear constraints
+
+Beyond the intrinsic constraints an effect carries, `LGM(constraints=...)`
+imposes arbitrary linear constraints `A x = e` on the latent field (R-INLA's
+`extraconstr`; see [effects](effects.md#linear-constraints-extraconstr)). pyLGM
+enforces them by **null-space reparametrisation**: with `B` an orthonormal basis
+of `null(A)` and `x_p` any particular solution of `A x_p = e`, writing
+`x = x_p + B z` satisfies `A x = e` for every `z`, and inference proceeds in the
+reduced coordinates `z`. For the homogeneous case (`e = 0`) this is exact and
+`x_p = 0`.
+
+For a nonzero right-hand side the prior on `z` is not centred: conditioning the
+field prior `x ~ N(0, Q⁻¹)` on `A x = e` induces a Gaussian on `z` with mean
+`m = −(BᵀQB)⁻¹ Bᵀ Q x_p` — the **conditioning-by-kriging** solution R-INLA uses.
+Because the same prior linear term corrects for the choice of `x_p`, the fit is
+independent of *which* particular solution is picked, so pyLGM takes the cheap
+least-squares one. Contradictory constraints are not rejected; the least-squares
+`x_p` gives the closest satisfiable field.
+
 ## Priors: penalised complexity
 
 pyLGM's default hyperparameter priors are **PC (penalised-complexity) priors**
@@ -159,6 +178,7 @@ and leave-one-out **CPO/PIT** (Held, Schrödle & Rue, 2010). See
 | Fixed effects, IID random effects | [`Fixed`, `IID`](effects.md) |
 | Temporal GMRFs | [`RW1`, `RW2`, `AR1`](effects.md) |
 | Spatial CAR GMRFs | [`Besag`, `ProperCAR`, `BYM2`](spatial-effects.md) |
+| Linear constraints (`extraconstr`) | [`LGM(constraints=...)`](effects.md#linear-constraints-extraconstr) |
 | PC priors on hyperparameters | [`PCPrecision`, `PCBYM2Phi`](empirical-bayes.md) |
 | Empirical Bayes / MAP-II | [`hyperparameters="optimize"`](empirical-bayes.md) |
 | INLA grid integration, DIC/WAIC/CPO | [`hyperparameters="integrate"`](inla.md) |
