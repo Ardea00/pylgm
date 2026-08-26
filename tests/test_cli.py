@@ -102,5 +102,9 @@ def test_cli_compare_rejects_unsupported_data_suffix(tmp_path: Path) -> None:
     )
 
     assert response.exit_code != 0
-    message = response.stdout + str(response.exception)
+    try:
+        stderr = response.stderr
+    except ValueError:  # older click mixes stderr into stdout
+        stderr = ""
+    message = response.stdout + stderr + str(response.exception)
     assert "data must be CSV or Parquet" in message

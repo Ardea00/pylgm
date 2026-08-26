@@ -857,13 +857,18 @@ def test_penalty_none_matches_unpenalized():
 
 def test_penalty_shifts_the_optimum():
     family = _unit_family()
-    bounds = {"g_prec": OptimizationBounds(1.0, 1e-3, 1e6)}
+    upper = 1e6
+    bounds = {"g_prec": OptimizationBounds(1.0, 1e-3, upper)}
     plain = optimize_empirical_bayes(family, bounds)
-    # a penalty that strongly rewards larger g_prec must move the optimum up
+    # A penalty that strongly rewards larger g_prec drives the optimum up to the
+    # bound -- a deterministic invariant, unlike a strict `> plain`, which is
+    # hostage to where the unpenalized optimizer converges (on some BLAS stacks
+    # plain itself lands on the bound, making `> plain` a spurious tie).
     penalized = optimize_empirical_bayes(
         family, bounds, penalty=lambda values: 5.0 * np.log(values["g_prec"]),
     )
-    assert penalized.parameters["g_prec"] > plain.parameters["g_prec"]
+    assert penalized.parameters["g_prec"] >= plain.parameters["g_prec"]
+    assert penalized.parameters["g_prec"] == pytest.approx(upper, rel=1e-3)
 
 
 class _ScalarFamily:

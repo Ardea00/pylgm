@@ -1,0 +1,52 @@
+site_name: pyLGM
+site_description: General-purpose latent Gaussian models for Python
+repo_url: https://github.com/Ardea00/pylgm
+repo_name: Ardea00/pylgm
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+# Design/spec history lives in-repo under docs/design/ but is not part of the
+# published site.
+exclude_docs: |
+  design/
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Likelihoods: likelihoods.md
+      - Effects: effects.md
+      - Spatial effects: spatial-effects.md
+      - Empirical Bayes and priors: empirical-bayes.md
+      - INLA integration: inla.md
+      - Prediction: prediction.md
+      - Spark: spark.md
+  - Examples:
+      - Disease mapping (spatial): examples-disease-mapping.md
+      - Count regression: examples-count-regression.md
+  - Theory: theory.md
+  - Internals & release policy: internals.md
+  - Roadmap: roadmap.md
+  - Development: development.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true

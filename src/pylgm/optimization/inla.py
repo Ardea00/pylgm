@@ -176,11 +176,11 @@ def _full_laplace_marginals(design, offset, y, grid, *,
             s[gx > abscissae[-1]] = delta[-1]
             log_dens = -0.5 * ((gx - m[i]) / sigma_i) ** 2 - np.log(sigma_i) - 0.5 * np.log(2 * np.pi) + s
             dens = np.exp(log_dens - log_dens.max())
-            area = np.trapz(dens, gx)
+            area = np.trapezoid(dens, gx)
             if not np.isfinite(area) or area <= 0:
                 raise NumericalError("full-Laplace density normalization failed")
             mixed += w * (dens / area)
-        total = np.trapz(mixed, gx)
+        total = np.trapezoid(mixed, gx)
         if not np.isfinite(total) or total <= 0:
             raise NumericalError("full-Laplace mixture normalization failed")
         x_out[i] = gx

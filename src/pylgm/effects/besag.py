@@ -31,7 +31,15 @@ def _scaled_structure(w: csr_matrix, nodes: tuple[str, ...], scale: bool) -> np.
     for component in range(n_components):
         index = np.where(membership == component)[0]
         block = r[np.ix_(index, index)]
-        variances = np.diag(np.linalg.pinv(block))
+        # A connected component's ICAR Laplacian has exactly one null eigenvalue
+        # (the constant vector). np.linalg.pinv's default tolerance does not
+        # reliably discard it once a component grows beyond a few nodes -- the
+        # near-zero eigenvalue leaks back in as a huge spurious variance -- so
+        # drop that one eigenvalue explicitly via the eigendecomposition.
+        eigenvalues, eigenvectors = np.linalg.eigh(block)
+        inverse = np.zeros_like(eigenvalues)
+        inverse[1:] = 1.0 / eigenvalues[1:]
+        variances = np.einsum("ij,j,ij->i", eigenvectors, inverse, eigenvectors)
         if not np.all(np.isfinite(variances)) or np.any(variances <= 0):
             raise ValueError("ICAR scaling produced a non-positive marginal variance")
         factor = float(np.exp(np.mean(np.log(variances))))
