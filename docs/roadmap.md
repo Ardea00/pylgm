@@ -9,8 +9,8 @@ For the precise semantics of each shipped feature, follow the links into the
 
 - **Likelihoods** — Gaussian (exact engine), Poisson and Bernoulli (Laplace
   engine). See [likelihoods](likelihoods.md).
-- **Effects** — `Fixed`, `IID`, `RW1`/`RW2`, and stationary `AR1`. See
-  [effects](effects.md).
+- **Effects** — `Fixed`, `IID`, `RW1`/`RW2`, stationary `AR1`, and the
+  `MIDAS` mixed-frequency smooth-lag effect. See [effects](effects.md).
 - **Spatial (CAR) family** — `Besag` (ICAR), `ProperCAR` (with `ρ` fixed or
   estimated), and `BYM2` (with `φ` fixed or estimated), complete for the dense
   reference regime. See [spatial effects](spatial-effects.md).
@@ -38,6 +38,9 @@ Ordered roughly by expected value to users. Nothing here is committed to a date.
    representation.
 4. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
 5. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
+6. **Parametric MIDAS lag kernels** — exp-Almon / Beta weight functions and a
+   hybrid HF/LF nowcasting frontend, extending the shipped `MIDAS` smooth-lag
+   effect; a config-file `midas` effect type.
 
 ## Deferred (not planned for the near term)
 

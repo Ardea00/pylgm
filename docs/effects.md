@@ -95,6 +95,64 @@ irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type,
 AR(p)/seasonal effects, and group-wise AR1 (a separate series per panel
 unit).
 
+## MIDAS smooth-lag effect
+
+`MIDAS(name, columns, precision=1.0, order=2, ridge=1e-6)` declares a
+mixed-frequency distributed-lag effect. Each entry of `columns` is one column
+of the high-frequency (HF) covariate at a fixed lag — lag 0, lag 1, … — so the
+design is just those columns stacked (U-MIDAS: every lag enters as its own
+regressor). The lag *coefficients* are then tied together by a random-walk
+smoothness prior over the lag index, so the estimated lag curve is smooth
+instead of the noisy, overfit shape unrestricted OLS gives when the lags are
+many and collinear.
+
+```python
+import numpy as np
+import pandas as pd
+from pylgm import Fixed, Gaussian, Hyperparameter, LGM, MIDAS
+
+columns = tuple(f"x_lag{k}" for k in range(6))
+# ... a frame whose `columns` hold the HF covariate at lags 0..5 and `y` the LF target ...
+model = LGM(
+    response="y",
+    predictor=Fixed("1")
+    + MIDAS("lag", columns=columns, precision=Hyperparameter("lag.precision", initial=1.0)),
+    likelihood=Gaussian(sigma=0.5),
+)
+result = model.fit(frame)
+print(np.round(result.latent_marginals("lag").mean, 3))  # the fitted lag curve
+```
+
+**The penalty is a random walk over the lag index**, exactly the `RW1`/`RW2`
+operator (`order=1` or `order=2`, default `2`) but applied to the coefficient
+vector rather than to a time index. `order=2` penalises curvature (favouring a
+smooth, gently bending decay); `order=1` penalises steps (favouring a flat or
+monotone shape). `precision` (`τ`) is the smoothing strength: a fixed float
+plugs it in, a declared `Hyperparameter` has it **estimated** by empirical
+Bayes and, under `hyperparameters="integrate"`, integrated over by INLA — the
+data choose how much to smooth.
+
+**The lag curve's level and slope stay free of `τ`.** A random-walk penalty is
+rank-deficient: it says nothing about the curve's overall level (order 1) or
+level *and* slope (order 2) — the part that carries the covariate's actual
+effect size. Those null-space directions instead get a fixed, `τ`-independent
+precision `ridge` (`δ`, default `1e-6`, the same diffuse prior every
+[`Fixed`](#) coefficient gets), so tightening `τ` smooths the *shape* without
+ever shrinking the *magnitude* toward zero. Concretely the block precision is
+`Q(τ) = τ·DᵀD + δ·P₀`, with `D` the order-`order` difference operator and `P₀`
+the projector onto its null space; because the two terms act on orthogonal
+subspaces, `τ` touches only the curvature directions. The effect is proper and
+carries no constraint, so it runs under every latent strategy including full
+Laplace (`latent_strategy="laplace"`).
+
+**Aligning the HF data to the LF target is the caller's job.** `MIDAS` takes
+the lag columns as given; building them (e.g. `frame[f"x_lag{k}"] =
+hf.shift(k)` after resampling the HF series onto the LF rows) is upstream data
+prep. See [`examples/midas_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/midas_nowcast)
+for an end-to-end nowcasting run that recovers a known decaying kernel. **Not
+shipped**: parametric lag kernels (exp-Almon / Beta weight functions), a hybrid
+HF/LF nowcasting frontend, and a config-file `midas` effect type.
+
 ## Linear constraints (`extraconstr`)
 
 `LGM(..., constraints=...)` imposes arbitrary linear constraints `A x = e` on
