@@ -201,7 +201,36 @@ class BYM2(_ComposableEffect):
         object.__setattr__(self, "graph", canonical_graph(self.graph))
 
 
-EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2
+@dataclass(frozen=True)
+class MIDAS(_ComposableEffect):
+    """A mixed-frequency distributed-lag effect: the caller-supplied ``columns``
+    are the HF covariate at each lag, penalised by a random-walk smoothness
+    prior over the lag index. Level and slope of the lag curve stay free of the
+    smoothing precision (see the S1 design spec)."""
+
+    name: str
+    columns: tuple[str, ...]
+    precision: float | Hyperparameter = 1.0
+    order: int = 2
+    ridge: float = 1e-6
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        columns = tuple(self.columns)
+        for column in columns:
+            _non_empty_string(column, "column")
+        if self.order not in (1, 2):
+            raise ValueError("order must be 1 or 2")
+        if len(columns) <= self.order:
+            raise ValueError(f"columns must have more than order ({self.order}) entries")
+        object.__setattr__(self, "columns", columns)
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        object.__setattr__(self, "ridge", _positive_real(self.ridge, "ridge"))
+
+
+EffectSpec: TypeAlias = Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2 | MIDAS
 
 
 @dataclass(frozen=True)
@@ -216,7 +245,7 @@ class Predictor:
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
         if any(
-            not isinstance(effect, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2))
+            not isinstance(effect, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS))
             for effect in effects
         ):
             raise TypeError("effects must contain only effect specifications")
@@ -228,9 +257,9 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2)):
+        if isinstance(other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS)):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
 
-__all__ = ["AR1", "Besag", "BYM2", "Fixed", "IID", "Predictor", "ProperCAR", "RW1", "RW2"]
+__all__ = ["AR1", "Besag", "BYM2", "Fixed", "IID", "MIDAS", "Predictor", "ProperCAR", "RW1", "RW2"]
