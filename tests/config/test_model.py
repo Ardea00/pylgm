@@ -190,6 +190,21 @@ def test_load_model_builds_bym2_with_default_phi(tmp_path: Path) -> None:
     assert load_model(path) == _spatial_lgm(BYM2("area", "region", _SPATIAL_GRAPH))
 
 
+def test_load_model_builds_weighted_graph_bym2(tmp_path: Path) -> None:
+    from pylgm import BYM2
+
+    weighted = {"a": {"b": 5.0}, "b": {"a": 5.0, "c": 0.1}, "c": {"b": 0.1}}
+    inline = "{a: {b: 5.0}, b: {a: 5.0, c: 0.1}, c: {b: 0.1}}"
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        _spatial_doc(f"name: area, type: bym2, index: region, graph: {inline}")
+    )
+
+    # YAML weighted mapping builds the identical spec as the Python API, hence
+    # the same fit — the weighted graph rides through untouched (S4).
+    assert load_model(path) == _spatial_lgm(BYM2("area", "region", weighted))
+
+
 @pytest.mark.parametrize(
     "effect_body, match",
     [

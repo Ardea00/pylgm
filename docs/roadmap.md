@@ -13,7 +13,10 @@ For the precise semantics of each shipped feature, follow the links into the
   [effects](effects.md).
 - **Spatial (CAR) family** — `Besag` (ICAR), `ProperCAR` (with `ρ` fixed or
   estimated), and `BYM2` (with `φ` fixed or estimated), complete for the dense
-  reference regime. See [spatial effects](spatial-effects.md).
+  reference regime. Graphs may be **weighted** (`{node: {neighbour: weight}}`),
+  so the same family models firm-ownership / interbank-exposure / supply-chain
+  networks, not only geographic adjacency. See
+  [spatial effects](spatial-effects.md).
 - **Hyperparameter estimation** — type-II ML empirical Bayes and MAP-II with
   PC/Gaussian priors, with bounded hyperparameters. See
   [empirical Bayes](empirical-bayes.md).
@@ -38,6 +41,10 @@ Ordered roughly by expected value to users. Nothing here is committed to a date.
    representation.
 4. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
 5. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
+6. **Directed & dynamic network structure** — a SAR effect
+   (`(I−ρW)ᵀ(I−ρW)`) for directed economic influence that symmetrized CAR
+   discards, and time-varying `W_t` — building on the weighted-graph support
+   above.
 
 ## Deferred (not planned for the near term)
 

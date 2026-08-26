@@ -82,6 +82,44 @@ graph construction — see the
 [spatial roadmap](roadmap.md)
 for what's next.
 
+## Weighted neighbour graphs
+
+The whole CAR family (`Besag`/`ProperCAR`/`BYM2`) accepts a **weighted** graph:
+instead of a bare neighbour list, give each node a `{neighbour: weight}` mapping
+and the adjacency `W` carries those weights (`D` is the weighted degree, and the
+ICAR density becomes `exp(−τ/2 · Σ_{i~j} wᵢⱼ(xᵢ−xⱼ)²)`). Nothing else changes —
+Sørbye–Rue scaling, constraints, ρ-validity and `φ` all derive from `(nodes, W)`
+and carry over untouched.
+
+```python
+# Geographic adjacency reads as: "a and b are neighbours." A weighted graph
+# reads as: "a and b are coupled with strength 5, a and c with strength 0.1" —
+# so W can encode firm-ownership / interbank-exposure / supply-chain / IO
+# dependence strength rather than only 0/1 contiguity.
+graph = {"a": {"b": 5.0, "c": 0.1},
+         "b": {"a": 5.0, "c": 0.1},
+         "c": {"a": 0.1, "b": 0.1}}
+```
+
+For `BYM2` this makes `φ` read as *"fraction of variance explained by network
+dependence vs. idiosyncratic."* Requirements, enforced at declaration:
+
+- **Weights must be finite and strictly positive.** A weighted ICAR/CAR is a
+  valid GMRF only for `wᵢⱼ ≥ 0`; a zero weight means "no edge" — omit it.
+- **The graph must be symmetric.** Every edge `i→j` needs its reverse `j→i`
+  with an equal weight (within `rtol=1e-9, atol=1e-12`; the stored value is
+  their mean). A missing reverse or a weight mismatch raises, naming the pair.
+- Directed / signed economic matrices (exposure, correlations) must be made
+  symmetric-nonnegative **before** building the graph; `normalize_graph` is a
+  strict validator, it does not silently symmetrize. A directed-influence
+  precision `(I−ρW)ᵀ(I−ρW)` is a separate effect on the roadmap.
+
+A bare-label list (`{node: [neighbours]}`) is exactly a weighted graph with all
+weights `1.0`, so existing unweighted graphs, `.graph` files, and YAML are
+unchanged. The weighted mapping also works inline in YAML `graph:`
+(`{a: {b: 5.0}, ...}`). See `examples/weighted_network/` for a runnable
+ownership-exposure `BYM2` fit.
+
 ## Proper CAR spatial effect
 
 `ProperCAR(name, index, graph, rho, precision=1.0)` declares a proper
