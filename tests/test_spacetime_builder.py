@@ -76,21 +76,26 @@ def test_constraint_row_counts(interaction, order, expected_rows):
     assert block.constraints.shape[0] == expected_rows
 
 
-def test_constraints_annihilate_null_space_type_iv():
+def test_constraints_span_null_space_type_iv():
     frame = _frame(["a", "b", "c"], [0, 1, 2, 3])
     block = build_spacetime(frame, "st", "area", "t", GRAPH, "IV", 1, 1.0, True)
     P = block.precision.toarray()
-    # every null vector of P must lie in the span of the constraint rows, i.e.
-    # projecting a null vector onto that span leaves zero residual (the rows
-    # are meant to *span* null(P) -- see besag._component_constraints and
-    # laplace._constraint_null_space -- not be orthogonal to it, which would
-    # be impossible for any full-rank set of rows drawn from that subspace).
+    # The constraint rows must EQUAL an orthonormal basis of null(P), which
+    # pins two directions:
+    #   (a) span(C.T) subseteq null(P) -- every row is a genuine null vector,
+    #   (b) null(P) subseteq span(C.T) -- the rows cover the whole null space.
+    # (a): P annihilates every constraint row.
+    assert np.allclose(P @ block.constraints.T, 0.0, atol=1e-8)
+    # (b): projecting each null vector onto span(C.T) leaves zero residual (the
+    # rows *span* null(P) -- see besag._component_constraints and
+    # laplace._constraint_null_space -- not orthogonal to it, which would be
+    # impossible for any full-rank set of rows drawn from that subspace).
     eig, vec = np.linalg.eigh(P)
     null_vectors = vec[:, eig < 1e-9 * eig.max()]
     basis, _ = np.linalg.qr(block.constraints.T)
     residual = null_vectors - basis @ (basis.T @ null_vectors)
     assert np.allclose(residual, 0.0, atol=1e-8)
-    # and the constraint rows are full row-rank
+    # and the constraint rows are full row-rank (so (a)+(b) give exact equality)
     assert np.linalg.matrix_rank(block.constraints) == block.constraints.shape[0]
 
 
