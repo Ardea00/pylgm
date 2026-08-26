@@ -5,6 +5,7 @@ from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference.gaussian import (
     _block_slices,
     _constraint_null_space,
+    _constraint_particular_solution,
     _factor_positive_definite,
     _require_finite,
     preflight_dense_reference,
@@ -29,11 +30,30 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     reduced_dim = basis.shape[1]
     reduced_design = np.asarray(design[observed] @ basis)
     reduced_precision = basis.T @ precision @ basis
-    _, logdet_prior = _factor_positive_definite(reduced_precision, "reduced prior precision")
+    prior_factor, logdet_prior = _factor_positive_definite(
+        reduced_precision, "reduced prior precision"
+    )
+
+    # Nonzero-rhs constraint: x = x_p + basis @ z shifts the observed predictor by
+    # design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p); the
+    # induced prior mean of z is m = -Q_r^-1 b_p (conditioning by kriging).
+    x_p = _constraint_particular_solution(model.constraints, model.constraint_rhs, latent_size)
+    prior_linear = np.zeros(reduced_dim)
+    prior_mean = np.zeros(reduced_dim)
+    if x_p is not None:
+        offset_obs = offset_obs + np.asarray(design[observed] @ x_p).reshape(-1)
+        prior_linear = basis.T @ (precision @ x_p)
+        if reduced_dim:
+            assert prior_factor is not None
+            prior_mean = cho_solve(prior_factor, -prior_linear)
 
     def objective(z: np.ndarray) -> float:
         eta = reduced_design @ z + offset_obs
-        return -likelihood.log_likelihood(eta, y_obs) + 0.5 * float(z @ reduced_precision @ z)
+        return (
+            -likelihood.log_likelihood(eta, y_obs)
+            + 0.5 * float(z @ reduced_precision @ z)
+            + float(z @ prior_linear)
+        )
 
     z = np.zeros(reduced_dim)
     gradient_norm = 0.0
@@ -46,7 +66,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             eta = reduced_design @ z + offset_obs
             grad_ll = likelihood.gradient(eta, y_obs)
             weights = likelihood.working_weights(eta, y_obs)
-            gradient = reduced_precision @ z - reduced_design.T @ grad_ll
+            gradient = reduced_precision @ z + prior_linear - reduced_design.T @ grad_ll
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
                 converged = True
@@ -71,7 +91,10 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             current = candidate_obj
         if not converged:
             eta = reduced_design @ z + offset_obs
-            gradient = reduced_precision @ z - reduced_design.T @ likelihood.gradient(eta, y_obs)
+            gradient = (
+                reduced_precision @ z + prior_linear
+                - reduced_design.T @ likelihood.gradient(eta, y_obs)
+            )
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
                 converged = True
@@ -107,11 +130,12 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
         logdet_posterior = 0.0
         loglik_mode = likelihood.log_likelihood(offset_obs, y_obs)
 
-    mean = basis @ z
+    mean = basis @ z if x_p is None else x_p + basis @ z
     covariance = basis @ reduced_covariance @ basis.T
+    centered = z - prior_mean
     log_marginal_likelihood = float(
         loglik_mode
-        - 0.5 * float(z @ reduced_precision @ z)
+        - 0.5 * float(centered @ reduced_precision @ centered)
         + 0.5 * logdet_prior
         - 0.5 * logdet_posterior
     )

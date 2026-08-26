@@ -91,13 +91,34 @@ def _frequency_string(value: Any) -> str:
     return str(frequency)
 
 
+def _extended_float_value(value: Any, dtype: np.dtype[Any]) -> bytes:
+    """Deterministic value bytes for extended-precision floats.
+
+    ``np.longdouble`` is 80-bit extended padded to 16 bytes on x86, so
+    ``tobytes()`` leaks the uninitialised padding and hashes equal values
+    differently. Encode the exact shortest round-tripping decimal instead:
+    equal values hash equally. Sub-float64 distinctness is neither promised nor
+    portable, which is exactly the encoder contract the fingerprint tests assert.
+    """
+    parts = (value.real, value.imag) if dtype.kind == "c" else (value,)
+    return b"|".join(
+        np.format_float_scientific(np.longdouble(part), unique=True, trim="-").encode()
+        for part in parts
+    )
+
+
 def _numpy_scalar_descriptor(value: Any, dtype: np.dtype[Any]) -> bytes:
     """Encode a NumPy scalar in canonical big-endian dtype and exact bytes."""
     canonical_dtype = dtype.newbyteorder(">")
-    array = np.asarray(value, dtype=dtype).astype(canonical_dtype, copy=False)
+    # Extended-precision floats (padded longdouble/clongdouble) only; every other
+    # numeric dtype is fixed-width with no padding, so raw bytes stay exact.
+    if (dtype.kind == "f" and dtype.itemsize > 8) or (dtype.kind == "c" and dtype.itemsize > 16):
+        payload = _extended_float_value(value, dtype)
+    else:
+        payload = np.asarray(value, dtype=dtype).astype(canonical_dtype, copy=False).tobytes()
     return _record(
         "numpy-scalar",
-        _record("dtype", canonical_dtype.str.encode()) + _record("value", array.tobytes()),
+        _record("dtype", canonical_dtype.str.encode()) + _record("value", payload),
     )
 
 

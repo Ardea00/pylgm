@@ -7,7 +7,8 @@ structured effect takes a fixed `precision` or a declared `Hyperparameter`
 (see [Empirical Bayes and priors](empirical-bayes.md)). Runnable examples of
 these live under [`examples/`](https://github.com/Ardea00/pylgm/tree/main/examples). The stationary `AR1` effect is
 documented below; spatial (CAR) effects have their own
-[page](spatial-effects.md).
+[page](spatial-effects.md). Model-level [linear constraints](#linear-constraints-extraconstr)
+on the assembled latent field are documented at the bottom of this page.
 
 ## AR1 effect
 
@@ -93,4 +94,46 @@ and restores regular spacing, exactly like the future-period rows in
 irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type,
 AR(p)/seasonal effects, and group-wise AR1 (a separate series per panel
 unit).
+
+## Linear constraints (`extraconstr`)
+
+`LGM(..., constraints=...)` imposes arbitrary linear constraints `A x = e` on
+the assembled latent field — the label-keyed equivalent of R-INLA's
+`extraconstr`. Each entry names a linear combination of latent elements by
+their **qualified labels** (`"effect:level"`, the same strings that appear in
+`result.labels`) and either constrains it to zero (a bare mapping) or to a
+given value (a `(mapping, rhs)` pair):
+
+```python
+from pylgm import Fixed, Gaussian, IID, LGM
+
+model = LGM(
+    response="y",
+    likelihood=Gaussian(1.0),
+    predictor=Fixed("1") + IID("region", "region", 1.0),
+    panel=("region",),
+    time="time",
+    constraints=[
+        {"region:oslo": 1.0, "region:bergen": -1.0},  # force two effects to coincide
+        ({"region:tromso": 1.0}, 2.5),                 # pin one effect to 2.5
+    ],
+)
+```
+
+The first row (a bare mapping) is `A x = 0`; the second (a `(mapping, rhs)`
+pair) is `A x = 2.5`. Constraints compose with any intrinsic constraints an
+effect already carries — a `Besag` sum-to-zero, a random-walk anchor — which
+are appended automatically. They hold **exactly** in the posterior mean under
+both engines (`exact_gaussian` and `laplace`) and under `hyperparameters=
+"optimize"`/`"integrate"`.
+
+An unknown label raises `CompilationError` at fit time (labels are only known
+once the latent field is assembled); a malformed constraint — an empty mapping,
+all-zero coefficients, a non-finite coefficient or right-hand side — raises at
+`LGM` construction.
+
+A nonzero right-hand side is imposed by **conditioning the prior on `A x = e`**
+(conditioning by kriging), matching R-INLA's semantics; see
+[Theory](theory.md#linear-constraints). Contradictory constraints are not
+rejected — they degrade to the least-squares closest satisfiable field.
 

@@ -19,6 +19,55 @@ from pylgm.optimization.inla import integrate_inla
 _ROW_KEY = "__pylgm_row__"
 
 
+def _normalize_constraints(constraints: object) -> tuple[tuple[dict[str, float], float], ...]:
+    """Validate and freeze the model-level ``A x = e`` constraints.
+
+    Each entry is either a bare mapping ``{label: coefficient}`` (right-hand side
+    ``e = 0``) or a ``(mapping, rhs)`` pair carrying a nonzero right-hand side.
+    Labels are resolved against the compiled latent labels later (in the
+    compiler), where the full ordering is known; here we only check shape and
+    coefficient sanity so a malformed constraint fails at model construction.
+    """
+    try:
+        rows = tuple(constraints)
+    except TypeError as error:
+        raise TypeError("constraints must be an iterable of label->coefficient mappings") from error
+    normalized: list[tuple[dict[str, float], float]] = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            mapping, rhs = row, 0.0
+        elif isinstance(row, tuple) and len(row) == 2 and isinstance(row[0], Mapping):
+            mapping = row[0]
+            try:
+                rhs = float(row[1])
+            except (TypeError, ValueError) as error:
+                raise ValueError("constraint right-hand side must be a real number") from error
+            if not np.isfinite(rhs):
+                raise ValueError("constraint right-hand side must be finite")
+        else:
+            raise TypeError(
+                "each constraint must be a {label: coefficient} mapping "
+                "or a (mapping, rhs) pair"
+            )
+        if not mapping:
+            raise ValueError("each constraint must reference at least one latent label")
+        clean: dict[str, float] = {}
+        for label, coefficient in mapping.items():
+            if not isinstance(label, str) or not label:
+                raise ValueError("constraint labels must be non-empty strings")
+            try:
+                value = float(coefficient)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"constraint coefficient for {label!r} must be a real number") from error
+            if not np.isfinite(value):
+                raise ValueError(f"constraint coefficient for {label!r} must be finite")
+            clean[label] = value
+        if not any(value != 0.0 for value in clean.values()):
+            raise ValueError("each constraint must have at least one nonzero coefficient")
+        normalized.append((clean, rhs))
+    return tuple(normalized)
+
+
 def _context_with_fitted_likelihood(context, result, model):
     """Replace the context's plug-in likelihood with the fitted one.
 
@@ -140,6 +189,19 @@ class LGM:
     panel: tuple[str, ...] = ()
     time: str | None = None
     offset: str | None = None
+    constraints: tuple = ()
+    """Extra linear constraints ``A x = e`` on the latent field.
+
+    Each entry is either a mapping ``{qualified_label: coefficient}`` (right-hand
+    side ``e = 0``) or a ``(mapping, rhs)`` pair for a nonzero right-hand side --
+    the label-keyed equivalent of R-INLA's ``extraconstr``. Labels are qualified
+    as ``"effect:level"`` (the same strings that appear in ``result.labels``); e.g.
+    ``[{"region:oslo": 1.0, "region:bergen": -1.0}]`` forces the two region effects
+    to coincide, and ``[({"region:oslo": 1.0}, 2.5)]`` pins one to ``2.5``. These
+    compose with any intrinsic constraints an effect already carries (such as a
+    Besag sum-to-zero). A nonzero ``e`` is imposed by conditioning the prior on
+    ``A x = e`` (conditioning by kriging), matching R-INLA's semantics.
+    """
 
     def __post_init__(self) -> None:
         if not isinstance(self.response, str) or not self.response:
@@ -159,6 +221,7 @@ class LGM:
         if self.offset is not None and (not isinstance(self.offset, str) or not self.offset):
             raise ValueError("offset must be a non-empty string or None")
         object.__setattr__(self, "panel", panel)
+        object.__setattr__(self, "constraints", _normalize_constraints(self.constraints))
 
     def fit(
         self,

@@ -72,6 +72,24 @@ def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndar
     return null_space(np.asarray(normalized_rows))
 
 
+def _constraint_particular_solution(
+    constraints: np.ndarray, rhs: np.ndarray, latent_size: int
+) -> np.ndarray | None:
+    """A least-norm ``x_p`` with ``constraints @ x_p == rhs``.
+
+    Returns ``None`` for the homogeneous case (``rhs`` all zero) so the caller
+    keeps the exact ``A x = 0`` code path unchanged. The choice of particular
+    solution is otherwise immaterial: the engines add the induced prior linear
+    term, which makes the fit match conditioning-by-kriging regardless of ``x_p``.
+    """
+    # ponytail: no feasibility guard; contradictory constraints degrade to the
+    # least-squares x_p, which is the closest satisfiable field anyway.
+    if not constraints.shape[0] or not np.any(rhs):
+        return None
+    x_p, *_ = np.linalg.lstsq(constraints, rhs, rcond=None)
+    return x_p
+
+
 def _require_finite(name: str, value: np.ndarray | float) -> None:
     if not np.isfinite(value).all():
         raise NumericalError(f"exact Gaussian produced non-finite {name}")
@@ -101,32 +119,47 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     observed = model.observed
 
     basis = _constraint_null_space(constraints, latent_size)
+    x_p = _constraint_particular_solution(constraints, model.constraint_rhs, latent_size)
     observed_design = design[observed]
     reduced_design = np.asarray(observed_design @ basis)
     reduced_precision = basis.T @ precision @ basis
     residual = y[observed] - offset[observed]
+    # Nonzero-rhs constraint: x = x_p + basis @ z shifts the likelihood residual
+    # by design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p),
+    # whose prior mean of z is m = -Q_r^-1 b_p (conditioning by kriging).
+    prior_linear = np.zeros(basis.shape[1])
+    prior_mean = np.zeros(basis.shape[1])
+    if x_p is not None:
+        residual = residual - np.asarray(observed_design @ x_p).reshape(-1)
+        prior_linear = basis.T @ (precision @ x_p)
     posterior_precision = reduced_precision + reduced_design.T @ reduced_design / variance
 
-    _, logdet_prior = _factor_positive_definite(reduced_precision, "reduced prior precision")
+    prior_factor, logdet_prior = _factor_positive_definite(
+        reduced_precision, "reduced prior precision"
+    )
     factor, logdet_posterior = _factor_positive_definite(
         posterior_precision, "reduced posterior precision"
     )
 
     if basis.shape[1]:
-        score = np.asarray(reduced_design.T @ residual / variance).reshape(-1)
+        score = np.asarray(reduced_design.T @ residual / variance).reshape(-1) - prior_linear
         assert factor is not None
         reduced_mean = cho_solve(factor, score)
         reduced_covariance = cho_solve(factor, np.eye(basis.shape[1]))
+        if x_p is not None:
+            assert prior_factor is not None
+            prior_mean = cho_solve(prior_factor, -prior_linear)
     else:
         reduced_mean = np.empty(0)
         reduced_covariance = np.empty((0, 0))
 
-    mean = basis @ reduced_mean
+    mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
     covariance = basis @ reduced_covariance @ basis.T
     posterior_residual = residual - reduced_design @ reduced_mean
+    centered = reduced_mean - prior_mean
     quadratic = float(
         posterior_residual @ posterior_residual / variance
-        + reduced_mean @ reduced_precision @ reduced_mean
+        + centered @ reduced_precision @ centered
     )
     n_observed = int(np.count_nonzero(observed))
     log_marginal_likelihood = -0.5 * (
