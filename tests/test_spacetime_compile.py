@@ -34,7 +34,11 @@ def test_type_i_fixed_precision_fits():
         predictor=Fixed("1") + SpaceTime("st", space="area", time="t", interaction="I", precision=2.0),
         likelihood=Gaussian(sigma=0.5),
     )
-    result = model.fit(_frame())
+    # A lone SpaceTime effect has no spatial/temporal main effects, so the
+    # compiler correctly emits the missing-companion warning; capture it here
+    # (rather than let it leak into pytest output) while still asserting the fit.
+    with pytest.warns(UserWarning, match=r"'st'"):
+        result = model.fit(_frame())
     assert result.latent_marginals("st").mean.shape == (3 * 5,)
 
 
