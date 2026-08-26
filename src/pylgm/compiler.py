@@ -1,3 +1,4 @@
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +20,7 @@ from pylgm.effects import (
     ProperCAR,
     RW1,
     RW2,
+    SpaceTime,
     build_ar1,
     build_besag,
     build_bym2,
@@ -27,6 +29,7 @@ from pylgm.effects import (
     build_midas,
     build_proper_car,
     build_random_walk,
+    build_spacetime,
     midas_penalty,
     normalize_graph,
 )
@@ -219,6 +222,33 @@ def _resolved_precision(value: float | Hyperparameter) -> float:
     return value.initial if isinstance(value, Hyperparameter) else value
 
 
+def _warn_missing_spacetime_main_effects(effects) -> None:
+    """Warn if a SpaceTime interaction lacks its spatial/temporal main effects.
+
+    The interaction's sum-to-zero constraints assume the main effects absorb the
+    spatial and temporal marginals; omitting one is a modelling error, so warn
+    (do not crash) naming the effect and the missing companion.
+    """
+    spatial_indices = {e.index for e in effects if isinstance(e, (Besag, ProperCAR, BYM2))}
+    temporal_indices = {e.index for e in effects if isinstance(e, (RW1, RW2, AR1))}
+    for effect in effects:
+        if not isinstance(effect, SpaceTime):
+            continue
+        missing = []
+        if effect.space not in spatial_indices:
+            missing.append(f"a spatial main effect on {effect.space!r}")
+        if effect.time not in temporal_indices:
+            missing.append(f"a temporal main effect on {effect.time!r}")
+        if missing:
+            warnings.warn(
+                f"SpaceTime effect {effect.name!r} has no {' and no '.join(missing)}; "
+                "its identifiability constraints assume the main effects absorb the "
+                "marginals. Add them, or the variance split is not identified.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+
 def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     """Compile a declarative model through the existing sparse effect builders."""
     if panel.response != model.response:
@@ -275,6 +305,14 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.columns, precision, effect.order, effect.ridge
                 )
                 precisions[effect.name] = precision
+            elif isinstance(effect, SpaceTime):
+                precision = _resolved_precision(effect.precision)
+                block = build_spacetime(
+                    frame, effect.name, effect.space, effect.time,
+                    dict(effect.graph) if effect.graph is not None else None,
+                    effect.interaction, effect.order, precision, effect.scale,
+                )
+                precisions[effect.name] = precision
             else:
                 # An unrecognized effect must not fall through to the random-walk
                 # builder: that silently mis-compiles it as an RW2.
@@ -293,6 +331,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 f"failed to compile effect {effect.name!r}: {error}"
             ) from error
         blocks.append(block)
+
+    _warn_missing_spacetime_main_effects(model.predictor.effects)
 
     wrong_rows = [block.name for block in blocks if block.design.shape[0] != len(frame)]
     if wrong_rows:
@@ -657,6 +697,18 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             scalable.append(ParametricBlock(template, (tau_name,), build))
             parameter_names.append(tau_name)
             parameter_bounds[tau_name] = _log_bounds(precision)
+            continue
+        if isinstance(effect, SpaceTime):
+            block = _compiled_block(
+                effect.name, build_spacetime,
+                frame, effect.name, effect.space, effect.time,
+                dict(effect.graph) if effect.graph is not None else None,
+                effect.interaction, effect.order, value, effect.scale,
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
             continue
         if isinstance(effect, IID):
             block = _compiled_block(effect.name, build_iid, frame, effect.name, effect.index, value)
