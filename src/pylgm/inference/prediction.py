@@ -42,8 +42,9 @@ class PredictionContext:
     """Everything needed to rebuild the fitted design for new rows.
 
     ``entries`` is an ordered tuple of block descriptors, in fitted block
-    order: ``("fixed", ModelSpec)`` or
-    ``("structured", (block_name, index_column, labels_tuple))``.
+    order: ``("fixed", ModelSpec)``,
+    ``("structured", (block_name, index_column, labels_tuple))``, or
+    ``("midas", (block_name, columns_tuple))``.
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -114,6 +115,22 @@ def _structured_block(entry: tuple[str, str, tuple[str, ...]], new_data: pd.Data
     return design
 
 
+def _midas_block(entry: tuple[str, tuple[str, ...]], new_data: pd.DataFrame) -> np.ndarray:
+    name, columns = entry
+    missing = [column for column in columns if column not in new_data.columns]
+    if missing:
+        raise ValueError(
+            f"predict() new_data is missing lag columns {missing!r} required by the "
+            f"{name!r} block"
+        )
+    design = new_data[list(columns)].to_numpy(dtype=float)
+    if not np.isfinite(design).all():
+        raise ValueError(
+            f"predict() new_data has non-finite values in the {name!r} lag columns"
+        )
+    return design
+
+
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
     if not isinstance(new_data, pd.DataFrame) or new_data.empty:
         raise ValueError("predict() new_data must be a non-empty pandas DataFrame")
@@ -123,6 +140,8 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_fixed_block(payload, new_data))
         elif kind == "structured":
             blocks.append(_structured_block(payload, new_data))
+        elif kind == "midas":
+            blocks.append(_midas_block(payload, new_data))
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
     design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))

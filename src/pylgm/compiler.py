@@ -15,6 +15,7 @@ from pylgm.effects import (
     BYM2,
     Fixed,
     IID,
+    MIDAS,
     ProperCAR,
     RW1,
     RW2,
@@ -23,8 +24,10 @@ from pylgm.effects import (
     build_bym2,
     build_fixed,
     build_iid,
+    build_midas,
     build_proper_car,
     build_random_walk,
+    midas_penalty,
     normalize_graph,
 )
 from pylgm.effects.ar1 import ar1_structure
@@ -264,6 +267,12 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 order = 1 if isinstance(effect, RW1) else 2
                 block = build_random_walk(
                     frame, effect.name, effect.index, precision, order
+                )
+                precisions[effect.name] = precision
+            elif isinstance(effect, MIDAS):
+                precision = _resolved_precision(effect.precision)
+                block = build_midas(
+                    frame, effect.name, effect.columns, precision, effect.order, effect.ridge
                 )
                 precisions[effect.name] = precision
             else:
@@ -623,6 +632,32 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             parameter_names.append(rho_name)
             parameter_bounds[rho_name] = rho_bounds
             continue
+        if isinstance(effect, MIDAS):
+            # Q(tau) = tau * DtD + delta * P0. The delta * P0 term does not scale
+            # with tau, so an estimated tau needs a ParametricBlock (rebuild per
+            # tau) rather than a ScalableBlock; a fixed tau bakes into one matrix.
+            dtd, projector = midas_penalty(len(effect.columns), effect.order)
+            delta = effect.ridge
+            if not optimized:
+                block = _compiled_block(
+                    effect.name, build_midas,
+                    frame, effect.name, effect.columns, value, effect.order, delta,
+                )
+                scalable.append(ScalableBlock(block, None, 1.0))
+                continue
+            tau_name = precision.name
+            template = _compiled_block(
+                effect.name, build_midas,
+                frame, effect.name, effect.columns, float(precision.initial), effect.order, delta,
+            )
+
+            def build(values, dtd=dtd, projector=projector, delta=delta, tau_name=tau_name) -> csr_matrix:
+                return csr_matrix(values[tau_name] * dtd + delta * projector)
+
+            scalable.append(ParametricBlock(template, (tau_name,), build))
+            parameter_names.append(tau_name)
+            parameter_bounds[tau_name] = _log_bounds(precision)
+            continue
         if isinstance(effect, IID):
             block = _compiled_block(effect.name, build_iid, frame, effect.name, effect.index, value)
         elif isinstance(effect, (RW1, RW2)):
@@ -693,6 +728,9 @@ def build_prediction_context(
         if isinstance(effect, Fixed):
             spec = model_matrix(effect.formula, panel.frame).model_spec
             entries.append(("fixed", spec))
+        elif isinstance(effect, MIDAS):
+            # No index/one-hot: the design is the raw lag columns, rebuilt directly.
+            entries.append(("midas", (effect.name, effect.columns)))
         else:
             entries.append(("structured", (effect.name, effect.index, block.labels)))
         implied_labels.extend(f"{block.name}:{label}" for label in block.labels)
