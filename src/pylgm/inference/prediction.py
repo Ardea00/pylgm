@@ -43,8 +43,9 @@ class PredictionContext:
 
     ``entries`` is an ordered tuple of block descriptors, in fitted block
     order: ``("fixed", ModelSpec)``,
-    ``("structured", (block_name, index_column, labels_tuple))``, or
-    ``("midas", (block_name, columns_tuple))``.
+    ``("structured", (block_name, index_column, labels_tuple))``,
+    ``("midas", (block_name, columns_tuple))``, or
+    ``("spacetime", (block_name, space, time, area_labels, time_labels))``.
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -131,6 +132,35 @@ def _midas_block(entry: tuple[str, tuple[str, ...]], new_data: pd.DataFrame) -> 
     return design
 
 
+def _spacetime_block(
+    entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
+) -> np.ndarray:
+    name, space, time, area_labels, time_labels = entry
+    for column in (space, time):
+        if column not in new_data.columns:
+            raise ValueError(
+                f"predict() new_data is missing column {column!r} required by the "
+                f"{name!r} space-time block"
+            )
+    area_pos = {label: i for i, label in enumerate(area_labels)}
+    time_pos = {label: j for j, label in enumerate(time_labels)}
+    areas = new_data[space].map(str)
+    times = new_data[time].map(str)
+    unseen = sorted(set(areas[~areas.isin(area_pos)]) | set(times[~times.isin(time_pos)]))
+    if unseen:
+        raise ValueError(
+            f"predict() cannot score rows whose {name!r} space/time level was not in the "
+            f"fitted model: {unseen!r}. predict reuses the fitted latent posterior, so it "
+            "cannot create a new latent cell. To forecast new cells, include those rows at "
+            "fit time with a NaN response instead."
+        )
+    T = len(time_labels)
+    cells = areas.map(area_pos).to_numpy() * T + times.map(time_pos).to_numpy()
+    design = np.zeros((len(new_data), len(area_labels) * T))
+    design[np.arange(len(new_data)), cells] = 1.0
+    return design
+
+
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
     if not isinstance(new_data, pd.DataFrame) or new_data.empty:
         raise ValueError("predict() new_data must be a non-empty pandas DataFrame")
@@ -142,6 +172,8 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_structured_block(payload, new_data))
         elif kind == "midas":
             blocks.append(_midas_block(payload, new_data))
+        elif kind == "spacetime":
+            blocks.append(_spacetime_block(payload, new_data))
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
     design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))

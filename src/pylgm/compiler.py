@@ -783,6 +783,14 @@ def build_prediction_context(
         elif isinstance(effect, MIDAS):
             # No index/one-hot: the design is the raw lag columns, rebuilt directly.
             entries.append(("midas", (effect.name, effect.columns)))
+        elif isinstance(effect, SpaceTime):
+            area_labels = tuple(label.split("|", 1)[0] for label in block.labels)
+            time_labels = tuple(label.split("|", 1)[1] for label in block.labels)
+            entries.append(
+                ("spacetime", (effect.name, effect.space, effect.time,
+                               tuple(dict.fromkeys(area_labels)),
+                               tuple(dict.fromkeys(time_labels))))
+            )
         else:
             entries.append(("structured", (effect.name, effect.index, block.labels)))
         implied_labels.extend(f"{block.name}:{label}" for label in block.labels)
