@@ -254,3 +254,35 @@ def test_allow_large_dense_forces_dense_above_threshold(proper_car_with_intercep
     finally:
         g._MAX_DENSE_LATENT_DIMENSION = original
     assert forced.covariance.shape[0] == len(model.labels)     # real dense covariance
+
+
+def test_prior_logdet_cofactor_matches_dense_reference():
+    """Connected-ring intrinsic block: the cofactor fast-path in _prior_logdet
+    must equal a dense null_space reference to ~1e-9."""
+    import numpy as np
+    from scipy.linalg import null_space
+    from scipy.sparse import lil_matrix
+    from pylgm.inference.sparse import _is_connected_intrinsic
+
+    n = 40
+    Q = lil_matrix((n, n))
+    for i in range(n):
+        Q[i, i] = 2.0
+        Q[i, (i + 1) % n] = -1.0
+        Q[i, (i - 1) % n] = -1.0
+    Q = Q.tocsr()
+    rows = np.ones((1, n))
+    assert _is_connected_intrinsic(rows, Q) is True
+
+    # dense reference
+    V = null_space(rows)
+    _, dense_logdet = np.linalg.slogdet(V.T @ Q.toarray() @ V)
+    # cofactor
+    from pylgm.inference.sparse import SparseSpdFactor
+    cofactor_logdet = np.log(n) + SparseSpdFactor(Q.tocsr()[1:, 1:], "t").logdet
+    assert abs(cofactor_logdet - dense_logdet) < 1e-9
+
+    # precondition rejects full-rank IID and multi-row constraints
+    from scipy.sparse import identity
+    assert _is_connected_intrinsic(rows, (2.0 * identity(n)).tocsr()) is False
+    assert _is_connected_intrinsic(np.vstack([np.ones(n), np.r_[np.ones(20), -np.ones(20)]]), Q) is False

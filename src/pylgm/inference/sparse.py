@@ -121,28 +121,68 @@ def _block_column_confinement(model: CompiledLGM) -> list[tuple[int, int, np.nda
     return spans
 
 
+def _is_connected_intrinsic(rows: np.ndarray, precision) -> bool:
+    """True when a block is a connected intrinsic field pinned by one
+    unweighted sum-to-zero row: exactly one constraint row proportional to the
+    all-ones vector, and ``precision @ 1 == 0`` (so null(precision) = span(1)).
+
+    Only then does ``logdet(basis^T Q basis)`` equal the pseudo-determinant
+    ``log det*(Q) = log(n) + logdet(Q_{-0,-0})`` (matrix-tree identity). Excludes
+    full-rank fields (IID: Q @ 1 = tau*1 != 0) and multi-constraint / weighted
+    blocks (RW2 null = span(1,t); label extra-constraints), which fall back to
+    the dense reduction.
+    """
+    if rows.shape[0] != 1:
+        return False
+    r = np.asarray(rows, dtype=float).ravel()
+    norm = np.linalg.norm(r)
+    if norm == 0:
+        return False
+    ones = np.ones_like(r)
+    if not np.allclose(np.abs(r) / norm, ones / np.linalg.norm(ones)):
+        return False
+    q1 = np.asarray(precision @ ones, dtype=float).ravel()
+    scale = abs(precision).max() if precision.nnz else 1.0
+    return np.allclose(q1, 0.0, atol=1e-8 * max(1.0, scale))
+
+
 def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) -> float:
     """``logdet(basis^T Q_prior basis)`` as a per-block sum.
 
     Block-separable because every constraint row is confined to one block. A
     block with confined rows is intrinsic: its prior is rank-deficient, so reduce
-    it onto ``null_space(rows)`` (SPD once the constraint kills the null mode) and
-    take a dense logdet. A block with none is full rank -- its sparse logdet is
-    used directly.
-
-    ponytail: the intrinsic reduction is dense over the block (the Sorbye-Rue
-    ceiling the spec documents); E-sparse-C makes it sparse via the structure
-    eigendecomposition. Fine here -- the spec scopes the sparse-at-scale prior
-    determinant out of 4b.
+    it onto ``null_space(rows)`` (SPD once the constraint kills the null mode).
+    For the dominant case -- a connected intrinsic field (Besag, RW1, ...) pinned
+    by a single unweighted sum-to-zero row -- that reduced logdet equals the
+    pseudo-determinant, computed sparsely in near-linear time via the
+    matrix-tree cofactor identity (``_is_connected_intrinsic``). Everything else
+    (RW2, weighted or multi-row extra-constraints) keeps the dense reduction as
+    a fallback. A block with no confined rows is full rank -- its sparse logdet
+    is used directly.
     """
     a = np.asarray(model.constraints, dtype=float)
     total = 0.0
     for block, (start, stop, confined) in zip(model.blocks, spans, strict=True):
         q_b = block.precision
         if confined.any():
-            basis_b = null_space(a[confined, start:stop])
-            reduced = basis_b.T @ q_b.toarray() @ basis_b
-            _, logdet = _factor_positive_definite(reduced, f"reduced prior [{block.name}]")
+            rows = a[confined, start:stop]
+            if _is_connected_intrinsic(rows, q_b):
+                # Cofactor / matrix-tree: log det*(Q) = log(n) + logdet(Q_{-0,-0}).
+                # Sparse + near-linear; the dense reduction below is the fallback.
+                n_b = stop - start
+                reduced = q_b.tocsr()[1:, 1:]
+                logdet = np.log(n_b) + SparseSpdFactor(
+                    reduced, f"intrinsic prior [{block.name}]"
+                ).logdet
+            else:
+                # ponytail: dense reduction, O(n^3), for the residual cases only
+                # (RW2, weighted or multi-row extra-constraints) whose blocks are
+                # small in practice. A large field carrying an extra label
+                # constraint would hit this ceiling; generalize via the k-index
+                # cofactor (det*(Q) det(N_S^T N_S)/det(N^T N)) if that ever bites.
+                basis_b = null_space(rows)
+                reduced = basis_b.T @ q_b.toarray() @ basis_b
+                _, logdet = _factor_positive_definite(reduced, f"reduced prior [{block.name}]")
         else:
             logdet = SparseSpdFactor(q_b.tocsr(), f"prior [{block.name}]").logdet
         total += logdet
