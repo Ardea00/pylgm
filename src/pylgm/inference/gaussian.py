@@ -210,8 +210,6 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
     from pylgm.inference.sparse import sparse_constrained_gaussian
 
     variance = float(model.likelihood.variance)
-    if not np.isfinite(variance) or variance <= 0:
-        raise NumericalError("sigma squared must be finite and positive")
     fit = sparse_constrained_gaussian(model)
     _require_finite("posterior mean", fit.mean)
     _require_finite("log marginal likelihood", fit.log_marginal_likelihood)

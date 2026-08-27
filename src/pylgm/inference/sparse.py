@@ -295,6 +295,10 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         # Two-term quadratic (robust to the confounded near-singular Q_post):
         # (r0 - Z mu*)^T (r0 - Z mu*) / var + (mu* - nu)^T Q (mu* - nu), where
         # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
+        # ponytail: when e is nonzero AND a connected-intrinsic sum-to-zero row
+        # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
+        # augmented factor densifies. Correct, but defeats sparsity; nonzero-rhs
+        # extra-constraints at scale are E-sparse-C.
         if np.any(e):
             a_sp = csr_matrix(a)
             aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
