@@ -34,6 +34,12 @@ For the precise semantics of each shipped feature, follow the links into the
 - **Data boundary** — Pandas, or Spark / Databricks input. See [Spark](spark.md).
 - **Declarative frontend** — models expressible in YAML via
   `pylgm.config.load_model`.
+- **Sparse large-graph scaling (E-sparse A+B)** — network and space-time models
+  whose latent dimension exceeds the dense reference regime now fit past the
+  dense guard, delivering posterior mean, marginal likelihood, estimated
+  hyperparameters, and point predictions through a sparse constrained-Gaussian
+  solver. Posterior uncertainty at scale (variances, `predict`, full INLA
+  integration) is pending E-sparse-C. See [spatial effects](spatial-effects.md).
 
 ## Next
 
@@ -41,8 +47,10 @@ Ordered roughly by expected value to users. Nothing here is committed to a date.
 
 1. **Config-file spatial effects** — declare `besag`/`proper_car`/`bym2` (with
    an inline or file graph) in the YAML frontend, not just the Python API.
-2. **Sparse / large-graph scaling** — sparse precision assembly and solves so
-   spatial models scale beyond the dense reference regime.
+2. **Sparse posterior uncertainty at scale (E-sparse-C)** — selected-inverse
+   variances, `predict`, and full INLA integration on the sparse path, so large
+   models return uncertainty as well as the mean/marginal-likelihood/point
+   predictions already shipped in A+B.
 3. **Graceful isolated-node handling** in graphs, and the augmented 2n CAR
    representation.
 4. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
