@@ -3,7 +3,12 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from pylgm.exceptions import NumericalError
-from pylgm.inference.sparse import SparseSpdFactor, _partition_blocks
+from pylgm.inference.gaussian import _fit_dense
+from pylgm.inference.sparse import (
+    SparseSpdFactor,
+    _partition_blocks,
+    sparse_constrained_gaussian,
+)
 
 
 def _spd(n, seed=0):
@@ -50,3 +55,21 @@ def test_partition_splits_fixed_from_field(besag_with_intercept_model):
     # it lands in the sparse block.
     assert len(sparse_index) + len(dense_index) == len(labels)
     assert set(sparse_index).isdisjoint(dense_index)
+
+
+def test_sparse_matches_dense_no_constraints(proper_car_with_intercept_model):
+    model = proper_car_with_intercept_model
+    assert model.constraints.shape[0] == 0  # this fixture has no constraints
+    dense = _fit_dense(model)
+    sparse = sparse_constrained_gaussian(model)
+    assert np.allclose(sparse.mean, dense.mean, atol=1e-7)
+    assert np.isclose(
+        sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6
+    )
+    assert np.allclose(sparse.predictive_mean, dense.predictive_mean, atol=1e-7)
+
+
+def test_sparse_rejects_constraints(besag_with_intercept_model):
+    # Besag carries a sum-to-zero constraint; constrained solve is Task 4b.
+    with pytest.raises(NotImplementedError):
+        sparse_constrained_gaussian(besag_with_intercept_model)

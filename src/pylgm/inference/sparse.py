@@ -1,8 +1,13 @@
+from collections.abc import Mapping
+from dataclasses import dataclass
+
 import numpy as np
+from scipy.linalg import cho_solve
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import splu
 
 from pylgm.exceptions import NumericalError
+from pylgm.inference.gaussian import _block_slices, _factor_positive_definite
 from pylgm.ir.model import CompiledLGM
 
 
@@ -72,3 +77,111 @@ def _partition_blocks(model: CompiledLGM) -> tuple[np.ndarray, np.ndarray]:
             sparse_cols.extend(columns)
         start += width
     return np.asarray(sparse_cols, dtype=int), np.asarray(dense_cols, dtype=int)
+
+
+@dataclass(frozen=True)
+class SparseFit:
+    mean: np.ndarray
+    log_marginal_likelihood: float
+    predictive_mean: np.ndarray
+    block_slices: Mapping[str, slice]
+    diagnostics: dict[str, object]
+
+
+def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
+    """Unconstrained partitioned Schur solve, matching ``gaussian._fit_dense``.
+
+    Partitions the latent columns into a sparse GMRF field block ``s`` and a
+    small dense fixed block ``d`` (``_partition_blocks``), then solves the
+    posterior precision ``Q + Z^T Z / sigma^2`` by a Schur complement on the
+    dense block -- densifying only ``B`` (n_s x m), ``D`` and ``S`` (m x m),
+    never the field. Constraints arrive in Task 4b.
+
+    ponytail: assumes ``Q_sd == 0`` (block-diagonal prior + block-granular
+    partition), so ``B = Z_s^T Z_d / sigma^2``. True for every LGM this path
+    handles; a cross-block prior term would need adding here.
+    """
+    if model.constraints.shape[0]:
+        raise NotImplementedError("constrained sparse solve arrives in Task 4b")
+
+    variance = float(model.likelihood.variance)
+    if not np.isfinite(variance) or variance <= 0:
+        raise NumericalError("sigma squared must be finite and positive")
+
+    sparse_index, dense_index = _partition_blocks(model)
+    latent_size = model.precision.shape[0]
+    observed = model.observed
+    design = model.design
+    observed_design = design[observed]
+    residual = model.y[observed] - model.offset[observed]
+    q = model.precision
+
+    z_s = observed_design[:, sparse_index]
+    z_d = observed_design[:, dense_index]
+    n_s = sparse_index.size
+    m = dense_index.size
+
+    # Score g = Z^T r / sigma^2, split per block.
+    g_s = np.asarray(z_s.T @ residual).reshape(-1) / variance
+    g_d = np.asarray(z_d.T @ residual).reshape(-1) / variance
+
+    mean = np.zeros(latent_size)
+    logdet_prior = 0.0
+    logdet_posterior = 0.0
+
+    if n_s:
+        q_ss = q[sparse_index][:, sparse_index]
+        a_s = SparseSpdFactor(
+            (q_ss + (z_s.T @ z_s) / variance).tocsr(), "sparse posterior precision"
+        )
+        logdet_prior += SparseSpdFactor(q_ss.tocsr(), "sparse prior precision").logdet
+        logdet_posterior += a_s.logdet
+
+    if m:
+        q_dd = q[dense_index][:, dense_index].toarray()
+        d = q_dd + (z_d.T @ z_d).toarray() / variance
+        _, logdet_qdd = _factor_positive_definite(q_dd, "dense prior precision")
+        logdet_prior += logdet_qdd
+
+    if n_s and m:
+        b = (z_s.T @ z_d).toarray() / variance  # n_s x m
+        schur = d - b.T @ a_s.solve(b)  # m x m
+        schur_factor, logdet_schur = _factor_positive_definite(schur, "dense Schur complement")
+        logdet_posterior += logdet_schur
+        x_d = cho_solve(schur_factor, g_d - b.T @ a_s.solve(g_s))
+        x_s = a_s.solve(g_s - b @ x_d)
+        mean[sparse_index] = x_s
+        mean[dense_index] = x_d
+    elif n_s:
+        mean[sparse_index] = a_s.solve(g_s)
+    else:
+        d_factor, logdet_d = _factor_positive_definite(d, "dense posterior precision")
+        logdet_posterior += logdet_d
+        mean[dense_index] = cho_solve(d_factor, g_d)
+
+    n_observed = int(np.count_nonzero(observed))
+    g_full = np.zeros(latent_size)
+    g_full[sparse_index] = g_s
+    g_full[dense_index] = g_d
+    quadratic = float(residual @ residual / variance - mean @ g_full)
+    log_marginal_likelihood = -0.5 * (
+        n_observed * np.log(2 * np.pi * variance)
+        - logdet_prior
+        + logdet_posterior
+        + quadratic
+    )
+    predictive_mean = np.asarray(model.offset + design @ mean).reshape(-1)
+
+    return SparseFit(
+        mean=mean,
+        log_marginal_likelihood=log_marginal_likelihood,
+        predictive_mean=predictive_mean,
+        block_slices=_block_slices(model),
+        diagnostics={
+            "latent_dimension": int(latent_size),
+            "observed_count": n_observed,
+            "constraint_count": 0,
+            "sparse_dimension": int(n_s),
+            "dense_dimension": int(m),
+        },
+    )
