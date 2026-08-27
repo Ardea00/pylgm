@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from pylgm import Fixed, Gaussian, LGM, MIDASParametric
 from pylgm.effects.midas import midas_weights
