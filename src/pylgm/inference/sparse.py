@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.linalg import cho_solve
+from scipy.linalg import cho_solve, null_space
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import splu
 
@@ -88,22 +88,82 @@ class SparseFit:
     diagnostics: dict[str, object]
 
 
+def _block_column_confinement(model: CompiledLGM) -> list[tuple[int, int, np.ndarray]]:
+    """For each block, its column span and the constraint rows confined to it.
+
+    A row is *confined* to a block when all its nonzeros lie inside that block's
+    columns. Returns ``(start, stop, confined_row_mask)`` per block. Raises when a
+    row straddles two blocks -- the sparse prior/quadratic separability assumes
+    each constraint touches a single block (block sum-to-zero rows and the
+    single-block extra constraints these models carry). A cross-block row would
+    couple two reduced priors; that is E-sparse-C territory.
+    """
+    a = np.asarray(model.constraints, dtype=float)
+    row_mass = np.abs(a).sum(axis=1) if a.shape[0] else np.zeros(0)
+    spans: list[tuple[int, int, np.ndarray]] = []
+    confined_any = np.zeros(a.shape[0], dtype=bool)
+    start = 0
+    for block in model.blocks:
+        stop = start + block.design.shape[1]
+        if a.shape[0]:
+            here = np.abs(a[:, start:stop]).sum(axis=1)
+            confined = (here > 0) & (row_mass - here <= 1e-12)
+            confined_any |= confined
+        else:
+            confined = np.zeros(0, dtype=bool)
+        spans.append((start, stop, confined))
+        start = stop
+    if a.shape[0] and not confined_any.all():
+        raise NotImplementedError(
+            "sparse constrained solve requires each constraint row to touch a "
+            "single latent block; cross-block constraints are not yet supported"
+        )
+    return spans
+
+
+def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) -> float:
+    """``logdet(basis^T Q_prior basis)`` as a per-block sum.
+
+    Block-separable because every constraint row is confined to one block. A
+    block with confined rows is intrinsic: its prior is rank-deficient, so reduce
+    it onto ``null_space(rows)`` (SPD once the constraint kills the null mode) and
+    take a dense logdet. A block with none is full rank -- its sparse logdet is
+    used directly.
+
+    ponytail: the intrinsic reduction is dense over the block (the Sorbye-Rue
+    ceiling the spec documents); E-sparse-C makes it sparse via the structure
+    eigendecomposition. Fine here -- the spec scopes the sparse-at-scale prior
+    determinant out of 4b.
+    """
+    a = np.asarray(model.constraints, dtype=float)
+    total = 0.0
+    for block, (start, stop, confined) in zip(model.blocks, spans, strict=True):
+        q_b = block.precision
+        if confined.any():
+            basis_b = null_space(a[confined, start:stop])
+            reduced = basis_b.T @ q_b.toarray() @ basis_b
+            _, logdet = _factor_positive_definite(reduced, f"reduced prior [{block.name}]")
+        else:
+            logdet = SparseSpdFactor(q_b.tocsr(), f"prior [{block.name}]").logdet
+        total += logdet
+    return total
+
+
 def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
-    """Unconstrained partitioned Schur solve, matching ``gaussian._fit_dense``.
+    """Partitioned Schur solve, matching ``gaussian._fit_dense``.
 
     Partitions the latent columns into a sparse GMRF field block ``s`` and a
     small dense fixed block ``d`` (``_partition_blocks``), then solves the
     posterior precision ``Q + Z^T Z / sigma^2`` by a Schur complement on the
     dense block -- densifying only ``B`` (n_s x m), ``D`` and ``S`` (m x m),
-    never the field. Constraints arrive in Task 4b.
+    never the field. The same solve is exposed as ``apply_inverse`` and reused
+    for the unconstrained mean and, when ``model.constraints`` is nonempty, the
+    conditioning-by-kriging correction (Rue & Held 2005 sec 2.3.3).
 
     ponytail: assumes ``Q_sd == 0`` (block-diagonal prior + block-granular
     partition), so ``B = Z_s^T Z_d / sigma^2``. True for every LGM this path
     handles; a cross-block prior term would need adding here.
     """
-    if model.constraints.shape[0]:
-        raise NotImplementedError("constrained sparse solve arrives in Task 4b")
-
     variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
         raise NumericalError("sigma squared must be finite and positive")
@@ -121,49 +181,85 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     n_s = sparse_index.size
     m = dense_index.size
 
-    # Score g = Z^T r / sigma^2, split per block.
-    g_s = np.asarray(z_s.T @ residual).reshape(-1) / variance
-    g_d = np.asarray(z_d.T @ residual).reshape(-1) / variance
+    # Score g = Z^T r / sigma^2 (full-length, split per block).
+    g_full = np.zeros(latent_size)
+    g_full[sparse_index] = np.asarray(z_s.T @ residual).reshape(-1) / variance
+    g_full[dense_index] = np.asarray(z_d.T @ residual).reshape(-1) / variance
 
-    mean = np.zeros(latent_size)
-    logdet_prior = 0.0
     logdet_posterior = 0.0
+    a_s = schur_factor = d_factor = b = None
 
     if n_s:
         q_ss = q[sparse_index][:, sparse_index]
         a_s = SparseSpdFactor(
             (q_ss + (z_s.T @ z_s) / variance).tocsr(), "sparse posterior precision"
         )
-        logdet_prior += SparseSpdFactor(q_ss.tocsr(), "sparse prior precision").logdet
         logdet_posterior += a_s.logdet
-
     if m:
-        q_dd = q[dense_index][:, dense_index].toarray()
-        d = q_dd + (z_d.T @ z_d).toarray() / variance
-        _, logdet_qdd = _factor_positive_definite(q_dd, "dense prior precision")
-        logdet_prior += logdet_qdd
-
+        d = q[dense_index][:, dense_index].toarray() + (z_d.T @ z_d).toarray() / variance
     if n_s and m:
         b = (z_s.T @ z_d).toarray() / variance  # n_s x m
         schur = d - b.T @ a_s.solve(b)  # m x m
         schur_factor, logdet_schur = _factor_positive_definite(schur, "dense Schur complement")
         logdet_posterior += logdet_schur
-        x_d = cho_solve(schur_factor, g_d - b.T @ a_s.solve(g_s))
-        x_s = a_s.solve(g_s - b @ x_d)
-        mean[sparse_index] = x_s
-        mean[dense_index] = x_d
-    elif n_s:
-        mean[sparse_index] = a_s.solve(g_s)
-    else:
+    elif m:
         d_factor, logdet_d = _factor_positive_definite(d, "dense posterior precision")
         logdet_posterior += logdet_d
-        mean[dense_index] = cho_solve(d_factor, g_d)
+
+    def apply_inverse(rhs: np.ndarray) -> np.ndarray:
+        """``Q_post^-1 @ rhs`` via the Schur solve; ``rhs`` is 1-D or 2-D."""
+        rhs = np.asarray(rhs, dtype=float)
+        out = np.zeros_like(rhs)
+        if n_s and m:
+            v_s, v_d = rhs[sparse_index], rhs[dense_index]
+            x_d = cho_solve(schur_factor, v_d - b.T @ a_s.solve(v_s))
+            out[sparse_index] = a_s.solve(v_s - b @ x_d)
+            out[dense_index] = x_d
+        elif n_s:
+            out[sparse_index] = a_s.solve(rhs[sparse_index])
+        else:
+            out[dense_index] = cho_solve(d_factor, rhs[dense_index])
+        return out
+
+    mean = apply_inverse(g_full)  # unconstrained posterior mean
+
+    spans = _block_column_confinement(model)
+    logdet_prior = _prior_logdet(model, spans)
+
+    constraint_count = model.constraints.shape[0]
+    if constraint_count:
+        # Conditioning by kriging: correct the mean and the two SPD-identity
+        # determinant terms, logdet(basis^T Q_post basis) = logdet(Q_post)
+        # + logdet(A Q_post^-1 A^T) - logdet(A A^T).
+        a = np.asarray(model.constraints, dtype=float)
+        e = np.asarray(model.constraint_rhs, dtype=float)
+        w = apply_inverse(a.T)  # latent x c
+        capacitance = a @ w  # A Q_post^-1 A^T
+        cap_factor, logdet_cap = _factor_positive_definite(capacitance, "kriging capacitance")
+        _, logdet_gram = _factor_positive_definite(a @ a.T, "constraint gram")
+        logdet_posterior += logdet_cap - logdet_gram
+        mean = mean - w @ cho_solve(cap_factor, a @ mean - e)
+
+        # Two-term quadratic (robust to the confounded near-singular Q_post):
+        # (r0 - Z mu*)^T (r0 - Z mu*) / var + (mu* - nu)^T Q (mu* - nu), where
+        # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
+        if np.any(e):
+            a_sp = csr_matrix(a)
+            aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
+            w_aug = aug.solve(a.T)
+            nu = w_aug @ np.linalg.solve(a @ w_aug, e)
+        else:
+            nu = np.zeros(latent_size)
+        prior_residual = mean - nu
+        model_residual = residual - np.asarray(observed_design @ mean).reshape(-1)
+        quadratic = float(
+            model_residual @ model_residual / variance
+            + prior_residual @ np.asarray(q @ prior_residual).reshape(-1)
+        )
+    else:
+        quadratic = float(residual @ residual / variance - mean @ g_full)
 
     n_observed = int(np.count_nonzero(observed))
-    g_full = np.zeros(latent_size)
-    g_full[sparse_index] = g_s
-    g_full[dense_index] = g_d
-    quadratic = float(residual @ residual / variance - mean @ g_full)
     log_marginal_likelihood = -0.5 * (
         n_observed * np.log(2 * np.pi * variance)
         - logdet_prior
@@ -180,7 +276,7 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         diagnostics={
             "latent_dimension": int(latent_size),
             "observed_count": n_observed,
-            "constraint_count": 0,
+            "constraint_count": int(constraint_count),
             "sparse_dimension": int(n_s),
             "dense_dimension": int(m),
         },

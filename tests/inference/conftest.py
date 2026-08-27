@@ -59,6 +59,55 @@ def besag_with_intercept_model() -> CompiledLGM:
 
 
 @pytest.fixture
+def besag_extraconstr_model() -> CompiledLGM:
+    """``Fixed("1") + Besag(...)`` plus a nonzero-rhs extra constraint.
+
+    Same construction as ``besag_with_intercept_model`` but with ONE extra
+    model-level constraint pinning ``region:1`` to ``2.5`` (``A x = e``,
+    ``e != 0``) stacked beneath the Besag sum-to-zero block row -- exercises
+    the conditioning-by-kriging path with a nonzero right-hand side.
+    """
+    regions = [str(i) for i in range(4)]
+    frame = pd.DataFrame({"region": regions, "y": [1.0, 2.0, 1.5, 2.5]})
+
+    fixed_block = build_fixed(frame, "1", 1e-6)
+    region_block = build_besag(frame, "region", "region", _GRAPH, precision=1.0)
+
+    blocks = (fixed_block, region_block)
+    design = csr_matrix(np.hstack([fixed_block.design.toarray(), region_block.design.toarray()]))
+    precision = block_diag([fixed_block.precision, region_block.precision], format="csr")
+    labels = tuple(f"{block.name}:{label}" for block in blocks for label in block.labels)
+    width = design.shape[1]
+
+    block_constraints = np.vstack(
+        [
+            np.hstack([fixed_block.constraints, np.zeros((fixed_block.constraints.shape[0], 4))]),
+            np.hstack([np.zeros((region_block.constraints.shape[0], 1)), region_block.constraints]),
+        ]
+    )
+    # Pin region:1 to 2.5 -- a single 1.0 on that field column (nonzero rhs).
+    region1 = labels.index("region:1")
+    extra_row = np.zeros((1, width))
+    extra_row[0, region1] = 1.0
+    extra_rhs = np.array([2.5])
+    constraints = np.vstack([block_constraints, extra_row])
+
+    return CompiledLGM(
+        y=frame["y"].to_numpy(dtype=float),
+        observed=np.ones(4, dtype=bool),
+        offset=np.zeros(4),
+        design=design,
+        precision=precision,
+        constraints=constraints,
+        labels=labels,
+        likelihood=CompiledGaussian(0.1),
+        blocks=blocks,
+        extra_constraints=extra_row,
+        extra_constraint_rhs=extra_rhs,
+    )
+
+
+@pytest.fixture
 def proper_car_with_intercept_model() -> CompiledLGM:
     """A compiled ``Fixed("1") + proper_car(...)`` model on a tiny connected graph.
 
