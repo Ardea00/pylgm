@@ -35,3 +35,23 @@ def test_covless_result_raises_on_uncertainty():
     ):
         with pytest.raises(NotImplementedError, match="E-sparse-C"):
             accessor()
+
+
+def test_rebuild_preserves_absent_covariance():
+    from pylgm.model import _rebuild_result
+
+    result = _covless_result()
+    rebuilt = _rebuild_result(result, hyperparameters={"tau": 1.0})
+    assert rebuilt._covariance is None
+    assert rebuilt._predictive_variance is None
+    assert np.allclose(rebuilt.mean, [1.0, 2.0])
+    assert rebuilt.hyperparameters["tau"] == 1.0
+
+
+def test_align_reorders_without_covariance():
+    from pylgm.model import _align_predictions_with_source_rows
+
+    result = _covless_result()
+    aligned = _align_predictions_with_source_rows(result, np.array([1, 0]))
+    assert aligned._covariance is None
+    assert aligned._predictive_variance is None

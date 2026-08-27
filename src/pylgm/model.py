@@ -157,14 +157,18 @@ def _rebuild_result(
     unchanged, so callers only pass what they mean to change.
     """
     predictive_mean = result.predictive_mean
-    predictive_variance = result.predictive_variance
+    # ponytail: read result._covariance/_predictive_variance (private) here --
+    # _rebuild_result reconstructs the object, so it needs the raw stored value,
+    # not the pending-C-raising public property.
+    predictive_variance = result._predictive_variance
     if caller_order is not None:
         predictive_mean = predictive_mean[caller_order]
-        predictive_variance = predictive_variance[caller_order]
+        if predictive_variance is not None:
+            predictive_variance = predictive_variance[caller_order]
     common = dict(
         labels=result.labels,
         mean=result.mean,
-        covariance=result.covariance,
+        covariance=result._covariance,
         log_marginal_likelihood=result.log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
