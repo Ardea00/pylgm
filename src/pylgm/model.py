@@ -104,6 +104,44 @@ def _context_with_fitted_likelihood(context, result, model):
     return context
 
 
+def _context_with_fitted_weights(context, result):
+    """Substitute fitted shape estimates into parametric-MIDAS design entries.
+
+    ``build_prediction_context`` runs on a ``compile_lgm`` result, which resolves
+    an estimated shape Hyperparameter to its ``.initial`` (the starting guess). A
+    parametric-MIDAS design is a function of that shape, so predict() would
+    otherwise aggregate new rows with the initial weights, not the fitted ones.
+    Mirror ``_context_with_fitted_likelihood`` and swap in the estimates. Under
+    ``hyperparameters="integrate"`` the point estimate lives in the INLA
+    marginal table (``result.hyperparameters`` is ``None`` there), so check that
+    first, exactly as the likelihood fixup does for sigma.
+    """
+    from dataclasses import replace
+
+    marginals = getattr(result, "hyperparameter_marginals", None)
+    table = marginals() if callable(marginals) else None
+    fitted = getattr(result, "hyperparameters", None) or {}
+
+    def _resolve(name):
+        if table and name in table:
+            return float(table[name].mean[0])
+        return float(fitted[name])
+
+    new_entries = []
+    changed = False
+    for kind, payload in context.entries:
+        if kind == "midas_parametric":
+            name, columns, kernel, theta_spec = payload
+            theta = tuple(s if not isinstance(s, str) else _resolve(s) for s in theta_spec)
+            new_entries.append((kind, (name, columns, kernel, theta)))
+            changed = True
+        else:
+            new_entries.append((kind, payload))
+    if not changed:
+        return context
+    return replace(context, entries=tuple(new_entries))
+
+
 def _rebuild_result(
     result: GaussianResult | LaplaceResult | INLAResult,
     *,
@@ -371,6 +409,7 @@ class LGM:
             compiled = compile_lgm(self, panel)
         context = build_prediction_context(self, panel, compiled)
         context = _context_with_fitted_likelihood(context, result, self)
+        context = _context_with_fitted_weights(context, result)
         result = _rebuild_result(result, prediction_context=context)
         return _align_predictions_with_source_rows(result, panel.source_positions)
 
@@ -405,6 +444,7 @@ class LGM:
             compiled = compile_lgm(self, canonical.panel)
         context = build_prediction_context(self, canonical.panel, compiled)
         context = _context_with_fitted_likelihood(context, result, self)
+        context = _context_with_fitted_weights(context, result)
         return _rebuild_result(
             result, prediction_keys=canonical.prediction_keys, prediction_context=context
         )

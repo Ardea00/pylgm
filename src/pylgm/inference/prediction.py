@@ -132,6 +132,23 @@ def _midas_block(entry: tuple[str, tuple[str, ...]], new_data: pd.DataFrame) -> 
     return design
 
 
+def _midas_parametric_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    from pylgm.effects.midas import midas_weights
+
+    name, columns, kernel, theta = entry
+    missing = [column for column in columns if column not in new_data.columns]
+    if missing:
+        raise ValueError(
+            f"predict() new_data is missing lag columns {missing!r} required by the "
+            f"{name!r} block"
+        )
+    values = new_data[list(columns)].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError(f"predict() new_data has non-finite values in the {name!r} lag columns")
+    weights = midas_weights(kernel, len(columns), theta)
+    return (values @ weights).reshape(-1, 1)
+
+
 def _spacetime_block(
     entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
 ) -> np.ndarray:
@@ -172,6 +189,8 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_structured_block(payload, new_data))
         elif kind == "midas":
             blocks.append(_midas_block(payload, new_data))
+        elif kind == "midas_parametric":
+            blocks.append(_midas_parametric_block(payload, new_data))
         elif kind == "spacetime":
             blocks.append(_spacetime_block(payload, new_data))
         else:

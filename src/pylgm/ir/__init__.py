@@ -10,6 +10,7 @@ from pylgm.ir.family import (
     CompiledGaussianFamily,
     Hyperparameters,
     ParametricBlock,
+    ParametricDesignBlock,
     ScalableBlock,
 )
 from pylgm.ir.model import CompiledLGM, LatentBlock
@@ -21,5 +22,6 @@ __all__ = [
     "Hyperparameters",
     "LatentBlock",
     "ParametricBlock",
+    "ParametricDesignBlock",
     "ScalableBlock",
 ]

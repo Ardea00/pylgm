@@ -231,6 +231,49 @@ class MIDAS(_ComposableEffect):
 
 
 @dataclass(frozen=True)
+class MIDASParametric(_ComposableEffect):
+    """Restricted MIDAS: HF lag ``columns`` collapsed into one regressor
+    ``beta * sum_k w(k; theta) * x_{t,k}`` under a parametric lag-weight kernel
+    (``"beta"`` or ``"exp_almon"``). The two shape parameters are estimated
+    (EB) / integrated (INLA) when given as ``Hyperparameter``s, or fixed when
+    given as floats; the loading ``beta`` carries a fixed vague Gaussian prior
+    (``prior_precision``). See the S2 design spec."""
+
+    name: str
+    columns: tuple[str, ...]
+    kernel: str = "beta"
+    shape1: "float | Hyperparameter | None" = None
+    shape2: "float | Hyperparameter | None" = None
+    prior_precision: float = 1e-6
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        columns = tuple(self.columns)
+        for column in columns:
+            _non_empty_string(column, "column")
+        if len(columns) < 2:
+            raise ValueError("MIDASParametric requires at least 2 lag columns")
+        object.__setattr__(self, "columns", columns)
+        if self.kernel not in ("beta", "exp_almon"):
+            raise ValueError("kernel must be 'beta' or 'exp_almon'")
+        object.__setattr__(self, "prior_precision", _positive_real(self.prior_precision, "prior_precision"))
+        object.__setattr__(self, "shape1", self._resolve_shape(self.shape1, 1))
+        object.__setattr__(self, "shape2", self._resolve_shape(self.shape2, 2))
+
+    def _resolve_shape(self, shape, index):
+        if shape is None:
+            if self.kernel == "beta":
+                return Hyperparameter(f"{self.name}.shape{index}", initial=2.0, transform="log")
+            initial = 0.0 if index == 1 else -0.1
+            return Hyperparameter(f"{self.name}.shape{index}", initial=initial, transform="identity")
+        if isinstance(shape, Hyperparameter):
+            return shape
+        if type(shape) in (int, float):
+            return float(shape)
+        raise ValueError("shape must be a float, a Hyperparameter, or None")
+
+
+@dataclass(frozen=True)
 class SpaceTime(_ComposableEffect):
     """A Knorr-Held space-time interaction effect (interaction types I-IV)."""
 
@@ -272,7 +315,7 @@ class SpaceTime(_ComposableEffect):
 
 
 EffectSpec: TypeAlias = (
-    Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2 | MIDAS | SpaceTime
+    Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2 | MIDAS | MIDASParametric | SpaceTime
 )
 
 
@@ -289,7 +332,8 @@ class Predictor:
             raise TypeError("effects must be an iterable of effect specifications") from error
         if any(
             not isinstance(
-                effect, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, SpaceTime)
+                effect,
+                (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, MIDASParametric, SpaceTime),
             )
             for effect in effects
         ):
@@ -302,7 +346,9 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, SpaceTime)):
+        if isinstance(
+            other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, MIDASParametric, SpaceTime)
+        ):
             return Predictor(self.effects + (other,))
         return NotImplemented
 
@@ -314,6 +360,7 @@ __all__ = [
     "Fixed",
     "IID",
     "MIDAS",
+    "MIDASParametric",
     "Predictor",
     "ProperCAR",
     "RW1",
