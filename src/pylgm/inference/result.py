@@ -11,6 +11,13 @@ from scipy.special import owens_t
 from scipy.stats import norm
 
 
+_PENDING_C = (
+    "posterior covariance is unavailable on the sparse path "
+    "(pending E-sparse-C); only mean, marginal likelihood, and predictive_mean "
+    "are available for large models fitted through the sparse solver"
+)
+
+
 _IMMUTABLE_DIAGNOSTIC_TYPES = (
     str,
     bytes,
@@ -565,19 +572,25 @@ class _BaseResult:
         if extra_validate is not None:
             extra_validate()
         _validate_prediction_keys(prediction_keys, predictive_mean)
-        covariance = np.asarray(covariance)
-        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
-            covariance
-        ):
-            raise TypeError("covariance must have a real numeric dtype")
-        if not np.isfinite(covariance).all():
-            raise ValueError("covariance must be finite")
+        if covariance is None:
+            object.__setattr__(self, "_covariance", None)
+        else:
+            covariance = np.asarray(covariance)
+            if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
+                covariance
+            ):
+                raise TypeError("covariance must have a real numeric dtype")
+            if not np.isfinite(covariance).all():
+                raise ValueError("covariance must be finite")
+            object.__setattr__(self, "_covariance", _readonly_array(covariance))
         object.__setattr__(self, "labels", tuple(labels))
         object.__setattr__(self, "_mean", _readonly_array(mean))
-        object.__setattr__(self, "_covariance", _readonly_array(covariance))
         object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
         object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
-        object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        if predictive_variance is None:
+            object.__setattr__(self, "_predictive_variance", None)
+        else:
+            object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
         # The subclasses' own fields are stored HERE, not after this call: the
         # storage below is not inert -- _readonly_diagnostics and
         # _readonly_hyperparameters both validate -- so running it first would
@@ -609,6 +622,8 @@ class _BaseResult:
 
     @property
     def covariance(self) -> np.ndarray:
+        if self._covariance is None:
+            raise NotImplementedError(_PENDING_C)
         return _readonly_array(self._covariance)
 
     @property
@@ -625,6 +640,8 @@ class _BaseResult:
         For a Gaussian likelihood, add ``GaussianResult.observation_variance`` to
         recover the response-scale (fitted-value) predictive variance.
         """
+        if self._predictive_variance is None:
+            raise NotImplementedError(_PENDING_C)
         return _readonly_array(self._predictive_variance)
 
     @property
@@ -661,12 +678,16 @@ class _BaseResult:
         return True
 
     def latent_marginals(self, block: str | None = None) -> GaussianMarginals:
+        if self._covariance is None:
+            raise NotImplementedError(_PENDING_C)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
         return MappingProxyType({})
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
+        if self._covariance is None:
+            raise NotImplementedError(_PENDING_C)
         return linear_combinations_from(self._mean, self._covariance, weights)
 
     def predict(self, new_data):
@@ -679,6 +700,8 @@ class _BaseResult:
         """
         from pylgm.inference.prediction import predict_from
 
+        if self._covariance is None:
+            raise NotImplementedError(_PENDING_C)
         if self.prediction_context is None:
             raise ValueError(
                 "this result carries no prediction context; predict() is available "
