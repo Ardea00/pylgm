@@ -4,7 +4,7 @@ from scipy.linalg import null_space
 from scipy.sparse import csr_matrix
 
 from pylgm.exceptions import NumericalError
-from pylgm.inference.gaussian import _fit_dense
+from pylgm.inference.gaussian import _fit_dense, fit_gaussian
 from pylgm.inference.sparse import (
     SparseSpdFactor,
     _partition_blocks,
@@ -224,3 +224,33 @@ def test_selected_inverse_diagonal_raises():
     factor = SparseSpdFactor(csr_matrix(np.eye(3)), "id")
     with pytest.raises(NotImplementedError, match="E-sparse-C"):
         selected_inverse_diagonal(factor, np.array([0, 1, 2]))
+
+
+def test_forced_sparse_under_guard_matches_dense(proper_car_with_intercept_model):
+    # A model under the guard, forced sparse by monkeypatching the threshold low,
+    # matches the dense fit on mean and lml.
+    model = proper_car_with_intercept_model
+    dense = fit_gaussian(model, allow_large_dense=True)  # dense
+    import pylgm.inference.gaussian as g
+    original = g._MAX_DENSE_LATENT_DIMENSION
+    try:
+        g._MAX_DENSE_LATENT_DIMENSION = 1     # force above-threshold routing
+        sparse = fit_gaussian(model)          # sparse
+    finally:
+        g._MAX_DENSE_LATENT_DIMENSION = original
+    assert np.allclose(sparse.mean, dense.mean, atol=1e-7)
+    assert np.isclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6)
+    with pytest.raises(NotImplementedError, match="E-sparse-C"):
+        _ = sparse.covariance
+
+
+def test_allow_large_dense_forces_dense_above_threshold(proper_car_with_intercept_model):
+    model = proper_car_with_intercept_model
+    import pylgm.inference.gaussian as g
+    original = g._MAX_DENSE_LATENT_DIMENSION
+    try:
+        g._MAX_DENSE_LATENT_DIMENSION = 1
+        forced = fit_gaussian(model, allow_large_dense=True)   # must NOT route sparse
+    finally:
+        g._MAX_DENSE_LATENT_DIMENSION = original
+    assert forced.covariance.shape[0] == len(model.labels)     # real dense covariance
