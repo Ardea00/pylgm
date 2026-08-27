@@ -149,9 +149,11 @@ Laplace (`latent_strategy="laplace"`).
 the lag columns as given; building them (e.g. `frame[f"x_lag{k}"] =
 hf.shift(k)` after resampling the HF series onto the LF rows) is upstream data
 prep. See [`examples/midas_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/midas_nowcast)
-for an end-to-end nowcasting run that recovers a known decaying kernel. **Not
-shipped**: parametric lag kernels (exp-Almon / Beta weight functions), a hybrid
-HF/LF nowcasting frontend, and a config-file `midas` effect type.
+for an end-to-end nowcasting run that recovers a known decaying kernel.
+Parametric lag kernels (exp-Almon / Beta weight functions) are now shipped —
+see [Restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) below.
+**Not shipped**: a hybrid HF/LF nowcasting frontend and a config-file `midas`
+effect type.
 
 ## SpaceTime effect (Knorr-Held interaction)
 
@@ -200,6 +202,41 @@ emits a one-line warning if a `SpaceTime` effect is present without its spatial
 and temporal main effects, since the constraints assume those absorb the
 marginals. The latent field is dense `S·T`, so the >4096-dim preflight guard
 bites at large grids — real economic scale is gated on the sparse backend.
+
+## Restricted MIDAS effect (parametric lag weights)
+
+`MIDASParametric(name, columns, kernel="beta", shape1=None, shape2=None, prior_precision=1e-6)`
+collapses the high-frequency lag `columns` into a **single** regressor
+`β · Σ_k w(k; θ) · x_{t,k}`, where `w(·; θ)` is a parametric lag-weight kernel.
+This is the *restricted* counterpart to the U-MIDAS
+[`MIDAS`](#midas-smooth-lag-effect) effect, which keeps every lag as its own
+smoothed coefficient.
+
+| `kernel` | shape params | weight `log w_k` (normalized to Σ=1) |
+|------|------|------|
+| `"beta"` | `a, b > 0` | `(a−1)·log x_k + (b−1)·log(1−x_k)`, `x_k=(k+1)/(K+1)` |
+| `"exp_almon"` | `θ1, θ2` real | `θ1·k + θ2·k²` (θ2<0 ⇒ decay) |
+
+Lags are indexed `columns[0]` (shallowest) … `columns[K-1]` (deepest); weights
+are softmax-normalized. Each shape is a float (fixed θ) or a `Hyperparameter`
+(estimated by EB, integrated by INLA); omit them for kernel-appropriate
+defaults (Beta `a=b=2`; exp-Almon `θ1=0, θ2=−0.1`). The loading `β` is a single
+coefficient with a fixed vague Gaussian prior (`prior_precision`), so the block
+is proper and unconstrained — it runs under every latent strategy, including
+`latent_strategy="laplace"`. `predict()` rebuilds the aggregate for new rows at
+the fitted weights.
+
+```python
+from pylgm import Fixed, Gaussian, LGM, MIDASParametric
+
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + MIDASParametric("m", ("x0", "x1", "x2", "x3"), kernel="beta"),
+    likelihood=Gaussian(sigma=0.1),
+)
+result = model.fit(frame)
+result.hyperparameters["m.shape1"]  # estimated Beta a
+```
 
 ## Linear constraints (`extraconstr`)
 
