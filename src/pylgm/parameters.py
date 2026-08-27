@@ -38,7 +38,7 @@ class Hyperparameter:
     ``rho`` (whose interval is resolved from the graph at compile time). Under
     ``"logit"`` the ``initial`` value may be any finite real — including zero or
     negative — and ``lower``/``upper`` may be left ``None`` for the effect to
-    supply. ``"identity"`` is accepted but not wired into inference.
+    supply. ``"identity"`` selects the real line (any finite value) — used by exp-Almon MIDAS weight shapes.
 
     When ``prior`` is declared, its native-scale log density is added as a
     penalty to the objective (no Jacobian correction), turning the estimate into
@@ -71,15 +71,18 @@ class Hyperparameter:
             object.__setattr__(self, "lower", lower)
             object.__setattr__(self, "upper", upper)
         elif self.transform == "identity":
-            # Not wired into inference: keep the historical positive-only
-            # semantics and default bounds so declaring one still fits.
-            object.__setattr__(self, "initial", _positive_real(self.initial, "initial"))
-            lower = self.initial * 1e-3 if self.lower is None else _positive_real(self.lower, "lower")
-            upper = self.initial * 1e3 if self.upper is None else _positive_real(self.upper, "upper")
-            if not lower < self.initial:
-                raise ValueError("lower bound must be below initial")
-            if not self.initial < upper:
-                raise ValueError("upper bound must be above initial")
+            # Real-line parameter (e.g. exp-Almon weight shape): any finite
+            # initial; default to a finite symmetric window so OptimizationBounds
+            # (which requires finite lower/upper under IdentityTransform) is valid.
+            if type(self.initial) not in (int, float) or not math.isfinite(self.initial):
+                raise ValueError("initial must be a finite real value")
+            object.__setattr__(self, "initial", float(self.initial))
+            lower = self.initial - 10.0 if self.lower is None else float(self.lower)
+            upper = self.initial + 10.0 if self.upper is None else float(self.upper)
+            if not math.isfinite(lower) or not math.isfinite(upper):
+                raise ValueError("lower and upper must be finite real values or None")
+            if not lower < self.initial < upper:
+                raise ValueError("bounds must satisfy lower < initial < upper")
             object.__setattr__(self, "lower", lower)
             object.__setattr__(self, "upper", upper)
         else:

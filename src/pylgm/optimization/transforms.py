@@ -81,3 +81,28 @@ class LogitTransform:
 
     def __hash__(self) -> int:
         return hash((LogitTransform, self.lower, self.upper))
+
+
+class IdentityTransform:
+    """Unconstrained parameters on the whole real line: u = theta, theta = u."""
+
+    def to_internal(self, theta: float) -> float:
+        return float(theta)
+
+    def from_internal(self, u: float) -> float:
+        return float(u)
+
+    def log_abs_jacobian(self, u: float) -> float:
+        return 0.0
+
+    def contains(self, theta: float) -> bool:
+        return bool(np.isfinite(theta))
+
+    def domain_description(self) -> str:
+        return "the real line"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, IdentityTransform)
+
+    def __hash__(self) -> int:
+        return hash(IdentityTransform)

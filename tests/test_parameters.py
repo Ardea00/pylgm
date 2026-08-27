@@ -17,12 +17,8 @@ def test_log_hyperparameter_still_positive_only():
         Hyperparameter("tau", initial=1.0, transform="log", lower=-1.0)
 
 
-def test_identity_hyperparameter_keeps_default_positive_bounds():
-    # "identity" is declared-but-unwired; it must still construct with the
-    # historical positive-only default bounds so declaring one still fits
-    # (only "logit" defers its interval to the effect).
-    hp = Hyperparameter("g.precision", initial=1.0, transform="identity")
-    assert hp.lower == pytest.approx(1e-3)
-    assert hp.upper == pytest.approx(1e3)
-    with pytest.raises(ValueError):
-        Hyperparameter("g.precision", initial=-1.0, transform="identity")
+def test_identity_hyperparameter_accepts_nonpositive_initial_with_finite_bounds():
+    hp = Hyperparameter("g.precision", initial=-1.0, transform="identity")
+    assert hp.initial == pytest.approx(-1.0)
+    assert hp.lower == pytest.approx(-11.0)
+    assert hp.upper == pytest.approx(9.0)
