@@ -146,6 +146,51 @@ class ParametricBlock:
         )
 
 
+@dataclass(frozen=True, init=False)
+class ParametricDesignBlock:
+    """A latent block whose DESIGN is a function of hyperparameters.
+
+    Mirror of ``ParametricBlock``: ``build`` returns a fresh design column while
+    the precision, labels and constraints stay fixed. Used by restricted MIDAS,
+    whose single regressor is a theta-weighted aggregate of the HF lags.
+    """
+
+    block: LatentBlock
+    parameters: tuple[str, ...]
+    build: Callable[[Mapping[str, float]], csr_matrix]
+
+    def __init__(
+        self,
+        block: LatentBlock,
+        parameters: tuple[str, ...],
+        build: Callable[[Mapping[str, float]], csr_matrix],
+    ) -> None:
+        if not isinstance(block, LatentBlock):
+            raise ModelValidationError("parametric-design block must contain a latent block")
+        names = tuple(parameters)
+        if not names or any(not isinstance(n, str) or not n for n in names):
+            raise ModelValidationError("parametric-design block parameters must be non-empty strings")
+        if not callable(build):
+            raise ModelValidationError("parametric-design block build must be callable")
+        object.__setattr__(self, "block", block)
+        object.__setattr__(self, "parameters", names)
+        object.__setattr__(self, "build", build)
+
+    def materialize(self, resolved: Mapping[str, float]) -> LatentBlock:
+        design = self.build(resolved)
+        if not np.isfinite(design.data).all():
+            raise NumericalError(
+                f"parametric design for block {self.block.name!r} must remain finite"
+            )
+        return LatentBlock(
+            self.block.name,
+            self.block.labels,
+            design,
+            self.block.precision,
+            self.block.constraints,
+        )
+
+
 def _family_extra_constraints(value: object, total_width: int) -> np.ndarray:
     """Validate a family's raw ``A x = e`` matrix against the latent width."""
     if value is None:
@@ -184,11 +229,12 @@ def _qualified_labels(blocks: tuple[LatentBlock, ...]) -> tuple[str, ...]:
 
 
 def _materialize_blocks(
-    blocks: tuple[ScalableBlock | ParametricBlock, ...], resolved: Mapping[str, float]
+    blocks: "tuple[ScalableBlock | ParametricBlock | ParametricDesignBlock, ...]",
+    resolved: Mapping[str, float],
 ) -> tuple[LatentBlock, ...]:
     materialized: list[LatentBlock] = []
     for item in blocks:
-        if isinstance(item, ParametricBlock):
+        if isinstance(item, (ParametricBlock, ParametricDesignBlock)):
             materialized.append(item.materialize(resolved))
             continue
         multiplier = resolved[item.parameter] if item.parameter else item.scale
@@ -316,7 +362,7 @@ class CompiledGaussianFamily:
             names = tuple(parameter_names)
         except TypeError as error:
             raise ModelValidationError("family blocks and parameter names must be iterable") from error
-        if any(not isinstance(item, (ScalableBlock, ParametricBlock)) for item in block_values):
+        if any(not isinstance(item, (ScalableBlock, ParametricBlock, ParametricDesignBlock)) for item in block_values):
             raise ModelValidationError("family blocks must be scalable or parametric blocks")
         if any(item.block.design.shape[0] != y_value.size for item in block_values):
             raise ModelValidationError("family block design rows must match the response")
@@ -338,7 +384,7 @@ class CompiledGaussianFamily:
             raise ModelValidationError("scalable block parameters must be unique")
         parametric_names: set[str] = set()
         for item in block_values:
-            if isinstance(item, ParametricBlock):
+            if isinstance(item, (ParametricBlock, ParametricDesignBlock)):
                 if not set(item.parameters) <= set(names):
                     raise ModelValidationError(
                         "parametric block parameters must appear in parameter_names"
@@ -466,7 +512,7 @@ class CompiledFamily:
             raise ModelValidationError("family arrays must have equal row counts")
         block_values = tuple(blocks)
         names = tuple(parameter_names)
-        if any(not isinstance(item, (ScalableBlock, ParametricBlock)) for item in block_values):
+        if any(not isinstance(item, (ScalableBlock, ParametricBlock, ParametricDesignBlock)) for item in block_values):
             raise ModelValidationError("family blocks must be scalable or parametric blocks")
         if any(item.block.design.shape[0] != y_value.size for item in block_values):
             raise ModelValidationError("family block design rows must match the response")
@@ -490,7 +536,7 @@ class CompiledFamily:
                     f"bound block parameter {parameter!r} must appear in parameter_names"
                 )
         for item in block_values:
-            if isinstance(item, ParametricBlock) and not set(item.parameters) <= set(names):
+            if isinstance(item, (ParametricBlock, ParametricDesignBlock)) and not set(item.parameters) <= set(names):
                 raise ModelValidationError(
                     "parametric block parameters must appear in parameter_names"
                 )
