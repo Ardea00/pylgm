@@ -8,6 +8,7 @@ from scipy.sparse import csr_matrix, diags
 from scipy.sparse.csgraph import connected_components
 
 from pylgm.effects.graph import design_from_graph, normalize_graph
+from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.ir.model import LatentBlock
 
 
@@ -32,18 +33,8 @@ def _scaled_structure(w: csr_matrix, nodes: tuple[str, ...], scale: bool) -> np.
         index = np.where(membership == component)[0]
         block = r[np.ix_(index, index)]
         # A connected component's ICAR Laplacian has exactly one null eigenvalue
-        # (the constant vector). np.linalg.pinv's default tolerance does not
-        # reliably discard it once a component grows beyond a few nodes -- the
-        # near-zero eigenvalue leaks back in as a huge spurious variance -- so
-        # drop that one eigenvalue explicitly via the eigendecomposition.
-        eigenvalues, eigenvectors = np.linalg.eigh(block)
-        inverse = np.zeros_like(eigenvalues)
-        inverse[1:] = 1.0 / eigenvalues[1:]
-        variances = np.einsum("ij,j,ij->i", eigenvectors, inverse, eigenvectors)
-        if not np.all(np.isfinite(variances)) or np.any(variances <= 0):
-            raise ValueError("ICAR scaling produced a non-positive marginal variance")
-        factor = float(np.exp(np.mean(np.log(variances))))
-        scaled[np.ix_(index, index)] = factor * block
+        # (the constant vector); drop it explicitly (see sorbye_rue_scale).
+        scaled[np.ix_(index, index)] = sorbye_rue_scale(block, null_dim=1)
     return scaled
 
 
