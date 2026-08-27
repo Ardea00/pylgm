@@ -17,6 +17,7 @@ from pylgm.effects import (
     Fixed,
     IID,
     MIDAS,
+    MIDASParametric,
     ProperCAR,
     RW1,
     RW2,
@@ -27,10 +28,12 @@ from pylgm.effects import (
     build_fixed,
     build_iid,
     build_midas,
+    build_midas_parametric,
     build_proper_car,
     build_random_walk,
     build_spacetime,
     midas_penalty,
+    midas_weights,
     normalize_graph,
 )
 from pylgm.effects.ar1 import ar1_structure
@@ -43,13 +46,14 @@ from pylgm.ir import (
     CompiledLGM,
     Hyperparameters,
     ParametricBlock,
+    ParametricDesignBlock,
     ScalableBlock,
 )
 from pylgm.inference.prediction import PredictionContext
 from pylgm.ir.model import LatentBlock, _block_constraints
 from pylgm.likelihoods import Bernoulli, CompiledGaussian, Gaussian, Poisson
 from pylgm.optimization.empirical_bayes import OptimizationBounds
-from pylgm.optimization.transforms import LogitTransform, LogTransform
+from pylgm.optimization.transforms import IdentityTransform, LogitTransform, LogTransform
 from pylgm.parameters import Hyperparameter
 
 if TYPE_CHECKING:
@@ -305,6 +309,11 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.columns, precision, effect.order, effect.ridge
                 )
                 precisions[effect.name] = precision
+            elif isinstance(effect, MIDASParametric):
+                theta = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
+                block = build_midas_parametric(
+                    frame, effect.name, effect.columns, effect.kernel, theta, effect.prior_precision
+                )
             elif isinstance(effect, SpaceTime):
                 precision = _resolved_precision(effect.precision)
                 block = build_spacetime(
@@ -421,6 +430,10 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
             found.append((effect.name, effect.phi))
         if isinstance(effect, AR1) and isinstance(effect.rho, Hyperparameter):
             found.append((effect.name, effect.rho))
+        if isinstance(effect, MIDASParametric):
+            for shape in (effect.shape1, effect.shape2):
+                if isinstance(shape, Hyperparameter):
+                    found.append((effect.name, shape))
     return found
 
 
@@ -438,6 +451,18 @@ def _log_bounds(hp: Hyperparameter) -> OptimizationBounds:
             "parameter (proper CAR rho, BYM2 phi, AR1 rho) resolves one"
         )
     return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=LogTransform())
+
+
+def _real_bounds(hp: Hyperparameter) -> OptimizationBounds:
+    """Bounds for a real-line (identity-transform) hyperparameter, e.g. an
+    exp-Almon MIDAS weight shape. The Hyperparameter already carries finite
+    lower/upper (defaulted symmetrically) under transform='identity'."""
+    if hp.transform != "identity":
+        raise CompilationError(
+            f"exp-Almon MIDAS shape {hp.name!r} must be declared transform='identity'; "
+            f"got transform={hp.transform!r}"
+        )
+    return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=IdentityTransform())
 
 
 def _bounded_parameter(
@@ -507,7 +532,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     )
     y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
 
-    scalable: list[ScalableBlock | ParametricBlock] = []
+    scalable: list[ScalableBlock | ParametricBlock | ParametricDesignBlock] = []
     parameter_names: list[str] = []
     parameter_bounds: dict[str, OptimizationBounds] = {}
     parameter_priors: dict[str, object] = {}
@@ -517,6 +542,48 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 effect.name, build_fixed, frame, effect.formula, effect.prior_precision
             )
             scalable.append(ScalableBlock(block, None, 1.0))
+            continue
+        if isinstance(effect, MIDASParametric):
+            # No `.precision` field (unlike every other effect below): the beta
+            # loading's prior precision is a fixed constant, not a named
+            # Hyperparameter, so this branch must precede `effect.precision`.
+            theta_init = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
+            template = _compiled_block(
+                effect.name, build_midas_parametric,
+                frame, effect.name, effect.columns, effect.kernel, theta_init, effect.prior_precision,
+            )
+            shapes = (effect.shape1, effect.shape2)
+            estimated = [s for s in shapes if isinstance(s, Hyperparameter)]
+            if not estimated:
+                # both shapes fixed: design bakes in, no per-theta rebuild
+                scalable.append(ScalableBlock(template, None, 1.0))
+                continue
+            name1 = effect.shape1.name if isinstance(effect.shape1, Hyperparameter) else None
+            name2 = effect.shape2.name if isinstance(effect.shape2, Hyperparameter) else None
+            fixed1 = None if name1 else float(effect.shape1)
+            fixed2 = None if name2 else float(effect.shape2)
+            columns, kernel, prior_precision = effect.columns, effect.kernel, effect.prior_precision
+            frame_ref = frame
+
+            def build(values, columns=columns, kernel=kernel, prior_precision=prior_precision,
+                      frame_ref=frame_ref, name1=name1, name2=name2, fixed1=fixed1, fixed2=fixed2):
+                theta = (
+                    values[name1] if name1 else fixed1,
+                    values[name2] if name2 else fixed2,
+                )
+                V = frame_ref[list(columns)].to_numpy(dtype=float)
+                w = midas_weights(kernel, len(columns), theta)
+                return csr_matrix((V @ w).reshape(-1, 1))
+
+            param_names = tuple(s.name for s in estimated)
+            scalable.append(ParametricDesignBlock(template, param_names, build))
+            for shape in estimated:
+                parameter_names.append(shape.name)
+                parameter_bounds[shape.name] = (
+                    _log_bounds(shape) if shape.transform == "log" else _real_bounds(shape)
+                )
+                if shape.prior is not None:
+                    parameter_priors[shape.name] = shape.prior
             continue
         precision = effect.precision
         optimized = isinstance(precision, Hyperparameter)
@@ -783,6 +850,12 @@ def build_prediction_context(
         elif isinstance(effect, MIDAS):
             # No index/one-hot: the design is the raw lag columns, rebuilt directly.
             entries.append(("midas", (effect.name, effect.columns)))
+        elif isinstance(effect, MIDASParametric):
+            theta_spec = tuple(
+                s.name if isinstance(s, Hyperparameter) else float(s)
+                for s in (effect.shape1, effect.shape2)
+            )
+            entries.append(("midas_parametric", (effect.name, effect.columns, effect.kernel, theta_spec)))
         elif isinstance(effect, SpaceTime):
             area_labels = tuple(label.split("|", 1)[0] for label in block.labels)
             time_labels = tuple(label.split("|", 1)[1] for label in block.labels)
