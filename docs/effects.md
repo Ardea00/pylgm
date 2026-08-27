@@ -153,6 +153,54 @@ for an end-to-end nowcasting run that recovers a known decaying kernel. **Not
 shipped**: parametric lag kernels (exp-Almon / Beta weight functions), a hybrid
 HF/LF nowcasting frontend, and a config-file `midas` effect type.
 
+## SpaceTime effect (Knorr-Held interaction)
+
+`SpaceTime(name, space, time, graph=None, interaction="IV", order=1, precision=1.0, scale=True)`
+builds the **interaction** term `δ(s,t)` of a Knorr-Held space-time model — one
+latent block over the `S·T` area×period cells with precision `τ·(K_s ⊗ K_t)`.
+The spatial (`Besag`) and temporal (`RW1`/`RW2`) main effects are composed with
+`+`; `SpaceTime` supplies only the interaction, keeping each term its own
+variance component.
+
+| `interaction` | `K_s` | `K_t` | Reading |
+|------|-------|-------|---------|
+| `"I"`   | `I_s` | `I_t` | unstructured cell-wise interaction (proper) |
+| `"II"`  | `I_s` | `R_t` | each area its own independent temporal trend |
+| `"III"` | `R_s` | `I_t` | each period its own independent spatial pattern |
+| `"IV"`  | `R_s` | `R_t` | inseparable: neighbours in *both* space and time tied |
+
+`R_s` is the (weighted) Sørbye–Rue-scaled Besag Laplacian; `R_t` the scaled RW
+structure of the given `order`. `graph` is **required for III/IV** and optional
+for I/II (the area universe is then read from the observed `space` column).
+`precision` is a single `τ` — a float (plug-in) or a `Hyperparameter`
+(estimated by EB, integrated by INLA).
+
+```python
+from pylgm import Besag, Fixed, Gaussian, LGM, RW1, SpaceTime
+
+model = LGM(
+    response="y",
+    predictor=(
+        Fixed("1")
+        + Besag("area", index="area", graph=W)
+        + RW1("period", index="t")
+        + SpaceTime("st", space="area", time="t", graph=W, interaction="IV", order=1)
+    ),
+    likelihood=Gaussian(sigma=0.5),
+)
+result = model.fit(frame)
+```
+
+Type I is proper and carries no constraint, so it runs under all latent
+strategies including `latent_strategy="laplace"`. Types II–IV carry the
+Knorr-Held / Schrödle–Held sum-to-zero constraints (derived from the Kronecker
+null space), so — like `RW2` and `Besag` — they require
+`hyperparameters="integrate"` and are rejected under full Laplace. The compiler
+emits a one-line warning if a `SpaceTime` effect is present without its spatial
+and temporal main effects, since the constraints assume those absorb the
+marginals. The latent field is dense `S·T`, so the >4096-dim preflight guard
+bites at large grids — real economic scale is gated on the sparse backend.
+
 ## Linear constraints (`extraconstr`)
 
 `LGM(..., constraints=...)` imposes arbitrary linear constraints `A x = e` on
