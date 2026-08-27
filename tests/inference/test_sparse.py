@@ -40,11 +40,13 @@ def test_partition_splits_fixed_from_field(besag_with_intercept_model):
     # Fixture builds Fixed("1") + Besag(...) compiled model (see conftest).
     sparse_index, dense_index = _partition_blocks(besag_with_intercept_model)
     labels = besag_with_intercept_model.labels
-    # The intercept (Fixed, zero prior precision) lands in the dense block.
+    # The intercept (Fixed) has an all-ones design touching every
+    # observation, so it lands in the dense block by design-column density.
     # Fixed("1") compiles the intercept column as "Intercept" (formula-library
     # convention), so the qualified label is "fixed:Intercept", not "fixed:1".
     dense_labels = {labels[i] for i in dense_index}
     assert any(label.endswith(":Intercept") for label in dense_labels)
-    # Every Besag column (nonzero prior precision) lands in the sparse block.
+    # Every Besag column has an incidence design (one cell each), so
+    # it lands in the sparse block.
     assert len(sparse_index) + len(dense_index) == len(labels)
     assert set(sparse_index).isdisjoint(dense_index)

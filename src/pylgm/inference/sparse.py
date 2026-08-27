@@ -39,27 +39,34 @@ class SparseSpdFactor:
 def _partition_blocks(model: CompiledLGM) -> tuple[np.ndarray, np.ndarray]:
     """Split latent columns into the sparse field block and the dense fixed block.
 
-    A block with an all-zero prior precision is an improper/flat effect (a
-    ``Fixed`` covariate or intercept). Its design column couples to many
-    observations, so ``Z^T Z`` would densify a joint sparse factor -- it is
-    quarantined into the small dense block. Every structured GMRF field
-    (IID / RW / Besag / proper_car / AR1 / space-time) carries a nonzero prior
-    precision and an incidence-like design, so it stays sparse.
+    Route a block to the small dense (Schur) block when any of its design
+    columns is nonzero on more than half the observations. That is exactly the
+    intercept / continuous-covariate pattern Approach A must quarantine: a
+    globally-coupling column turns ``Z^T Z`` into a dense row and densifies the
+    sparse factor. Every structured GMRF field (IID / RW / Besag / proper_car /
+    AR1 / space-time) has an incidence-like design whose columns each touch only
+    their own cell's observations, so it stays sparse.
 
-    ponytail: criterion is precision.nnz==0, which is exact for the in-scope
-    spatial models. A structured block with a *dense* design (e.g. MIDAS lag
-    columns) would be misrouted into the sparse block and densify A_s. MIDAS at
-    scale is out of scope (E-sparse targets spatial models); such a model still
-    fits via the dense path under allow_large_dense. Upgrade path: also test
-    design column density here and raise a clear unsupported error.
+    The criterion tracks the actual fill-in cause, not the effect's nominal
+    type, so it is self-correcting: a tiny field with a dense column routes
+    dense harmlessly (the Schur block stays small), and a high-cardinality
+    categorical ``Fixed`` effect with sparse dummy columns routes sparse and
+    factors fine.
+
+    ponytail: threshold is 0.5 of observations. A structured block with a
+    genuinely dense design (e.g. MIDAS lag columns) would route dense and
+    enlarge the Schur block; MIDAS at scale is out of scope (E-sparse targets
+    spatial models) and still fits via the dense path under allow_large_dense.
     """
+    n_obs = model.blocks[0].design.shape[0] if model.blocks else 0
     sparse_cols: list[int] = []
     dense_cols: list[int] = []
     start = 0
     for block in model.blocks:
         width = block.design.shape[1]
         columns = range(start, start + width)
-        if block.precision.nnz == 0:
+        col_nnz = block.design.getnnz(axis=0)
+        if n_obs and col_nnz.max() > 0.5 * n_obs:
             dense_cols.extend(columns)
         else:
             sparse_cols.extend(columns)

@@ -4,7 +4,8 @@ import pytest
 from scipy.sparse import block_diag, csr_matrix
 
 from pylgm.effects.besag import build_besag
-from pylgm.ir.model import CompiledLGM, LatentBlock
+from pylgm.effects.fixed import build_fixed
+from pylgm.ir.model import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
 # Small connected chain graph over regions "0".."3": i <-> i-1, i <-> i+1.
@@ -18,28 +19,18 @@ _GRAPH = {
 def besag_with_intercept_model() -> CompiledLGM:
     """A compiled ``Fixed("1") + Besag(...)`` model on a tiny connected graph.
 
-    Built from the same ``LatentBlock``/``CompiledLGM`` constructors and
-    ``build_besag`` helper the rest of the compiler uses (see
-    ``tests/inference/test_gaussian.py`` for the same direct-construction
-    pattern), rather than through ``LGM(...).fit(...)``: the public ``Fixed``
-    effect (``src/pylgm/effects/spec.py``) enforces ``prior_precision > 0``
-    (default ``1e-6`` ridge), so it can never compile to an exactly
-    zero-nnz precision block. ``_partition_blocks``'s dense/sparse criterion
-    is ``precision.nnz == 0``, so the fixed block here is built with a real
-    all-zero precision to exercise that branch; a formula-compiled Fixed
-    intercept currently always keeps its tiny ridge and would (correctly, by
-    the stated criterion) land in the sparse block instead.
+    Built from the real ``build_fixed`` / ``build_besag`` compiler helpers and
+    the ``LatentBlock`` / ``CompiledLGM`` constructors (the same direct-
+    construction pattern ``tests/inference/test_gaussian.py`` uses), so the
+    fixed block carries its real ``1e-6`` ridge precision and an all-ones
+    intercept design. ``_partition_blocks`` routes it to the dense block by
+    design-column density (the intercept touches every observation), which is
+    what Approach A must quarantine.
     """
     regions = [str(i) for i in range(4)]
     frame = pd.DataFrame({"region": regions, "y": [1.0, 2.0, 1.5, 2.5]})
 
-    fixed_block = LatentBlock(
-        name="fixed",
-        labels=("Intercept",),
-        design=csr_matrix(np.ones((4, 1))),
-        precision=csr_matrix((1, 1)),
-        constraints=np.empty((0, 1)),
-    )
+    fixed_block = build_fixed(frame, "1", 1e-6)
     region_block = build_besag(frame, "region", "region", _GRAPH, precision=1.0)
 
     blocks = (fixed_block, region_block)
