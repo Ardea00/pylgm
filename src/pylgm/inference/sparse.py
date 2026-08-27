@@ -149,6 +149,17 @@ def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) 
     return total
 
 
+def selected_inverse_diagonal(factor: "SparseSpdFactor", indices: np.ndarray) -> np.ndarray:
+    """Diagonal of the inverse at ``indices`` -- posterior marginal variances.
+
+    The single plug-point for E-sparse-C: the Takahashi selected-inversion
+    recursion replaces this body and nothing else in the call path changes.
+    """
+    raise NotImplementedError(
+        "sparse posterior variances (selected inversion) pending E-sparse-C"
+    )
+
+
 def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     """Partitioned Schur solve, matching ``gaussian._fit_dense``.
 

@@ -215,3 +215,12 @@ def test_sparse_matches_dense_extraconstr(besag_extraconstr_model):
     sparse = sparse_constrained_gaussian(model)
     assert np.allclose(sparse.mean, dense.mean, atol=1e-7)
     assert np.isclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6)
+
+
+def test_selected_inverse_diagonal_raises():
+    from scipy.sparse import csr_matrix
+    from pylgm.inference.sparse import SparseSpdFactor, selected_inverse_diagonal
+
+    factor = SparseSpdFactor(csr_matrix(np.eye(3)), "id")
+    with pytest.raises(NotImplementedError, match="E-sparse-C"):
+        selected_inverse_diagonal(factor, np.array([0, 1, 2]))
