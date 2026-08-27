@@ -139,7 +139,8 @@ def _is_connected_intrinsic(rows: np.ndarray, precision) -> bool:
     if norm == 0:
         return False
     ones = np.ones_like(r)
-    if not np.allclose(np.abs(r) / norm, ones / np.linalg.norm(ones)):
+    unit, ref = r / norm, ones / np.linalg.norm(ones)
+    if not (np.allclose(unit, ref) or np.allclose(unit, -ref)):
         return False
     q1 = np.asarray(precision @ ones, dtype=float).ravel()
     scale = abs(precision).max() if precision.nnz else 1.0

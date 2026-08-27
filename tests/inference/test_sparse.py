@@ -286,3 +286,5 @@ def test_prior_logdet_cofactor_matches_dense_reference():
     from scipy.sparse import identity
     assert _is_connected_intrinsic(rows, (2.0 * identity(n)).tocsr()) is False
     assert _is_connected_intrinsic(np.vstack([np.ones(n), np.r_[np.ones(20), -np.ones(20)]]), Q) is False
+    mixed = np.array([[1.0, -1.0] * (n // 2)])
+    assert _is_connected_intrinsic(mixed, Q) is False
