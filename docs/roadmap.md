@@ -13,6 +13,10 @@ For the precise semantics of each shipped feature, follow the links into the
   mixed-frequency smooth-lag effect and its restricted (parametric)
   `MIDASParametric` counterpart (exp-Almon / Beta lag kernels), and the
   Knorr-Held `SpaceTime` interaction (Types I–IV). See [effects](effects.md).
+- **Hybrid composition** — a mixed-frequency `MIDAS` term, a spatial `BYM2`
+  term, and a temporal `AR1` term sum through `+` into one latent field that
+  fits and predicts, demonstrated end to end in
+  [`examples/hybrid_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/hybrid_nowcast).
 - **Spatial (CAR) family** — `Besag` (ICAR), `ProperCAR` (with `ρ` fixed or
   estimated), and `BYM2` (with `φ` fixed or estimated), complete for the dense
   reference regime. Graphs may be **weighted** (`{node: {neighbour: weight}}`),
