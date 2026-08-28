@@ -3,14 +3,21 @@ import pytest
 from scipy.sparse import csr_matrix, eye
 from scipy.special import logsumexp
 
-from pylgm.exceptions import OptimizationError
+from pylgm.exceptions import DenseReferenceLimitError, OptimizationError
 from pylgm.ir import CompiledFamily
 from pylgm.ir.family import ScalableBlock
 from pylgm.ir.model import LatentBlock
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.inference import fit_gaussian
+from pylgm.inference.gaussian import _fit_dense, _fit_sparse
+import pylgm.inference.gaussian as gaussian_module
 from pylgm.optimization.empirical_bayes import OptimizationBounds
-from pylgm.optimization.inla import _build_grid, _finite_difference_hessian, integrate_inla
+from pylgm.optimization.inla import (
+    _build_grid,
+    _conditional_latent_variances,
+    _finite_difference_hessian,
+    integrate_inla,
+)
 from pylgm.optimization.transforms import LogitTransform, LogTransform
 
 
@@ -191,3 +198,46 @@ def test_integrate_inla_with_logit_transform_matches_fine_1d_quadrature():
     np.testing.assert_allclose(hyper.mean[0], ref_mean, atol=1e-2)
     np.testing.assert_allclose(hyper.variance[0], ref_var, atol=1e-2)
     assert result.diagnostics["inla_grid_points"] >= 3
+
+
+def test_conditional_latent_variances_matches_dense_diagonal():
+    """_conditional_latent_variances agrees with diag(dense covariance) when a
+    conditional fit of the same model is sparse instead of dense."""
+    family = _one_hyperparameter_family()
+    model = family.materialize({"p": 1.0})
+    dense = _fit_dense(model)
+    sparse = _fit_sparse(model)
+    np.testing.assert_allclose(
+        _conditional_latent_variances(sparse),
+        np.diag(dense.covariance),
+        atol=1e-7,
+    )
+
+
+def test_integrate_inla_sparse_conditional_diagonal_integration(monkeypatch):
+    """INLA integrates diagonal latent + predictive variances when conditionals
+    are sparse (forced via the same dense-guard monkeypatch used in
+    tests/inference/test_sparse.py), matching a dense INLA fit of the same
+    model to ~1e-6."""
+    family = _one_hyperparameter_family()
+    bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+
+    dense_result = integrate_inla(family, bounds, fit=fit_gaussian)
+
+    monkeypatch.setattr(gaussian_module, "_MAX_DENSE_LATENT_DIMENSION", 1)
+    sparse_result = integrate_inla(family, bounds, fit=fit_gaussian)
+
+    assert sparse_result.diagnostics["inla_conditional_engine"] == "exact_gaussian"
+
+    dense_variance = dense_result.latent_marginals().variance
+    sparse_variance = sparse_result.latent_marginals().variance
+    assert np.isfinite(sparse_variance).all()
+    assert np.isfinite(sparse_result.predictive_variance).all()
+    np.testing.assert_allclose(sparse_result.mean, dense_result.mean, atol=1e-6)
+    np.testing.assert_allclose(sparse_variance, dense_variance, atol=1e-6)
+    np.testing.assert_allclose(
+        sparse_result.predictive_variance, dense_result.predictive_variance, atol=1e-6
+    )
+
+    with pytest.raises(DenseReferenceLimitError):
+        sparse_result.covariance

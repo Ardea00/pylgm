@@ -24,6 +24,23 @@ _SN_R_MAX = 5.0  # cap on |a/omega| for robustness (|skew| ~ 0.937 at r=5, shy o
 _SCALE_FLOOR = 1e-12  # degenerate (sigma_i == 0) coordinate: near-point-mass marginal
 
 
+def _conditional_latent_variances(fit) -> np.ndarray:
+    """diag(Sigma) of a conditional fit, dense or sparse."""
+    posterior = getattr(fit, "_sparse_posterior", None)
+    if posterior is not None and fit._covariance is None:
+        return posterior.marginal_variances()
+    return np.diag(np.asarray(fit.covariance, float))
+
+
+def _conditional_predictive_variances(fit, dense_design) -> np.ndarray:
+    """diag(design Sigma design^T) of a conditional fit, dense or sparse."""
+    posterior = getattr(fit, "_sparse_posterior", None)
+    if posterior is not None and fit._covariance is None:
+        return posterior.predictive_variances(dense_design)
+    cov = np.asarray(fit.covariance, float)
+    return np.einsum("ij,jk,ik->i", dense_design, cov, dense_design)
+
+
 def _solve_omega(r: np.ndarray) -> np.ndarray:
     # solve omega^2 (1 - 2 delta(omega)^2 / pi) = 1, delta = r*omega/sqrt(1+r^2 omega^2)
     # monotone increasing in omega on (0, inf); bisection (vectorized).
@@ -310,8 +327,16 @@ def integrate_inla(
     is_laplace = isinstance(reference, LaplaceResult)
     link_name = reference.link_name if is_laplace else None
 
+    # All grid conditionals share the model shape, so they are all-sparse or
+    # all-dense together -- one flag governs the whole accumulation loop.
+    sparse_conditionals = (
+        getattr(reference, "_sparse_posterior", None) is not None
+        and reference._covariance is None
+    )
+
     mean_acc = np.zeros_like(reference.mean)
-    cov_acc = np.zeros_like(reference.covariance)
+    cov_acc = None if sparse_conditionals else np.zeros_like(reference.covariance)
+    var_acc = np.zeros_like(reference.mean) if sparse_conditionals else None
     pm_acc = np.zeros_like(reference.predictive_mean)
     pv_acc = np.zeros_like(reference.predictive_variance)
     fitted_acc = np.zeros_like(reference.fitted_mean) if is_laplace else None
@@ -325,7 +350,10 @@ def integrate_inla(
         m = cond.mean
         pm = cond.predictive_mean
         mean_acc += w * m
-        cov_acc += w * (cond.covariance + np.outer(m, m))
+        if sparse_conditionals:
+            var_acc += w * (_conditional_latent_variances(cond) + m * m)
+        else:
+            cov_acc += w * (cond.covariance + np.outer(m, m))
         pm_acc += w * pm
         pv_acc += w * (cond.predictive_variance + pm * pm)
         if is_laplace:
@@ -337,7 +365,12 @@ def integrate_inla(
             theta_sq[name] += w * theta[name] * theta[name]
 
     mean = mean_acc
-    covariance = cov_acc - np.outer(mean, mean)
+    if sparse_conditionals:
+        covariance = None
+        latent_variance = var_acc - mean * mean
+    else:
+        covariance = cov_acc - np.outer(mean, mean)
+        latent_variance = None
     predictive_mean = pm_acc
     predictive_variance = pv_acc - pm_acc * pm_acc
 
@@ -365,7 +398,11 @@ def integrate_inla(
     for name in names:
         diagnostics[f"inla_mode_{name}"] = float(eb.parameters[name])
 
-    for label, value in (("mean", mean), ("covariance", covariance),
+    covariance_check = (
+        ("latent variance", latent_variance) if sparse_conditionals
+        else ("covariance", covariance)
+    )
+    for label, value in (("mean", mean), covariance_check,
                          ("predictive mean", predictive_mean),
                          ("predictive variance", predictive_variance)):
         if not np.isfinite(value).all():
@@ -398,6 +435,15 @@ def integrate_inla(
 
     latent_marginal_table = None
     if latent_strategy == "simplified_laplace":
+        # ponytail: simplified-Laplace needs the off-diagonal cov(x_i, eta_j) =
+        # Sigma @ design^T, which the diagonal sparse posterior cannot supply.
+        # Guard rather than densify. Upgrade path: column-wise Sigma @ design^T
+        # via the posterior factor if this strategy is needed above the guard.
+        if sparse_conditionals:
+            raise UnsupportedEngineError(
+                "simplified-Laplace latent marginals are not available above the "
+                "sparse guard; use latent_strategy='gaussian'"
+            )
         location, scale, shape, sla_weights, clamped_count = _simplified_laplace_marginals(
             design_obs, offset_obs, y_obs, theta_grid,
         )
@@ -408,6 +454,11 @@ def integrate_inla(
             raise UnsupportedEngineError(
                 "full Laplace does not support constrained (RW) effects; "
                 "use latent_strategy='gaussian' or 'simplified_laplace'"
+            )
+        if sparse_conditionals:
+            raise UnsupportedEngineError(
+                "full Laplace latent marginals are not available above the sparse "
+                "guard; use latent_strategy='gaussian' or 'simplified_laplace'"
             )
         laplace_grid = [
             (w, cond, compiled.likelihood, compiled.precision)
@@ -424,7 +475,7 @@ def integrate_inla(
         fitted_mean=fitted_acc, link_name=link_name,
         observation_variance=observation_acc,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
-        latent_marginal_table=latent_marginal_table,
+        latent_marginal_table=latent_marginal_table, latent_variances=latent_variance,
     )
 
 
@@ -451,7 +502,7 @@ def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshol
 
     for weight, fit, likelihood in points:
         m = offset + np.asarray(dense @ fit.mean).reshape(-1)
-        v = np.clip(np.einsum("ij,jk,ik->i", dense, np.asarray(fit.covariance), dense), 0.0, None)
+        v = np.clip(_conditional_predictive_variances(fit, dense), 0.0, None)
         mbar += weight * m
         eta = m[:, None] + np.sqrt(2.0 * v)[:, None] * nodes[None, :]     # (n, n_nodes)
         logp = np.stack([likelihood.pointwise_log_density(eta[:, j], y) for j in range(n_nodes)], axis=1)

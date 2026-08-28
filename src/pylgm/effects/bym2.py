@@ -4,11 +4,15 @@ from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import bmat, csr_matrix, diags, hstack, identity
+from scipy.sparse.csgraph import connected_components
 
 from pylgm.effects.besag import _scaled_structure
 from pylgm.effects.graph import design_from_graph, normalize_graph
+from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.ir.model import LatentBlock
+
+_BYM2_AUGMENT_NODES = 1024
 
 
 def bym2_spectrum(graph: Mapping) -> tuple[np.ndarray, np.ndarray]:
@@ -42,6 +46,46 @@ def bym2_precision(
     return csr_matrix(dense)
 
 
+def _build_bym2_augmented(
+    frame: pd.DataFrame,
+    name: str,
+    index: str,
+    graph: Mapping,
+    precision: float,
+    phi: float,
+) -> LatentBlock:
+    """Augmented (x, u*) BYM2 block: 2n latent, sparse joint precision, sum-to-zero
+    on u* only. Reproduces the dense BYM2 x-marginal exactly and scales (no
+    eigendecomposition). Selected for large connected graphs.
+    """
+    if not 0.0 <= phi < 1.0:
+        raise ValueError(f"phi must lie in [0, 1); got {phi}")
+    nodes, w = normalize_graph(graph)
+    n = len(nodes)
+    n_components, _ = connected_components(w, directed=False)
+    if n_components != 1:
+        # ponytail: augmented path assumes null = (√φ·1, 1) over one component.
+        # Per-component augmentation is out of this slice; small multi-component
+        # BYM2 still fits via the dense spectral path.
+        raise NotImplementedError(
+            "augmented BYM2 requires a single connected graph component"
+        )
+    degree = np.asarray(w.sum(axis=1)).ravel()
+    rstar = sorbye_rue_scale((diags(degree) - w).tocsc(), null_dim=1)  # sparse R*
+    a = 1.0 / (1.0 - phi)
+    b = -np.sqrt(phi) / (1.0 - phi)
+    d = phi / (1.0 - phi)
+    ident = identity(n, format="csr")
+    joint = (precision * bmat([[a * ident, b * ident],
+                               [b * ident, rstar + d * ident]], format="csr")).tocsr()
+    x_design = design_from_graph(nodes, frame, index)  # n_obs x n
+    design = hstack([x_design, csr_matrix((x_design.shape[0], n))], format="csr")
+    labels = tuple(nodes) + tuple(f"{node}__u" for node in nodes)
+    constraints = np.zeros((1, 2 * n))
+    constraints[0, n:] = 1.0
+    return LatentBlock(name, labels, design, joint, constraints)
+
+
 def build_bym2(
     frame: pd.DataFrame,
     name: str,
@@ -51,6 +95,8 @@ def build_bym2(
     phi: float,
 ) -> LatentBlock:
     nodes, _ = normalize_graph(graph)
+    if len(nodes) > _BYM2_AUGMENT_NODES:
+        return _build_bym2_augmented(frame, name, index, graph, precision, phi)
     design = design_from_graph(nodes, frame, index)
     vectors, values = bym2_spectrum(graph)
     precision_matrix = bym2_precision(vectors, values, precision, phi)

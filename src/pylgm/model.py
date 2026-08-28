@@ -157,14 +157,18 @@ def _rebuild_result(
     unchanged, so callers only pass what they mean to change.
     """
     predictive_mean = result.predictive_mean
-    predictive_variance = result.predictive_variance
+    # ponytail: read result._covariance/_predictive_variance (private) here --
+    # _rebuild_result reconstructs the object, so it needs the raw stored value,
+    # not the pending-C-raising public property.
+    predictive_variance = result._predictive_variance
     if caller_order is not None:
         predictive_mean = predictive_mean[caller_order]
-        predictive_variance = predictive_variance[caller_order]
+        if predictive_variance is not None:
+            predictive_variance = predictive_variance[caller_order]
     common = dict(
         labels=result.labels,
         mean=result.mean,
-        covariance=result.covariance,
+        covariance=result._covariance,
         log_marginal_likelihood=result.log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
@@ -198,9 +202,20 @@ def _rebuild_result(
             link_name=result.link_name,
             latent_marginal_table=result.latent_marginal_table,
             observation_variance=result.observation_variance,
+            # ponytail: latent_variances is a full-latent diagonal (not row-indexed
+            # like predictive_mean/predictive_variance), so caller_order does not
+            # permute it -- straight pass-through is correct.
+            latent_variances=getattr(result, "_latent_variances", None),
             **common,
         )
-    return GaussianResult(observation_variance=result.observation_variance, **common)
+    # ponytail: caller_order only permutes prediction rows (predictive_mean/
+    # predictive_variance above), never the latent index space, so the sparse
+    # posterior needs no reindexing -- straight pass-through is correct.
+    return GaussianResult(
+        observation_variance=result.observation_variance,
+        sparse_posterior=getattr(result, "_sparse_posterior", None),
+        **common,
+    )
 
 
 def _align_predictions_with_source_rows(

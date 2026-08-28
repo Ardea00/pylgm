@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, diags
+from scipy.sparse.linalg import eigsh
 
 from pylgm.effects.graph import design_from_graph, normalize_graph
 from pylgm.ir.model import LatentBlock
@@ -21,16 +22,24 @@ def _validity_interval(
     positive-definiteness margin directly (robust to the round-off that makes
     ``1/mu_max`` land just above the true boundary rho=1).
     """
-    # ponytail: dense eigvalsh of the normalized adjacency, O(n^3); fine for the
-    # dense reference regime (hundreds of regions). Use scipy.sparse.linalg.eigsh
-    # for the two extreme eigenvalues if graphs grow to thousands of nodes.
+    n = len(degree)
+    isolated = np.flatnonzero(degree == 0)
+    if isolated.size:
+        raise ValueError(
+            "proper CAR rho interval is undefined for isolated nodes "
+            f"(regions have no neighbours): node indices {isolated.tolist()!r}"
+        )
     inv_sqrt = 1.0 / np.sqrt(degree)
-    dense = w.toarray()
-    normalized = (dense * inv_sqrt[:, None]) * inv_sqrt[None, :]
+    normalized = diags(inv_sqrt) @ w @ diags(inv_sqrt)
     normalized = 0.5 * (normalized + normalized.T)  # symmetrize against round-off
-    mu = np.linalg.eigvalsh(normalized)
-    mu_min = float(mu[0])
-    mu_max = float(mu[-1])
+    if n <= 2:
+        # ponytail: eigsh needs k<n-1; tiny graphs go dense — trivially cheap.
+        mu = np.linalg.eigvalsh(normalized.toarray())
+        mu_min = float(mu[0])
+        mu_max = float(mu[-1])
+    else:
+        mu_min = float(eigsh(normalized, k=1, which="SA", return_eigenvectors=False)[0])
+        mu_max = float(eigsh(normalized, k=1, which="LA", return_eigenvectors=False)[0])
     lower = 1.0 / mu_min if mu_min < 0 else float("-inf")
     upper = 1.0 / mu_max if mu_max > 0 else float("inf")
     return lower, upper, mu_min, mu_max

@@ -258,6 +258,38 @@ def predict_from(
     )
 
 
+def predict_from_sparse(
+    context: PredictionContext,
+    mean: np.ndarray,
+    sparse_posterior,
+    new_data: pd.DataFrame,
+) -> "Prediction":
+    """Like ``predict_from``, but predictive variance comes from the sparse
+    posterior (``diag(design @ Sigma_c @ design.T)``) instead of a dense
+    covariance -- for results past the dense-materialisation guard.
+    """
+    design = _design_for(context, new_data)
+    mean = np.asarray(mean, dtype=float)
+    offset = _offset_for(context, new_data)
+
+    eta = np.asarray(design @ mean + offset, dtype=float)
+    predictive_variance = np.asarray(sparse_posterior.predictive_variances(design), dtype=float)
+
+    likelihood = context.likelihood
+    fitted_mean = np.asarray(likelihood.response_prediction(eta, predictive_variance), dtype=float)
+
+    _require_finite("predictive mean", eta)
+    _require_finite("predictive variance", predictive_variance)
+    _require_finite("fitted mean", fitted_mean)
+
+    return Prediction(
+        predictive_mean=eta,
+        predictive_variance=predictive_variance,
+        fitted_mean=fitted_mean,
+        keys=new_data.index,
+    )
+
+
 @dataclass(frozen=True, init=False)
 class Prediction:
     """Out-of-sample scores for rows not passed to ``fit``."""

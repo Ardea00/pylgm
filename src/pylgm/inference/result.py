@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -9,6 +9,21 @@ from scipy.integrate import cumulative_trapezoid
 from scipy.sparse import csr_matrix
 from scipy.special import owens_t
 from scipy.stats import norm
+
+from pylgm.exceptions import DenseReferenceLimitError
+
+if TYPE_CHECKING:
+    # result.py must not import sparse.py at runtime -- sparse.py imports
+    # helpers from gaussian.py, which imports GaussianResult from here, so a
+    # top-level import of SparsePosterior would be circular.
+    from pylgm.inference.sparse import SparsePosterior
+
+
+_PENDING_C = (
+    "posterior covariance is unavailable on the sparse path "
+    "(pending E-sparse-C); only mean, marginal likelihood, and predictive_mean "
+    "are available for large models fitted through the sparse solver"
+)
 
 
 _IMMUTABLE_DIAGNOSTIC_TYPES = (
@@ -221,6 +236,34 @@ def linear_combinations_from(
     roundoff_tolerance = _roundoff_tolerances(weights, covariance)
     variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
     return GaussianMarginals(result_mean, variance)
+
+
+def latent_marginals_from_variances(
+    mean: np.ndarray,
+    variances: np.ndarray,
+    block_slices: Mapping[str, slice],
+    block: str | None = None,
+) -> "GaussianMarginals":
+    """Same selection semantics as ``latent_marginals_from``, but from a
+    precomputed variance vector (sparse path -- no full covariance)."""
+    if block is None:
+        selection = slice(None)
+    else:
+        try:
+            selection = block_slices[block]
+        except (KeyError, TypeError) as error:
+            raise KeyError(f"unknown latent block {block!r}") from error
+    return GaussianMarginals(mean[selection], variances[selection])
+
+
+def linear_combinations_from_variances(
+    mean: np.ndarray,
+    variances: np.ndarray,
+    weights: csr_matrix | np.ndarray,
+) -> "GaussianMarginals":
+    """Mean projection with a precomputed variance vector (sparse path)."""
+    result_mean = np.asarray(weights @ mean).reshape(-1)
+    return GaussianMarginals(result_mean, np.asarray(variances, float))
 
 
 @dataclass(frozen=True, init=False)
@@ -565,19 +608,25 @@ class _BaseResult:
         if extra_validate is not None:
             extra_validate()
         _validate_prediction_keys(prediction_keys, predictive_mean)
-        covariance = np.asarray(covariance)
-        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
-            covariance
-        ):
-            raise TypeError("covariance must have a real numeric dtype")
-        if not np.isfinite(covariance).all():
-            raise ValueError("covariance must be finite")
+        if covariance is None:
+            object.__setattr__(self, "_covariance", None)
+        else:
+            covariance = np.asarray(covariance)
+            if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
+                covariance
+            ):
+                raise TypeError("covariance must have a real numeric dtype")
+            if not np.isfinite(covariance).all():
+                raise ValueError("covariance must be finite")
+            object.__setattr__(self, "_covariance", _readonly_array(covariance))
         object.__setattr__(self, "labels", tuple(labels))
         object.__setattr__(self, "_mean", _readonly_array(mean))
-        object.__setattr__(self, "_covariance", _readonly_array(covariance))
         object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
         object.__setattr__(self, "_predictive_mean", _readonly_array(predictive_mean))
-        object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
+        if predictive_variance is None:
+            object.__setattr__(self, "_predictive_variance", None)
+        else:
+            object.__setattr__(self, "_predictive_variance", _readonly_array(predictive_variance))
         # The subclasses' own fields are stored HERE, not after this call: the
         # storage below is not inert -- _readonly_diagnostics and
         # _readonly_hyperparameters both validate -- so running it first would
@@ -609,6 +658,20 @@ class _BaseResult:
 
     @property
     def covariance(self) -> np.ndarray:
+        if self._covariance is None:
+            if getattr(self, "_latent_variances", None) is not None:
+                raise DenseReferenceLimitError(
+                    "integrated posterior covariance is not materialised at this scale; "
+                    "use latent_marginals() for the marginal variances"
+                )
+            if getattr(self, "_sparse_posterior", None) is not None:
+                raise DenseReferenceLimitError(
+                    "posterior covariance is not materialised at this scale; use "
+                    "latent_marginals()/linear_combinations()/predict() for the "
+                    "marginal and projected variances, or sparse_posterior."
+                    "covariance_dense() to force the full matrix"
+                )
+            raise NotImplementedError(_PENDING_C)
         return _readonly_array(self._covariance)
 
     @property
@@ -625,6 +688,8 @@ class _BaseResult:
         For a Gaussian likelihood, add ``GaussianResult.observation_variance`` to
         recover the response-scale (fitted-value) predictive variance.
         """
+        if self._predictive_variance is None:
+            raise NotImplementedError(_PENDING_C)
         return _readonly_array(self._predictive_variance)
 
     @property
@@ -661,12 +726,26 @@ class _BaseResult:
         return True
 
     def latent_marginals(self, block: str | None = None) -> GaussianMarginals:
+        if self._covariance is None:
+            sparse_posterior = getattr(self, "_sparse_posterior", None)
+            if sparse_posterior is not None:
+                variances = sparse_posterior.marginal_variances()
+                return latent_marginals_from_variances(
+                    self._mean, variances, self.block_slices, block
+                )
+            raise NotImplementedError(_PENDING_C)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
         return MappingProxyType({})
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
+        if self._covariance is None:
+            sparse_posterior = getattr(self, "_sparse_posterior", None)
+            if sparse_posterior is not None:
+                variances = sparse_posterior.linear_combination_variances(weights)
+                return linear_combinations_from_variances(self._mean, variances, weights)
+            raise NotImplementedError(_PENDING_C)
         return linear_combinations_from(self._mean, self._covariance, weights)
 
     def predict(self, new_data):
@@ -677,8 +756,18 @@ class _BaseResult:
         posterior (marginalized over the hyperparameter grid), not a
         posterior conditional on a single hyperparameter value.
         """
-        from pylgm.inference.prediction import predict_from
+        from pylgm.inference.prediction import predict_from, predict_from_sparse
 
+        if self._covariance is None:
+            sparse_posterior = getattr(self, "_sparse_posterior", None)
+            if sparse_posterior is None:
+                raise NotImplementedError(_PENDING_C)
+            if self.prediction_context is None:
+                raise ValueError(
+                    "this result carries no prediction context; predict() is available "
+                    "on results produced by LGM.fit"
+                )
+            return predict_from_sparse(self.prediction_context, self.mean, sparse_posterior, new_data)
         if self.prediction_context is None:
             raise ValueError(
                 "this result carries no prediction context; predict() is available "
@@ -692,6 +781,7 @@ class GaussianResult(_BaseResult):
     _ENGINE = "exact_gaussian"
 
     observation_variance: float | None
+    _sparse_posterior: "SparsePosterior | None" = field(repr=False)
 
     def __init__(
         self,
@@ -708,12 +798,21 @@ class GaussianResult(_BaseResult):
         *,
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
+        sparse_posterior: "SparsePosterior | None" = None,
     ) -> None:
         def _validate_observation_variance() -> None:
             if observation_variance is None:
                 return
             if not np.isfinite(observation_variance) or observation_variance < 0:
                 raise ValueError("observation_variance must be finite and non-negative")
+
+        def _store_gaussian_extras() -> None:
+            object.__setattr__(
+                self,
+                "observation_variance",
+                None if observation_variance is None else float(observation_variance),
+            )
+            object.__setattr__(self, "_sparse_posterior", sparse_posterior)
 
         self._init_common(
             labels=labels,
@@ -728,11 +827,7 @@ class GaussianResult(_BaseResult):
             hyperparameters=hyperparameters,
             prediction_context=prediction_context,
             extra_validate=_validate_observation_variance,
-            extra_store=lambda: object.__setattr__(
-                self,
-                "observation_variance",
-                None if observation_variance is None else float(observation_variance),
-            ),
+            extra_store=_store_gaussian_extras,
         )
 
 
@@ -888,6 +983,7 @@ class INLAResult(_BaseResult):
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
+    _latent_variances: np.ndarray | None = field(repr=False)
 
     def __init__(
         self,
@@ -909,6 +1005,7 @@ class INLAResult(_BaseResult):
         latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = None,
         prediction_context: object | None = None,
         observation_variance: float | None = None,
+        latent_variances: np.ndarray | None = None,
     ) -> None:
         def _validate_inla_extras() -> None:
             if not isinstance(criteria, ModelCriteria):
@@ -940,6 +1037,11 @@ class INLAResult(_BaseResult):
                 self,
                 "observation_variance",
                 None if observation_variance is None else float(observation_variance),
+            )
+            object.__setattr__(
+                self,
+                "_latent_variances",
+                latent_variances if latent_variances is None else _readonly_array(latent_variances),
             )
 
         self._init_common(
@@ -980,6 +1082,10 @@ class INLAResult(_BaseResult):
                 except KeyError as error:
                     raise KeyError(f"unknown latent block {block!r}") from error
             return self._latent_marginal_table.select(selection)
+        if self._covariance is None and self._latent_variances is not None:
+            return latent_marginals_from_variances(
+                self._mean, self._latent_variances, self.block_slices, block
+            )
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:

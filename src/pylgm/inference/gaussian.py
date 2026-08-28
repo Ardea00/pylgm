@@ -46,6 +46,16 @@ def preflight_dense_reference(model: CompiledLGM, *, allow_large_dense: bool) ->
         )
 
 
+# ponytail: mirrors preflight_dense_reference's thresholds as a plain bool for
+# routing. preflight keeps its two detailed raises (tested message text), so it
+# is intentionally not collapsed into this predicate.
+def _exceeds_dense_threshold(model: CompiledLGM) -> bool:
+    latent_size = model.precision.shape[0]
+    if latent_size > _MAX_DENSE_LATENT_DIMENSION:
+        return True
+    return _estimated_dense_bytes(model.design.shape[0], latent_size) > _MAX_DENSE_BYTES
+
+
 def _factor_positive_definite(
     matrix: np.ndarray, name: str
 ) -> tuple[tuple[np.ndarray, bool] | None, float]:
@@ -191,6 +201,35 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     )
 
 
+def _fit_sparse(model: CompiledLGM) -> GaussianResult:
+    # ponytail: import sparse_constrained_gaussian lazily here, NOT at module
+    # top. sparse.py imports _block_slices/_factor_positive_definite from this
+    # module at its top level; a top-level back-import would be circular and
+    # fail at import time (the needed names are not yet bound). A function-local
+    # import breaks the cycle.
+    from pylgm.inference.sparse import sparse_constrained_gaussian
+
+    variance = float(model.likelihood.variance)
+    fit = sparse_constrained_gaussian(model)
+    predictive_variance = fit.posterior.predictive_variances(model.design)
+    _require_finite("posterior mean", fit.mean)
+    _require_finite("log marginal likelihood", fit.log_marginal_likelihood)
+    _require_finite("predictive mean", fit.predictive_mean)
+    _require_finite("predictive variance", predictive_variance)
+    return GaussianResult(
+        labels=model.labels,
+        mean=fit.mean,
+        covariance=None,                       # never materialised above the guard
+        log_marginal_likelihood=fit.log_marginal_likelihood,
+        predictive_mean=fit.predictive_mean,
+        predictive_variance=predictive_variance,
+        observation_variance=variance,
+        block_slices=fit.block_slices,
+        diagnostics=fit.diagnostics,
+        sparse_posterior=fit.posterior,
+    )
+
+
 def fit_gaussian(model: CompiledLGM, *, allow_large_dense: bool = False) -> GaussianResult:
     """Fit the small/medium exact Gaussian dense reference engine.
 
@@ -199,7 +238,10 @@ def fit_gaussian(model: CompiledLGM, *, allow_large_dense: bool = False) -> Gaus
     """
     if not isinstance(model.likelihood, CompiledGaussian):
         raise UnsupportedEngineError("exact Gaussian inference requires a Gaussian likelihood")
-    preflight_dense_reference(model, allow_large_dense=allow_large_dense)
+    if type(allow_large_dense) is not bool:
+        raise TypeError("allow_large_dense must be a boolean")
+    if not allow_large_dense and _exceeds_dense_threshold(model):
+        return _fit_sparse(model)
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
             return _fit_dense(model)

@@ -385,7 +385,7 @@ def test_extreme_finite_response_raises_typed_numerical_error_without_warnings()
     assert not recorded
 
 
-def test_dense_reference_dimension_limit_runs_before_dense_algebra(
+def test_preflight_dense_reference_raises_above_dimension_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = CompiledLGM(
@@ -400,14 +400,13 @@ def test_dense_reference_dimension_limit_runs_before_dense_algebra(
         blocks=(),
     )
     monkeypatch.setattr(gaussian, "_MAX_DENSE_LATENT_DIMENSION", 1)
-    monkeypatch.setattr(
-        gaussian,
-        "null_space",
-        lambda constraints: pytest.fail("dense algebra ran before preflight"),
-    )
 
+    # ponytail: calls preflight_dense_reference directly rather than fit_gaussian.
+    # Since Task 8, fit_gaussian above threshold routes to the sparse solver
+    # instead of raising; this synthetic blocks=() model exists only to check
+    # the guard's own over-limit message, which preflight still owns unchanged.
     with pytest.raises(DenseReferenceLimitError, match="allow_large_dense"):
-        fit_gaussian(model)
+        gaussian.preflight_dense_reference(model, allow_large_dense=False)
 
 
 def test_dense_reference_estimated_byte_limit_can_be_explicitly_overridden(
@@ -426,8 +425,11 @@ def test_dense_reference_estimated_byte_limit_can_be_explicitly_overridden(
     )
     monkeypatch.setattr(gaussian, "_MAX_DENSE_BYTES", 1)
 
+    # ponytail: same reasoning as above -- fit_gaussian would now route this
+    # blocks=() model to the sparse solver instead of raising, so the guard's
+    # message is checked directly against preflight_dense_reference.
     with pytest.raises(DenseReferenceLimitError, match="estimated dense workspace"):
-        fit_gaussian(model)
+        gaussian.preflight_dense_reference(model, allow_large_dense=False)
 
     result = fit_gaussian(model, allow_large_dense=True)
     np.testing.assert_allclose(result.mean, [1.0])
