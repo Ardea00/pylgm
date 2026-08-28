@@ -207,6 +207,30 @@ def test_sparse_matches_dense_besag(besag_with_intercept_model):
     assert np.allclose(sparse.predictive_mean, dense.predictive_mean, atol=1e-7)
 
 
+def test_sparse_posterior_apply_inverse_reproduces_mean(proper_car_with_intercept_model):
+    """The captured posterior's apply_inverse must reproduce the fit mean from the score.
+
+    Uses the no-constraint proper-CAR fixture (full-rank field prior) rather than
+    the Besag+intercept fixture: the latter's intrinsic field is exactly collinear
+    with the intercept absent its sum-to-zero constraint, so its *unconstrained*
+    posterior precision is near-singular (cond ~2.5e9) and a raw dense solve of it
+    is not a meaningful reference at tight tolerance.
+    """
+    model = proper_car_with_intercept_model
+    fit = sparse_constrained_gaussian(model)
+    posterior = fit.posterior
+    # rebuild the score g = Z^T r / sigma^2 and check apply_inverse(g) == unconstrained mean
+    variance = float(model.likelihood.variance)
+    observed = model.observed
+    design = model.design[observed]
+    residual = model.y[observed] - model.offset[observed]
+    g = np.asarray(design.T @ residual).reshape(-1) / variance
+    reconstructed = posterior.apply_inverse(g)
+    # apply_inverse is the UNCONSTRAINED solve; compare to a direct dense solve of P.
+    p = (model.precision + (design.T @ design) / variance).toarray()
+    assert np.allclose(reconstructed, np.linalg.solve(p, g), atol=1e-7)
+
+
 def test_sparse_matches_dense_extraconstr(besag_extraconstr_model):
     # Model-level extraconstr with nonzero rhs (conditioning by kriging, e != 0).
     model = besag_extraconstr_model

@@ -80,12 +80,48 @@ def _partition_blocks(model: CompiledLGM) -> tuple[np.ndarray, np.ndarray]:
 
 
 @dataclass(frozen=True)
+class SparsePosterior:
+    """Posterior precision factors from the Schur solve, exposed as an inverse
+    operator and (Tasks 3-4) as diagonal-variance composers. Never forms the full
+    n×n covariance above the dense guard.
+    """
+
+    latent_size: int
+    sparse_index: np.ndarray
+    dense_index: np.ndarray
+    a_ss: "SparseSpdFactor | None"
+    a_ss_matrix: "csr_matrix | None"   # A_ss = Q_ss + Z_s^T Z_s / sigma^2 (for Takahashi)
+    b: "np.ndarray | None"             # B = Z_s^T Z_d / sigma^2  (n_s x m)
+    schur_factor: object | None        # cho_factor of S = D - B^T A_ss^-1 B
+    d_factor: object | None            # cho_factor of D (dense-only case)
+    w_constraint: "np.ndarray | None"  # Sigma A_c^T  (latent x c), kriging basis
+    cap_factor: object | None          # cho_factor of A_c Sigma A_c^T
+
+    def apply_inverse(self, rhs: np.ndarray) -> np.ndarray:
+        """``P_post^-1 @ rhs`` via the same Schur solve as the mean; 1-D or 2-D."""
+        rhs = np.asarray(rhs, dtype=float)
+        out = np.zeros_like(rhs)
+        s, d = self.sparse_index, self.dense_index
+        if s.size and d.size:
+            v_s, v_d = rhs[s], rhs[d]
+            x_d = cho_solve(self.schur_factor, v_d - self.b.T @ self.a_ss.solve(v_s))
+            out[s] = self.a_ss.solve(v_s - self.b @ x_d)
+            out[d] = x_d
+        elif s.size:
+            out[s] = self.a_ss.solve(rhs[s])
+        else:
+            out[d] = cho_solve(self.d_factor, rhs[d])
+        return out
+
+
+@dataclass(frozen=True)
 class SparseFit:
     mean: np.ndarray
     log_marginal_likelihood: float
     predictive_mean: np.ndarray
     block_slices: Mapping[str, slice]
     diagnostics: dict[str, object]
+    posterior: "SparsePosterior"
 
 
 def _block_column_confinement(model: CompiledLGM) -> list[tuple[int, int, np.ndarray]]:
@@ -283,12 +319,12 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
 
     logdet_posterior = 0.0
     a_s = schur_factor = d_factor = b = None
+    a_ss_matrix = None
 
     if n_s:
         q_ss = q[sparse_index][:, sparse_index]
-        a_s = SparseSpdFactor(
-            (q_ss + (z_s.T @ z_s) / variance).tocsr(), "sparse posterior precision"
-        )
+        a_ss_matrix = (q_ss + (z_s.T @ z_s) / variance).tocsr()
+        a_s = SparseSpdFactor(a_ss_matrix, "sparse posterior precision")
         logdet_posterior += a_s.logdet
     if m:
         d = q[dense_index][:, dense_index].toarray() + (z_d.T @ z_d).toarray() / variance
@@ -322,6 +358,8 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     logdet_prior = _prior_logdet(model, spans)
 
     constraint_count = model.constraints.shape[0]
+    w_constraint = None
+    cap_factor_ref = None
     if constraint_count:
         # Conditioning by kriging: correct the mean and the two SPD-identity
         # determinant terms, logdet(basis^T Q_post basis) = logdet(Q_post)
@@ -334,6 +372,8 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         _, logdet_gram = _factor_positive_definite(a @ a.T, "constraint gram")
         logdet_posterior += logdet_cap - logdet_gram
         mean = mean - w @ cho_solve(cap_factor, a @ mean - e)
+        w_constraint = w
+        cap_factor_ref = cap_factor
 
         # Two-term quadratic (robust to the confounded near-singular Q_post):
         # (r0 - Z mu*)^T (r0 - Z mu*) / var + (mu* - nu)^T Q (mu* - nu), where
@@ -367,6 +407,18 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     )
     predictive_mean = np.asarray(model.offset + design @ mean).reshape(-1)
 
+    posterior = SparsePosterior(
+        latent_size=latent_size,
+        sparse_index=sparse_index,
+        dense_index=dense_index,
+        a_ss=a_s,
+        a_ss_matrix=a_ss_matrix,
+        b=b,
+        schur_factor=schur_factor,
+        d_factor=d_factor,
+        w_constraint=w_constraint,
+        cap_factor=cap_factor_ref,
+    )
     return SparseFit(
         mean=mean,
         log_marginal_likelihood=log_marginal_likelihood,
@@ -379,4 +431,5 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
             "sparse_dimension": int(n_s),
             "dense_dimension": int(m),
         },
+        posterior=posterior,
     )
