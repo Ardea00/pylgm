@@ -46,23 +46,23 @@ For the precise semantics of each shipped feature, follow the links into the
   (A+B), and the full posterior-uncertainty surface at network scale (C):
   selected-inverse marginal, predictive, and linear-combination variances with
   constrained corrections, `predict`, sparse Sørbye-Rue scaling, augmented BYM2,
-  and diagonal INLA grid integration — no new dependency, deterministic. See
+  and diagonal INLA grid integration — no new dependency, deterministic. The
+  augmented BYM2 also **exposes its structured component `u*` as a separately
+  reported latent**: `latent_marginals("region")` returns the `x`-marginals and
+  `latent_marginals("region.structured")` the `u*` marginals. See
   [spatial effects](spatial-effects.md).
 
 ## Next
 
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
-1. **Augmented CAR structured component `u*`** exposed as a separately
-   reported latent (the 2n representation currently reproduces the `x`-marginal
-   but does not surface `u*` in results).
-2. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
-3. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-4. **Directed & dynamic network structure** — a SAR effect
+1. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
+2. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
+3. **Directed & dynamic network structure** — a SAR effect
    (`(I−ρW)ᵀ(I−ρW)`) for directed economic influence that symmetrized CAR
    discards, and time-varying `W_t` — building on the weighted-graph support
    above.
-5. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
+4. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
    mixed-frequency nowcasting frontend and a YAML `midas` effect type, building
    on the now-shipped `MIDASParametric` exp-Almon / Beta lag kernels.
 

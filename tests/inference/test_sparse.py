@@ -492,6 +492,67 @@ def test_bym2_augmented_end_to_end_matches_dense(monkeypatch):
     assert np.allclose(aug_var[:n], dense_var, atol=1e-6)
 
 
+def test_bym2_augmented_reports_x_and_structured_subblocks(monkeypatch):
+    """The augmented BYM2 fit exposes two named latent sub-blocks: ``region``
+    (the x-effect, n values matching the dense build -- not the raw 2n block) and
+    ``region.structured`` (the n structured-component u* marginals)."""
+    import numpy as np
+    import pandas as pd
+    from scipy.sparse import csr_matrix
+
+    import pylgm.effects.bym2 as bym2_mod
+    from pylgm.effects.bym2 import build_bym2
+    from pylgm.inference.gaussian import _fit_dense, _fit_sparse
+    from pylgm.ir.model import CompiledLGM
+    from pylgm.likelihoods import CompiledGaussian
+
+    m = 3
+    n = m * m
+
+    def idx(r, c):
+        return f"{r * m + c}"
+
+    graph = {}
+    for r in range(m):
+        for c in range(m):
+            nb = []
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < m and 0 <= cc < m:
+                    nb.append(idx(rr, cc))
+            graph[idx(r, c)] = nb
+    regions = [idx(r, c) for r in range(m) for c in range(m)]
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame({"region": regions, "y": rng.standard_normal(n)})
+    tau, phi = 1.5, 0.5
+
+    def as_model(block):
+        return CompiledLGM(
+            y=frame["y"].to_numpy(dtype=float),
+            observed=np.ones(n, dtype=bool),
+            offset=np.zeros(n),
+            design=csr_matrix(block.design),
+            precision=csr_matrix(block.precision),
+            constraints=np.asarray(block.constraints, dtype=float),
+            labels=tuple(f"{block.name}:{label}" for label in block.labels),
+            likelihood=CompiledGaussian(0.1),
+            blocks=(block,),
+        )
+
+    dense_block = build_bym2(frame, "region", "region", graph, tau, phi)
+    monkeypatch.setattr(bym2_mod, "_BYM2_AUGMENT_NODES", 1)
+    aug_res = _fit_sparse(as_model(build_bym2(frame, "region", "region", graph, tau, phi)))
+    dense_region = _fit_dense(as_model(dense_block)).latent_marginals("region")
+
+    region = aug_res.latent_marginals("region")
+    structured = aug_res.latent_marginals("region.structured")
+    assert region.mean.shape == (n,) and structured.mean.shape == (n,)
+    # region (x) matches the dense x-marginals; structured is a separate quantity.
+    assert np.allclose(region.mean, dense_region.mean, atol=1e-6)
+    assert np.allclose(region.variance, dense_region.variance, atol=1e-6)
+    assert np.all(np.isfinite(structured.mean)) and np.all(structured.variance > 0)
+
+
 def test_allow_large_dense_forces_dense_above_threshold(proper_car_with_intercept_model):
     model = proper_car_with_intercept_model
     import pylgm.inference.gaussian as g
