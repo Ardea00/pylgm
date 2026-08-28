@@ -333,8 +333,12 @@ Because `BYM2`'s precision is unconstrained, like `ProperCAR` it works under
 (`latent_strategy="laplace"`) — unlike `Besag`, which full Laplace rejects
 for carrying a sum-to-zero constraint.
 
-**Not yet built:** the augmented (2n) representation exposing the structured
-component `u*` separately as a reported latent — see the
-[spatial roadmap](roadmap.md)
-for what's next.
+**Structured component at network scale.** On large graphs `BYM2` fits
+through the augmented (`2n`) representation, which carries the structured
+ICAR component `u*` explicitly alongside `x`. Both are reported:
+`latent_marginals("region")` gives the `n` `x`-marginals (matching the dense
+path) and `latent_marginals("region.structured")` gives the `n` `u*`
+marginals — so the spatially-structured part is recoverable separately from
+the total effect. (The dense `n`-dimensional path parameterizes `u*` away and
+reports `x` only.)
 

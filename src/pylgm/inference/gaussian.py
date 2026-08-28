@@ -105,12 +105,36 @@ def _require_finite(name: str, value: np.ndarray | float) -> None:
         raise NumericalError(f"exact Gaussian produced non-finite {name}")
 
 
+def _augmented_split(labels: tuple[str, ...]) -> int | None:
+    """Half-width if ``labels`` are an augmented (x, u*) block, else ``None``.
+
+    The augmented BYM2 builder lays out its 2n labels as n x-labels followed by
+    their ``__u`` twins (``"3"`` -> ``"3__u"``). Detecting that exact layout lets
+    ``_block_slices`` report the x-effect and the structured ``u*`` component as
+    two named slices without threading extra metadata through every block rebuild.
+    """
+    n = len(labels)
+    if n == 0 or n % 2 != 0:
+        return None
+    half = n // 2
+    head, tail = labels[:half], labels[half:]
+    if all(t == f"{h}__u" for h, t in zip(head, tail)):
+        return half
+    return None
+
+
 def _block_slices(model: CompiledLGM) -> Mapping[str, slice]:
     start = 0
     result: dict[str, slice] = {}
     for block in model.blocks:
         stop = start + block.design.shape[1]
-        result[block.name] = slice(start, stop)
+        split = _augmented_split(block.labels)
+        if split is None:
+            result[block.name] = slice(start, stop)
+        else:
+            # Augmented BYM2: x-effect is the first half, structured u* the second.
+            result[block.name] = slice(start, start + split)
+            result[f"{block.name}.structured"] = slice(start + split, stop)
         start = stop
     return result
 
