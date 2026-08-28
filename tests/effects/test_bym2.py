@@ -72,3 +72,40 @@ def test_observed_region_absent_from_graph_rejected():
 def test_phi_outside_unit_interval_rejected(phi):
     with pytest.raises(ValueError, match="phi"):
         build_bym2(_frame(["A", "B", "C"]), "region", "region", PATH, 1.0, phi)
+
+
+def test_bym2_augmented_x_marginal_matches_dense():
+    from scipy.linalg import null_space
+
+    from pylgm.effects.bym2 import _build_bym2_augmented
+
+    m = 4
+    graph = {}
+
+    def idx(r, c):
+        return f"{r * m + c}"
+
+    for r in range(m):
+        for c in range(m):
+            nb = []
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < m and 0 <= cc < m:
+                    nb.append(idx(rr, cc))
+            graph[idx(r, c)] = nb
+    n = m * m
+    frame = pd.DataFrame({"region": [idx(r, c) for r in range(m) for c in range(m)]})
+    tau, phi = 1.3, 0.6
+
+    aug = _build_bym2_augmented(frame, "s", "region", graph, tau, phi)
+    vectors, values = bym2_spectrum(graph)
+    q_dense = bym2_precision(vectors, values, tau, phi).toarray()
+    dense_x_cov = np.linalg.inv(q_dense)
+
+    qj = aug.precision.toarray()
+    c = np.zeros((1, 2 * n))
+    c[0, n:] = 1.0
+    basis = null_space(c)
+    sig = basis @ np.linalg.inv(basis.T @ qj @ basis) @ basis.T
+    aug_x_cov = sig[:n, :n]
+    assert np.allclose(np.diag(aug_x_cov), np.diag(dense_x_cov), atol=1e-9)

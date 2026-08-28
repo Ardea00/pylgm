@@ -390,6 +390,108 @@ def test_forced_sparse_under_guard_matches_dense(proper_car_with_intercept_model
         _ = sparse.covariance
 
 
+def test_bym2_augmented_prior_logdet_matches_dense():
+    import numpy as np
+    from scipy.linalg import null_space
+    from scipy.sparse import bmat, csr_matrix, identity, lil_matrix
+
+    from pylgm.inference.sparse import _bym2_augmented_logdet
+
+    m = 5
+    n = m * m
+    r = lil_matrix((n, n))
+
+    def idx(a, b):
+        return a * m + b
+
+    for a in range(m):
+        for b in range(m):
+            i = idx(a, b)
+            deg = 0
+            for da, db in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                aa, bb = a + da, b + db
+                if 0 <= aa < m and 0 <= bb < m:
+                    r[i, idx(aa, bb)] = -1.0
+                    deg += 1
+            r[i, i] = deg
+    r = r.tocsr()
+    w, v = np.linalg.eigh(r.toarray())
+    inv = np.zeros_like(w)
+    inv[1:] = 1 / w[1:]
+    var = np.einsum("ij,j,ij->i", v, inv, v)
+    s = np.exp(np.mean(np.log(var)))
+    rstar = csr_matrix(r.toarray() * s)
+    tau, phi = 1.3, 0.6
+    a_ = 1 / (1 - phi)
+    b_ = -np.sqrt(phi) / (1 - phi)
+    d_ = phi / (1 - phi)
+    ident = identity(n, format="csr")
+    qj = tau * bmat([[a_ * ident, b_ * ident], [b_ * ident, rstar + d_ * ident]], format="csr")
+    rows = np.zeros((1, 2 * n))
+    rows[0, n:] = 1.0
+
+    got = _bym2_augmented_logdet(rows, qj)
+    basis = null_space(rows)
+    _, want = np.linalg.slogdet(basis.T @ qj.toarray() @ basis)
+    assert got is not None and abs(got - want) < 1e-7
+
+
+def test_bym2_augmented_end_to_end_matches_dense(monkeypatch):
+    """Public BYM2 fit via the augmented path: x-block marginals match the dense build."""
+    import numpy as np
+    import pandas as pd
+    from scipy.sparse import csr_matrix
+
+    import pylgm.effects.bym2 as bym2_mod
+    from pylgm.effects.bym2 import build_bym2
+    from pylgm.inference.gaussian import _fit_dense
+    from pylgm.inference.sparse import sparse_constrained_gaussian
+    from pylgm.ir.model import CompiledLGM
+    from pylgm.likelihoods import CompiledGaussian
+
+    m = 3
+    n = m * m
+
+    def idx(r, c):
+        return f"{r * m + c}"
+
+    graph = {}
+    for r in range(m):
+        for c in range(m):
+            nb = []
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < m and 0 <= cc < m:
+                    nb.append(idx(rr, cc))
+            graph[idx(r, c)] = nb
+    regions = [idx(r, c) for r in range(m) for c in range(m)]
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({"region": regions, "y": rng.standard_normal(n)})
+    tau, phi = 1.5, 0.5
+
+    def as_model(block):
+        return CompiledLGM(
+            y=frame["y"].to_numpy(dtype=float),
+            observed=np.ones(n, dtype=bool),
+            offset=np.zeros(n),
+            design=csr_matrix(block.design),
+            precision=csr_matrix(block.precision),
+            constraints=np.asarray(block.constraints, dtype=float),
+            labels=tuple(f"{block.name}:{label}" for label in block.labels),
+            likelihood=CompiledGaussian(0.1),
+            blocks=(block,),
+        )
+
+    # dense path (constant at default 1024) then augmented path (constant forced to 1)
+    dense_block = build_bym2(frame, "region", "region", graph, tau, phi)
+    monkeypatch.setattr(bym2_mod, "_BYM2_AUGMENT_NODES", 1)
+    aug_block = build_bym2(frame, "region", "region", graph, tau, phi)
+
+    dense_var = np.diag(_fit_dense(as_model(dense_block)).covariance)
+    aug_var = sparse_constrained_gaussian(as_model(aug_block)).posterior.marginal_variances()
+    assert np.allclose(aug_var[:n], dense_var, atol=1e-6)
+
+
 def test_allow_large_dense_forces_dense_above_threshold(proper_car_with_intercept_model):
     model = proper_car_with_intercept_model
     import pylgm.inference.gaussian as g

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from formulaic import model_matrix
 from formulaic.errors import FormulaicError
-from scipy.sparse import block_diag, csr_matrix, diags, hstack
+from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
@@ -37,8 +37,14 @@ from pylgm.effects import (
     normalize_graph,
 )
 from pylgm.effects.ar1 import ar1_structure
-from pylgm.effects.bym2 import bym2_precision, bym2_spectrum
+from pylgm.effects.bym2 import (
+    _build_bym2_augmented,
+    _BYM2_AUGMENT_NODES,
+    bym2_precision,
+    bym2_spectrum,
+)
 from pylgm.effects.proper_car import car_rho_interval
+from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
 from pylgm.ir import (
     CompiledFamily,
@@ -665,27 +671,55 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             # phi is a Hyperparameter -> a ParametricBlock over (tau, phi), bounded
             # to (0, 1) via a Logit transform (BYM2 is unconstrained: no graph
             # interval to resolve, unlike proper CAR's rho).
-            vectors, values_ = bym2_spectrum(dict(effect.graph))
             phi_bounds = _bounded_parameter(effect.phi, 0.0, 1.0, label="BYM2 phi", inset=1e-6)
-            template = _compiled_block(
-                effect.name, build_bym2,
-                frame, effect.name, effect.index, dict(effect.graph),
-                value, float(effect.phi.initial),
-            )
             tau_name = precision.name if optimized else None
             tau_fixed = None if optimized else value
             phi_name = effect.phi.name
+            nodes_bym2, w_bym2 = normalize_graph(dict(effect.graph))
+            augmented = len(nodes_bym2) > _BYM2_AUGMENT_NODES
+            if augmented:
+                template = _compiled_block(
+                    effect.name, _build_bym2_augmented,
+                    frame, effect.name, effect.index, dict(effect.graph),
+                    value, float(effect.phi.initial),
+                )
+                degree = np.asarray(w_bym2.sum(axis=1)).ravel()
+                rstar = sorbye_rue_scale((diags(degree) - w_bym2).tocsc(), null_dim=1)
+                ident = identity(len(nodes_bym2), format="csr")
 
-            def build(
-                values_map,
-                vectors=vectors,
-                spectrum=values_,
-                tau_name=tau_name,
-                tau_fixed=tau_fixed,
-                phi_name=phi_name,
-            ) -> csr_matrix:
-                tau = values_map[tau_name] if tau_name else tau_fixed
-                return bym2_precision(vectors, spectrum, tau, values_map[phi_name])
+                def build(
+                    values_map,
+                    rstar=rstar,
+                    ident=ident,
+                    tau_name=tau_name,
+                    tau_fixed=tau_fixed,
+                    phi_name=phi_name,
+                ) -> csr_matrix:
+                    tau = values_map[tau_name] if tau_name else tau_fixed
+                    phi = values_map[phi_name]
+                    a_ = 1.0 / (1.0 - phi)
+                    b_ = -np.sqrt(phi) / (1.0 - phi)
+                    d_ = phi / (1.0 - phi)
+                    return (tau * bmat([[a_ * ident, b_ * ident],
+                                        [b_ * ident, rstar + d_ * ident]], format="csr")).tocsr()
+            else:
+                vectors, values_ = bym2_spectrum(dict(effect.graph))
+                template = _compiled_block(
+                    effect.name, build_bym2,
+                    frame, effect.name, effect.index, dict(effect.graph),
+                    value, float(effect.phi.initial),
+                )
+
+                def build(
+                    values_map,
+                    vectors=vectors,
+                    spectrum=values_,
+                    tau_name=tau_name,
+                    tau_fixed=tau_fixed,
+                    phi_name=phi_name,
+                ) -> csr_matrix:
+                    tau = values_map[tau_name] if tau_name else tau_fixed
+                    return bym2_precision(vectors, spectrum, tau, values_map[phi_name])
 
             params = tuple(name for name in (tau_name, phi_name) if name)
             scalable.append(ParametricBlock(template, params, build))
@@ -695,8 +729,13 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             parameter_names.append(phi_name)
             parameter_bounds[phi_name] = phi_bounds
             if effect.phi.prior is not None and hasattr(effect.phi.prior, "bind"):
-                positive = values_[values_ > 1e-10]
-                parameter_priors[phi_name] = effect.phi.prior.bind(positive)
+                if augmented:
+                    raise NotImplementedError(
+                        "a PC prior on BYM2 phi needs the graph spectrum, which the "
+                        "large-graph augmented path does not compute; raise "
+                        "_BYM2_AUGMENT_NODES to use the dense path, or drop the PC prior"
+                    )
+                parameter_priors[phi_name] = effect.phi.prior.bind(values_[values_ > 1e-10])
             elif effect.phi.prior is not None:
                 parameter_priors[phi_name] = effect.phi.prior
             continue

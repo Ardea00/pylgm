@@ -235,6 +235,40 @@ def _is_connected_intrinsic(rows: np.ndarray, precision) -> bool:
     return np.allclose(q1, 0.0, atol=1e-8 * max(1.0, scale))
 
 
+def _bym2_augmented_logdet(rows: np.ndarray, precision) -> float | None:
+    """logdet(Vᵀ Q V) for a BYM2 augmented block (null g=(√φ·1, 1), pinned by
+    sum-to-zero on the u* half), via the generalized matrix-tree cofactor.
+    Returns None when the block is not the augmented pattern (caller falls back to
+    the dense reduction).
+    """
+    width = precision.shape[0]
+    if width % 2 or rows.shape[0] != 1:
+        return None
+    n = width // 2
+    r = np.asarray(rows, dtype=float).ravel()
+    if np.any(np.abs(r[:n]) > 0) or r[n] == 0 or not np.allclose(r[n:], r[n]):
+        return None
+    q = precision.tocsr()
+    q00 = q[0, 0]
+    q0n = q[0, n]
+    if q00 == 0.0 or q0n >= 0.0:  # b = -√φ/(1-φ) < 0 for φ in (0,1)
+        return None
+    sqrt_phi = -q0n / q00
+    g = np.concatenate([sqrt_phi * np.ones(n), np.ones(n)])
+    scale = abs(q).max()
+    if not np.allclose(np.asarray(q @ g).ravel(), 0.0, atol=1e-8 * max(1.0, scale)):
+        return None  # g is not the null vector -> not augmented
+    i = width - 1  # delete a u* index (g_i = 1)
+    keep = np.arange(width) != i
+    q_sub = q[keep][:, keep].tocsr()
+    logdet_star = (
+        np.log(g @ g) - 2.0 * np.log(abs(g[i]))
+        + SparseSpdFactor(q_sub, "bym2 augmented prior").logdet
+    )
+    c = np.concatenate([np.zeros(n), np.ones(n)])  # canonical sum-to-zero on u*
+    return logdet_star + np.log((c @ g) ** 2) - np.log(g @ g) - np.log(c @ c)
+
+
 def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) -> float:
     """``logdet(basis^T Q_prior basis)`` as a per-block sum.
 
@@ -264,14 +298,20 @@ def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) 
                     reduced, f"intrinsic prior [{block.name}]"
                 ).logdet
             else:
-                # ponytail: dense reduction, O(n^3), for the residual cases only
-                # (RW2, weighted or multi-row extra-constraints) whose blocks are
-                # small in practice. A large field carrying an extra label
-                # constraint would hit this ceiling; generalize via the k-index
-                # cofactor (det*(Q) det(N_S^T N_S)/det(N^T N)) if that ever bites.
-                basis_b = null_space(rows)
-                reduced = basis_b.T @ q_b.toarray() @ basis_b
-                _, logdet = _factor_positive_definite(reduced, f"reduced prior [{block.name}]")
+                bym2_logdet = _bym2_augmented_logdet(rows, q_b)
+                if bym2_logdet is not None:
+                    logdet = bym2_logdet
+                else:
+                    # ponytail: dense reduction, O(n^3), for the residual cases only
+                    # (RW2, weighted or multi-row extra-constraints) whose blocks are
+                    # small in practice. A large field carrying an extra label
+                    # constraint would hit this ceiling; generalize via the k-index
+                    # cofactor (det*(Q) det(N_S^T N_S)/det(N^T N)) if that ever bites.
+                    basis_b = null_space(rows)
+                    reduced = basis_b.T @ q_b.toarray() @ basis_b
+                    _, logdet = _factor_positive_definite(
+                        reduced, f"reduced prior [{block.name}]"
+                    )
         else:
             logdet = SparseSpdFactor(q_b.tocsr(), f"prior [{block.name}]").logdet
         total += logdet
