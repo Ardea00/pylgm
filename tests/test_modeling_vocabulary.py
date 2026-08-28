@@ -315,13 +315,19 @@ def test_new_families_gradient_and_third_derivative_finite_difference():
         (Beta(4.0).materialize({}), np.array([0.3, 0.6, 0.4])),
     ]
     h = 1e-5
+
+    def observed_second_derivative(like, y, e):
+        return (like.gradient(e + h, y) - like.gradient(e - h, y)) / (2 * h)
+
     for like, y in cases:
         # gradient = d logL / d eta
         num_g = (like.log_likelihood(eta + h, y) - like.log_likelihood(eta - h, y)) / (2 * h)
         np.testing.assert_allclose(like.gradient(eta, y).sum(), num_g, atol=1e-5)
         # third_derivative = d/deta of the observed second derivative (per point)
-        d2 = lambda e: (like.gradient(e + h, y) - like.gradient(e - h, y)) / (2 * h)
-        fd3 = (d2(eta + h) - d2(eta - h)) / (2 * h)
+        fd3 = (
+            observed_second_derivative(like, y, eta + h)
+            - observed_second_derivative(like, y, eta - h)
+        ) / (2 * h)
         np.testing.assert_allclose(like.third_derivative(eta, y), fd3, atol=1e-3)
 
 
