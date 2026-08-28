@@ -212,3 +212,114 @@ def test_third_derivative_values_and_finite_difference():
         h = 1e-4
         fd = -(like.working_weights(eta + h, y) - like.working_weights(eta - h, y)) / (2 * h)
         np.testing.assert_allclose(like.third_derivative(eta, y), fd, atol=1e-5)
+
+
+# PyINLA GLM families: negative-binomial, gamma, beta (dispersion/precision phi)
+
+
+def test_negative_binomial_glm_pieces():
+    from pylgm import NegativeBinomial
+
+    like = NegativeBinomial(3.0).materialize({})
+    assert like.link.name == "log"
+    eta = np.array([0.0, np.log(2.0)])
+    mu = np.exp(eta)
+    y = np.array([1.0, 4.0])
+    np.testing.assert_allclose(like.response_mean(eta), mu)
+    np.testing.assert_allclose(like.gradient(eta, y), 3.0 * (y - mu) / (3.0 + mu))
+    np.testing.assert_allclose(like.working_weights(eta, y), mu * 3.0 / (mu + 3.0))
+    assert np.all(like.working_weights(eta, y) > 0)
+
+
+def test_gamma_glm_pieces():
+    from pylgm import Gamma
+
+    like = Gamma(2.0).materialize({})
+    assert like.link.name == "log"
+    eta = np.array([0.0, np.log(3.0)])
+    mu = np.exp(eta)
+    y = np.array([1.5, 2.0])
+    np.testing.assert_allclose(like.response_mean(eta), mu)
+    np.testing.assert_allclose(like.gradient(eta, y), 2.0 * (y - mu) / mu)
+    np.testing.assert_allclose(like.working_weights(eta, y), [2.0, 2.0])  # constant shape
+
+
+def test_beta_glm_pieces():
+    from pylgm import Beta
+
+    like = Beta(5.0).materialize({})
+    assert like.link.name == "logit"
+    eta = np.array([0.0, 0.5])
+    mu = 1.0 / (1.0 + np.exp(-eta))
+    y = np.array([0.3, 0.7])
+    np.testing.assert_allclose(like.response_mean(eta), mu)
+    assert np.all(like.working_weights(eta, y) > 0)
+    # response prediction ignores latent variance (mirrors Bernoulli)
+    np.testing.assert_allclose(like.response_prediction(eta, np.array([2.0, 2.0])), mu)
+
+
+def test_new_families_reject_out_of_support_response():
+    from pylgm import Beta, Gamma, NegativeBinomial
+
+    with pytest.raises(DataContractError, match="non-negative integer"):
+        NegativeBinomial(1.0).materialize({}).validate_response(np.array([1.5]))
+    with pytest.raises(DataContractError, match="non-negative integer"):
+        NegativeBinomial(1.0).materialize({}).validate_response(np.array([-1.0]))
+    with pytest.raises(DataContractError, match="positive"):
+        Gamma(1.0).materialize({}).validate_response(np.array([1.0, 0.0]))
+    with pytest.raises(DataContractError, match=r"\(0, 1\)"):
+        Beta(1.0).materialize({}).validate_response(np.array([0.5, 1.0]))
+
+
+def test_new_families_density_and_cdf_match_scipy():
+    from scipy.stats import beta as beta_dist, gamma as gamma_dist, nbinom
+    from pylgm import Beta, Gamma, NegativeBinomial
+
+    phi = 2.5
+    # negative-binomial: NB2 with n=phi, p=phi/(phi+mu)
+    nb = NegativeBinomial(phi).materialize({})
+    eta = np.array([0.2, -0.4, 0.7])
+    mu = np.exp(eta)
+    y = np.array([0.0, 2.0, 5.0])
+    nb.validate_response(y)
+    np.testing.assert_allclose(nb.pointwise_log_density(eta, y).sum(), nb.log_likelihood(eta, y))
+    np.testing.assert_allclose(nb.pointwise_log_density(eta, y),
+                               nbinom.logpmf(y, phi, phi / (phi + mu)), atol=1e-10)
+    np.testing.assert_allclose(nb.cdf(eta, y), nbinom.cdf(y, phi, phi / (phi + mu)), atol=1e-10)
+
+    # gamma: shape a=phi, scale=mu/phi
+    gm = Gamma(phi).materialize({})
+    yg = np.array([0.5, 1.5, 3.0])
+    np.testing.assert_allclose(gm.pointwise_log_density(eta, yg).sum(), gm.log_likelihood(eta, yg))
+    np.testing.assert_allclose(gm.pointwise_log_density(eta, yg),
+                               gamma_dist.logpdf(yg, phi, scale=mu / phi), atol=1e-10)
+    np.testing.assert_allclose(gm.cdf(eta, yg), gamma_dist.cdf(yg, phi, scale=mu / phi), atol=1e-10)
+
+    # beta: Beta(mu*phi, (1-mu)*phi)
+    bt = Beta(phi).materialize({})
+    p = 1.0 / (1.0 + np.exp(-eta))
+    yb = np.array([0.2, 0.5, 0.8])
+    np.testing.assert_allclose(bt.pointwise_log_density(eta, yb).sum(), bt.log_likelihood(eta, yb))
+    np.testing.assert_allclose(bt.pointwise_log_density(eta, yb),
+                               beta_dist.logpdf(yb, p * phi, (1 - p) * phi), atol=1e-10)
+    np.testing.assert_allclose(bt.cdf(eta, yb), beta_dist.cdf(yb, p * phi, (1 - p) * phi), atol=1e-10)
+
+
+def test_new_families_gradient_and_third_derivative_finite_difference():
+    from pylgm import Beta, Gamma, NegativeBinomial
+
+    eta = np.array([0.2, -0.6, 0.4])
+    cases = [
+        (NegativeBinomial(2.0).materialize({}), np.array([0.0, 3.0, 1.0])),
+        (Gamma(2.0).materialize({}), np.array([0.5, 1.5, 2.0])),
+        (Beta(4.0).materialize({}), np.array([0.3, 0.6, 0.4])),
+    ]
+    h = 1e-5
+    for like, y in cases:
+        # gradient = d logL / d eta
+        num_g = (like.log_likelihood(eta + h, y) - like.log_likelihood(eta - h, y)) / (2 * h)
+        np.testing.assert_allclose(like.gradient(eta, y).sum(), num_g, atol=1e-5)
+        # third_derivative = d/deta of the observed second derivative (per point)
+        d2 = lambda e: (like.gradient(e + h, y) - like.gradient(e - h, y)) / (2 * h)
+        fd3 = (d2(eta + h) - d2(eta - h)) / (2 * h)
+        np.testing.assert_allclose(like.third_derivative(eta, y), fd3, atol=1e-3)

@@ -57,7 +57,15 @@ from pylgm.ir import (
 )
 from pylgm.inference.prediction import PredictionContext
 from pylgm.ir.model import LatentBlock, _block_constraints
-from pylgm.likelihoods import Bernoulli, CompiledGaussian, Gaussian, Poisson
+from pylgm.likelihoods import (
+    Bernoulli,
+    Beta,
+    CompiledGaussian,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Poisson,
+)
 from pylgm.optimization.empirical_bayes import OptimizationBounds
 from pylgm.optimization.transforms import IdentityTransform, LogitTransform, LogTransform
 from pylgm.parameters import Hyperparameter
@@ -389,8 +397,12 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         except (TypeError, ValueError) as error:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
-    if isinstance(model.likelihood, (Poisson, Bernoulli)):
-        compiled_likelihood = model.likelihood.materialize({})
+    if isinstance(model.likelihood, (Poisson, Bernoulli, NegativeBinomial, Gamma, Beta)):
+        # A phi-family with an optimisable phi compiles here at its initial value
+        # (the EB/INLA fit refines it); a fixed-phi family ignores the mapping.
+        phi = getattr(model.likelihood, "phi", None)
+        values = {phi.name: phi.initial} if isinstance(phi, Hyperparameter) else {}
+        compiled_likelihood = model.likelihood.materialize(values)
         observed = panel.observed
         compiled_likelihood.validate_response(y[observed])
         if not blocks:
@@ -426,6 +438,9 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
     found: list[tuple[str, Hyperparameter]] = []
     if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
         found.append(("sigma", model.likelihood.sigma))
+    phi = getattr(model.likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
+    if isinstance(phi, Hyperparameter):
+        found.append(("phi", phi))
     for effect in model.predictor.effects:
         precision = getattr(effect, "precision", None)
         if isinstance(precision, Hyperparameter):
@@ -846,9 +861,15 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 return CompiledGaussian(sigma)
     else:
         likelihood = model.likelihood
+        phi = getattr(likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
+        if isinstance(phi, Hyperparameter):
+            parameter_names.append(phi.name)
+            parameter_bounds[phi.name] = _log_bounds(phi)
 
+        # materialize is lenient (picks phi out of the joint mapping); a phi-less
+        # family (Poisson/Bernoulli) ignores `resolved` and returns unchanged.
         def factory(resolved: dict, likelihood: object = likelihood) -> object:
-            return likelihood.materialize({})
+            return likelihood.materialize(resolved)
 
     constraint_labels = _qualified_labels([item.block for item in scalable])
     extra_constraints, extra_constraint_rhs = resolve_constraints(

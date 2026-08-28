@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 import numpy as np
-from scipy.special import gammaln, erf, gammaincc
+from scipy.special import gammaln, erf, gammaincc, gammainc, betainc, digamma, polygamma
 
 from pylgm.links import IdentityLink, LogLink, LogitLink
 from pylgm.exceptions import DataContractError
@@ -18,8 +18,34 @@ def _positive_real(value: object, name: str) -> float:
     return float(value)
 
 
+def _resolve_phi(phi: object, values: Mapping[str, float]) -> float:
+    """Pick a family's own phi out of ``values`` (Hyperparameter) or use the fixed float.
+
+    Lenient — unlike ``Gaussian.materialize`` which requires an exact key set —
+    because the optimiser resolves phi jointly with the block precisions and so
+    passes them all together in one mapping.
+    """
+    if isinstance(phi, Hyperparameter):
+        if not isinstance(values, Mapping) or phi.name not in values:
+            raise ValueError(f"values must contain {phi.name!r}")
+        return values[phi.name]
+    return phi
+
+
+class _CompiledLikelihood:
+    """Shared per-observation binding hook for compiled likelihoods.
+
+    Default is a no-op: one compiled likelihood serves both the observed-row
+    fit calls and the all-row prediction call unchanged. Only ``CompiledBinomial``
+    overrides it, to bind its per-row trials vector.
+    """
+
+    def for_observations(self, trials: "np.ndarray | None") -> "_CompiledLikelihood":
+        return self
+
+
 @dataclass(frozen=True)
-class CompiledGaussian:
+class CompiledGaussian(_CompiledLikelihood):
     """A Gaussian likelihood with a resolved standard deviation."""
 
     sigma: float
@@ -94,7 +120,7 @@ class Gaussian:
 
 
 @dataclass(frozen=True)
-class CompiledPoisson:
+class CompiledPoisson(_CompiledLikelihood):
     """A Poisson likelihood with a canonical log link."""
 
     link: LogLink = field(default_factory=LogLink, init=False)
@@ -137,7 +163,7 @@ class CompiledPoisson:
 
 
 @dataclass(frozen=True)
-class CompiledBernoulli:
+class CompiledBernoulli(_CompiledLikelihood):
     """A Bernoulli likelihood with a canonical logit link."""
 
     link: LogitLink = field(default_factory=LogitLink, init=False)
@@ -183,6 +209,193 @@ class CompiledBernoulli:
 
 
 @dataclass(frozen=True)
+class CompiledNegativeBinomial(_CompiledLikelihood):
+    """A negative-binomial (NB2) likelihood with a log link and dispersion phi.
+
+    Mean ``mu = exp(eta)``; ``Var = mu + mu^2/phi``. ``phi -> inf`` recovers the
+    Poisson (its derivatives below reduce to ``CompiledPoisson``'s in that limit).
+    """
+
+    phi: float
+    link: LogLink = field(default_factory=LogLink, init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "phi", _positive_real(self.phi, "phi"))
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(np.sum(self.pointwise_log_density(eta, y)))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        y = np.asarray(y, dtype=float)
+        return self.phi * (y - mu) / (self.phi + mu)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        return mu * self.phi / (mu + self.phi)  # Fisher information in eta, > 0
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        y = np.asarray(y, dtype=float)
+        return -self.phi * (self.phi + y) * mu * (self.phi - mu) / (self.phi + mu) ** 3
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return self.link.inverse(eta)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return self.link.inverse(np.asarray(eta_mean, dtype=float) + 0.5 * np.asarray(eta_variance, dtype=float))
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.exp(eta)
+        phi = self.phi
+        return (
+            gammaln(y + phi) - gammaln(phi) - gammaln(y + 1.0)
+            + phi * np.log(phi / (phi + mu))
+            + y * np.log(mu / (phi + mu))
+        )
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.exp(eta)
+        phi = self.phi
+        return betainc(phi, np.floor(y) + 1.0, phi / (phi + mu))
+
+    def validate_response(self, y: np.ndarray) -> None:
+        y = np.asarray(y, dtype=float)
+        if not np.all(np.isfinite(y)) or np.any(y < 0) or np.any(y != np.round(y)):
+            raise DataContractError("negative-binomial responses must be non-negative integers")
+
+
+@dataclass(frozen=True)
+class CompiledGamma(_CompiledLikelihood):
+    """A gamma likelihood with a log link and precision phi (shape ``a = phi``).
+
+    Mean ``mu = exp(eta)``; ``Var = mu^2/phi``.
+    """
+
+    phi: float
+    link: LogLink = field(default_factory=LogLink, init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "phi", _positive_real(self.phi, "phi"))
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(np.sum(self.pointwise_log_density(eta, y)))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        y = np.asarray(y, dtype=float)
+        return self.phi * (y - mu) / mu
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.full(np.asarray(eta).shape, float(self.phi), dtype=float)  # Fisher info = phi
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        y = np.asarray(y, dtype=float)
+        return self.phi * y / mu
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return self.link.inverse(eta)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return self.link.inverse(np.asarray(eta_mean, dtype=float) + 0.5 * np.asarray(eta_variance, dtype=float))
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.exp(eta)
+        phi = self.phi
+        return phi * np.log(phi / mu) - gammaln(phi) + (phi - 1.0) * np.log(y) - (phi / mu) * y
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = np.exp(eta)
+        return gammainc(self.phi, (self.phi / mu) * y)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        y = np.asarray(y, dtype=float)
+        if not np.all(np.isfinite(y)) or np.any(y <= 0):
+            raise DataContractError("gamma responses must be positive")
+
+
+@dataclass(frozen=True)
+class CompiledBeta(_CompiledLikelihood):
+    """A beta likelihood with a logit link and precision phi.
+
+    Responses ``y in (0, 1)``; mean ``mu = sigmoid(eta)``; distribution
+    ``Beta(mu*phi, (1-mu)*phi)``, so ``Var = mu(1-mu)/(1+phi)``.
+    """
+
+    phi: float
+    link: LogitLink = field(default_factory=LogitLink, init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "phi", _positive_real(self.phi, "phi"))
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(np.sum(self.pointwise_log_density(eta, y)))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        y = np.asarray(y, dtype=float)
+        phi = self.phi
+        dlog_dmu = phi * ((np.log(y) - np.log1p(-y)) - (digamma(mu * phi) - digamma((1.0 - mu) * phi)))
+        return dlog_dmu * mu * (1.0 - mu)  # chain through dmu/deta = mu(1-mu)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        phi = self.phi
+        # Fisher information in eta: I_mu * (dmu/deta)^2, > 0 since trigamma > 0.
+        return (mu * (1.0 - mu)) ** 2 * phi ** 2 * (polygamma(1, mu * phi) + polygamma(1, (1.0 - mu) * phi))
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        phi = self.phi
+        t = np.log(y) - np.log1p(-np.asarray(y, dtype=float))
+        L1 = phi * (t - (digamma(mu * phi) - digamma((1.0 - mu) * phi)))
+        L2 = -phi ** 2 * (polygamma(1, mu * phi) + polygamma(1, (1.0 - mu) * phi))
+        L3 = -phi ** 3 * (polygamma(2, mu * phi) - polygamma(2, (1.0 - mu) * phi))
+        mp = mu * (1.0 - mu)                       # dmu/deta
+        mpp = mp * (1.0 - 2.0 * mu)                # d2mu/deta2
+        mppp = mp * (1.0 - 6.0 * mu + 6.0 * mu ** 2)  # d3mu/deta3
+        return L3 * mp ** 3 + 3.0 * L2 * mp * mpp + L1 * mppp
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return self.link.inverse(eta)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return self.link.inverse(np.asarray(eta_mean, dtype=float))  # point estimate; variance ignored
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = self.link.inverse(eta)
+        phi = self.phi
+        return (
+            gammaln(phi) - gammaln(mu * phi) - gammaln((1.0 - mu) * phi)
+            + (mu * phi - 1.0) * np.log(y)
+            + ((1.0 - mu) * phi - 1.0) * np.log1p(-y)
+        )
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        mu = self.link.inverse(eta)
+        phi = self.phi
+        return betainc(mu * phi, (1.0 - mu) * phi, y)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        y = np.asarray(y, dtype=float)
+        if not np.all(np.isfinite(y)) or np.any(y <= 0.0) or np.any(y >= 1.0):
+            raise DataContractError("beta responses must lie strictly in (0, 1)")
+
+
+@dataclass(frozen=True)
 class Poisson:
     """A Poisson likelihood with a canonical log link."""
 
@@ -196,3 +409,48 @@ class Bernoulli:
 
     def materialize(self, values: Mapping[str, float]) -> CompiledBernoulli:
         return CompiledBernoulli()
+
+
+@dataclass(frozen=True)
+class NegativeBinomial:
+    """A negative-binomial (NB2) likelihood with a fixed or optimisable dispersion phi."""
+
+    phi: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.phi, Hyperparameter):
+            return
+        object.__setattr__(self, "phi", _positive_real(self.phi, "phi"))
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledNegativeBinomial:
+        return CompiledNegativeBinomial(_resolve_phi(self.phi, values))
+
+
+@dataclass(frozen=True)
+class Gamma:
+    """A gamma likelihood with a fixed or optimisable precision phi."""
+
+    phi: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.phi, Hyperparameter):
+            return
+        object.__setattr__(self, "phi", _positive_real(self.phi, "phi"))
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledGamma:
+        return CompiledGamma(_resolve_phi(self.phi, values))
+
+
+@dataclass(frozen=True)
+class Beta:
+    """A beta likelihood with a fixed or optimisable precision phi."""
+
+    phi: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.phi, Hyperparameter):
+            return
+        object.__setattr__(self, "phi", _positive_real(self.phi, "phi"))
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledBeta:
+        return CompiledBeta(_resolve_phi(self.phi, values))

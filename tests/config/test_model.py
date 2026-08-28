@@ -119,6 +119,52 @@ def test_load_bernoulli_model(tmp_path):
     assert model.offset is None
 
 
+@pytest.mark.parametrize(
+    "family_name, cls_name",
+    [("nbinomial", "NegativeBinomial"), ("gamma", "Gamma"), ("beta", "Beta")],
+)
+def test_load_phi_family_models(tmp_path, family_name, cls_name):
+    import pylgm
+
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        f"likelihood: {{family: {family_name}, phi: 2.5}}\n"
+        "data: {time: t}\n"
+        "predictor: {fixed: '1'}\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, getattr(pylgm, cls_name))
+    assert model.likelihood.phi == 2.5
+
+
+def test_load_phi_family_defaults_phi_when_omitted(tmp_path):
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\nlikelihood: {family: gamma}\ndata: {time: t}\npredictor: {fixed: '1'}\n"
+    )
+    assert load_model(path).likelihood.phi == 1.0
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        # sigma is gaussian-only
+        "response: y\nlikelihood: {family: gamma, sigma: 1.0}\npredictor: {fixed: '1'}",
+        # phi is not valid for poisson/bernoulli/gaussian
+        "response: y\nlikelihood: {family: poisson, phi: 2.0}\npredictor: {fixed: '1'}",
+        "response: y\nlikelihood: {family: gaussian, sigma: 1, phi: 2.0}\npredictor: {fixed: '1'}",
+        # phi must be finite-positive
+        "response: y\nlikelihood: {family: beta, phi: 0}\npredictor: {fixed: '1'}",
+    ],
+)
+def test_load_model_rejects_invalid_phi_usage(tmp_path, document):
+    path = tmp_path / "m.yaml"
+    path.write_text(document)
+    with pytest.raises(ConfigurationError):
+        load_model(path)
+
+
 _SPATIAL_GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"]}
 _INLINE_GRAPH = "{a: [b], b: [a, c], c: [b]}"
 
