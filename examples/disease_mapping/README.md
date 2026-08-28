@@ -15,5 +15,22 @@ positive. Writes `docs/img/scotland_shrinkage.png` and
 `docs/img/scotland_fit.png`, used on the
 [disease-mapping docs page](../../docs/examples-disease-mapping.md).
 
-`data.csv` has `area, observed, expected, aff`; `graph.json` is the district
-adjacency graph (neighbour lists keyed by area id).
+`data.csv` has `area, observed, expected, aff, log_E` (`log_E = log(expected)`,
+the Poisson offset); `graph.json` is the district adjacency graph (neighbour
+lists keyed by area id).
+
+## Declarative (YAML) form
+
+`config.yaml` is the same Besag + Poisson model in the standalone YAML
+frontend, pointing `graph_file` straight at `graph.json`. It fits from files
+with no Python model code — only fixed hyperparameters, so the spatial
+precision is pinned (1.0) rather than estimated as `run.py` does:
+
+```python
+from pathlib import Path
+import pandas as pd
+from pylgm.config import load_model
+
+here = Path("examples/disease_mapping")
+result = load_model(here / "config.yaml").fit(pd.read_csv(here / "data.csv"))
+```

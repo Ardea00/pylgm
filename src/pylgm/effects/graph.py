@@ -1,5 +1,6 @@
 """Neighbourhood-graph adjacency for spatial (CAR) effects."""
 
+import json
 import math
 import os
 from collections.abc import Mapping, Sequence
@@ -158,12 +159,25 @@ def normalize_graph(
     return nodes, w
 
 
-def load_graph_file(path: str | os.PathLike) -> dict[str, list[str]]:
-    """Parse an R-INLA / latte ``.graph`` file into a neighbour dict.
+def load_graph_file(path: str | os.PathLike) -> dict:
+    """Parse a neighbour graph from a file, dispatched on the extension.
 
-    Format: first token is the node count ``n``; then for each node a line
+    ``.json``: a JSON object ``{node: [neighbour, ...]}`` -- or, for a weighted
+    graph, ``{node: {neighbour: weight}}`` -- exactly the shape the Python
+    ``graph=`` argument accepts. Returned unchanged for the effect builders to
+    validate, so an existing JSON adjacency (e.g. an example's ``graph.json``)
+    is reusable from the YAML frontend without conversion.
+
+    Otherwise (``.graph`` and anything else): the R-INLA / latte format, where
+    the first token is the node count ``n``, then for each node a line
     ``id k nb_1 ... nb_k`` (1-indexed ids). Returns string-keyed neighbours.
     """
+    if os.fspath(path).lower().endswith(".json"):
+        with open(path, encoding="utf-8") as handle:
+            graph = json.load(handle)
+        if not isinstance(graph, dict):
+            raise ValueError("JSON graph file must be an object mapping node -> neighbours")
+        return graph
     tokens = []
     with open(path, encoding="utf-8") as handle:
         for line in handle:

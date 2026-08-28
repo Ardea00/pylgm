@@ -33,7 +33,10 @@ For the precise semantics of each shipped feature, follow the links into the
   [prediction](prediction.md).
 - **Data boundary** — Pandas, or Spark / Databricks input. See [Spark](spark.md).
 - **Declarative frontend** — models expressible in YAML via
-  `pylgm.config.load_model`.
+  `pylgm.config.load_model`, including the spatial `besag`/`proper_car`/`bym2`
+  families with an inline or file graph (`graph_file` accepts an R-INLA
+  `.graph` or a `.json` neighbour dict). See
+  [spatial effects](spatial-effects.md).
 - **Sparse large-graph scaling (E-sparse)** — network and space-time models
   whose latent dimension exceeds the dense reference regime now fit past the
   dense guard through a sparse constrained-Gaussian solver, delivering posterior
@@ -48,17 +51,15 @@ For the precise semantics of each shipped feature, follow the links into the
 
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
-1. **Config-file spatial effects** — declare `besag`/`proper_car`/`bym2` (with
-   an inline or file graph) in the YAML frontend, not just the Python API.
-2. **Graceful isolated-node handling** in graphs, and the augmented 2n CAR
+1. **Graceful isolated-node handling** in graphs, and the augmented 2n CAR
    representation.
-3. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
-4. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-5. **Directed & dynamic network structure** — a SAR effect
+2. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
+3. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
+4. **Directed & dynamic network structure** — a SAR effect
    (`(I−ρW)ᵀ(I−ρW)`) for directed economic influence that symmetrized CAR
    discards, and time-varying `W_t` — building on the weighted-graph support
    above.
-6. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
+5. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
    mixed-frequency nowcasting frontend and a YAML `midas` effect type, building
    on the now-shipped `MIDASParametric` exp-Almon / Beta lag kernels.
 

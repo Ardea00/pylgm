@@ -82,6 +82,30 @@ def test_load_graph_file_rejects_negative_degree(tmp_path):
         load_graph_file(path)
 
 
+def test_load_graph_file_json_neighbour_dict(tmp_path):
+    path = tmp_path / "g.json"
+    path.write_text('{"1": ["2"], "2": ["1", "3"], "3": ["2"]}')
+    graph = load_graph_file(path)
+    assert graph == {"1": ["2"], "2": ["1", "3"], "3": ["2"]}
+    # rides straight into the graph builders (path graph 1-2-3, no conversion)
+    nodes, _ = normalize_graph(graph)
+    assert nodes == ("1", "2", "3")
+
+
+def test_load_graph_file_json_weighted_survives(tmp_path):
+    path = tmp_path / "g.json"
+    path.write_text('{"a": {"b": 5.0}, "b": {"a": 5.0}}')
+    _, w = normalize_graph(load_graph_file(path))
+    assert w.data.max() == 5.0
+
+
+def test_load_graph_file_json_rejects_non_object(tmp_path):
+    path = tmp_path / "g.json"
+    path.write_text('["1", "2"]')
+    with pytest.raises(ValueError, match="object mapping"):
+        load_graph_file(path)
+
+
 def test_design_from_graph_one_hot_and_missing():
     import pandas as pd
     from pylgm.effects.graph import design_from_graph
