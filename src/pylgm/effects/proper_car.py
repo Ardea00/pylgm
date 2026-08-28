@@ -78,7 +78,8 @@ def build_proper_car(
     if isolated:
         raise ValueError(
             "regions have no neighbours (proper CAR is singular at isolated nodes; "
-            f"model them as an IID effect instead): {isolated!r}"
+            "use Besag or BYM2, which treat an isolated region as an independent "
+            f"IID unit): {isolated!r}"
         )
     design = design_from_graph(nodes, frame, index)
     lower, upper, mu_min, mu_max = _validity_interval(w, degree)

@@ -57,10 +57,13 @@ def test_disconnected_graph_is_supported():
     cho_factor(block.precision.toarray())
 
 
-def test_isolated_node_rejected():
+def test_isolated_node_is_iid_singleton():
+    # An isolated region becomes an independent IID unit; BYM2 now builds it
+    # instead of rejecting. Dense path stays unconstrained and positive definite.
     graph = {"A": ["B"], "B": ["A"], "C": []}
-    with pytest.raises(ValueError, match="no neighbours"):
-        build_bym2(_frame(["A", "B", "C"]), "region", "region", graph, 1.0, 0.5)
+    block = build_bym2(_frame(["A", "B", "C"]), "region", "region", graph, 1.0, 0.5)
+    assert block.constraints.shape == (0, 3)
+    cho_factor(block.precision.toarray())
 
 
 def test_observed_region_absent_from_graph_rejected():
@@ -109,3 +112,31 @@ def test_bym2_augmented_x_marginal_matches_dense():
     sig = basis @ np.linalg.inv(basis.T @ qj @ basis) @ basis.T
     aug_x_cov = sig[:n, :n]
     assert np.allclose(np.diag(aug_x_cov), np.diag(dense_x_cov), atol=1e-9)
+
+
+def test_bym2_augmented_multicomponent_x_marginal_matches_dense():
+    from scipy.linalg import null_space
+
+    from pylgm.effects.bym2 import _build_bym2_augmented
+
+    # Two disconnected 3-node chains plus a lone isolated region: exercises the
+    # per-component u* sum-to-zero AND an unconstrained IID singleton u*. The
+    # augmented x-marginal must still equal the dense spectral one component-wise.
+    graph = {
+        "a0": ["a1"], "a1": ["a0", "a2"], "a2": ["a1"],
+        "b0": ["b1"], "b1": ["b0", "b2"], "b2": ["b1"],
+        "iso": [],
+    }
+    nodes = ["a0", "a1", "a2", "b0", "b1", "b2", "iso"]
+    n = len(nodes)
+    tau, phi = 1.3, 0.6
+
+    aug = _build_bym2_augmented(_frame(nodes), "s", "region", graph, tau, phi)
+    vectors, values = bym2_spectrum(graph)
+    dense_x_cov = np.linalg.inv(bym2_precision(vectors, values, tau, phi).toarray())
+
+    # two components of size >= 2 -> two u* sum-to-zero rows; isolated adds none
+    assert aug.constraints.shape == (2, 2 * n)
+    basis = null_space(aug.constraints)
+    sig = basis @ np.linalg.inv(basis.T @ aug.precision.toarray() @ basis) @ basis.T
+    assert np.allclose(np.diag(sig[:n, :n]), np.diag(dense_x_cov), atol=1e-9)
