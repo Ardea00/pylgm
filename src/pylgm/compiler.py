@@ -57,7 +57,16 @@ from pylgm.ir import (
 )
 from pylgm.inference.prediction import PredictionContext
 from pylgm.ir.model import LatentBlock, _block_constraints
-from pylgm.likelihoods import Bernoulli, CompiledGaussian, Gaussian, Poisson
+from pylgm.likelihoods import (
+    Bernoulli,
+    Beta,
+    Binomial,
+    CompiledGaussian,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Poisson,
+)
 from pylgm.optimization.empirical_bayes import OptimizationBounds
 from pylgm.optimization.transforms import IdentityTransform, LogitTransform, LogTransform
 from pylgm.parameters import Hyperparameter
@@ -259,6 +268,23 @@ def _warn_missing_spacetime_main_effects(effects) -> None:
             )
 
 
+def _binomial_trials(model: "LGM", frame: object) -> "np.ndarray | None":
+    """Extract and validate the per-row trials vector for a Binomial likelihood.
+
+    Returns ``None`` for every other likelihood, so binding it via
+    ``for_observations`` is a no-op (the trials hook defaults to ``return self``).
+    """
+    if not isinstance(model.likelihood, Binomial):
+        return None
+    column = model.likelihood.trials
+    if column not in frame.columns:
+        raise DataContractError(f"trials column not found: {column!r}")
+    trials = frame[column].to_numpy(dtype=float)
+    if not np.all(np.isfinite(trials)) or np.any(trials < 1.0) or np.any(trials != np.floor(trials)):
+        raise CompilationError("binomial trials column must be positive integers")
+    return trials
+
+
 def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     """Compile a declarative model through the existing sparse effect builders."""
     if panel.response != model.response:
@@ -389,10 +415,18 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         except (TypeError, ValueError) as error:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
-    if isinstance(model.likelihood, (Poisson, Bernoulli)):
-        compiled_likelihood = model.likelihood.materialize({})
+    if isinstance(model.likelihood, (Poisson, Bernoulli, Binomial, NegativeBinomial, Gamma, Beta)):
+        # A phi-family with an optimisable phi compiles here at its initial value
+        # (the EB/INLA fit refines it); a fixed-phi family ignores the mapping.
+        phi = getattr(model.likelihood, "phi", None)
+        values = {phi.name: phi.initial} if isinstance(phi, Hyperparameter) else {}
+        compiled_likelihood = model.likelihood.materialize(values)
         observed = panel.observed
-        compiled_likelihood.validate_response(y[observed])
+        # Binomial carries a per-row trials vector; binding is a no-op otherwise.
+        trials = _binomial_trials(model, frame)
+        obs_trials = trials[observed] if trials is not None else None
+        compiled_likelihood.for_observations(obs_trials).validate_response(y[observed])
+        compiled_likelihood = compiled_likelihood.for_observations(trials)
         if not blocks:
             raise CompilationError("model must contain at least one latent effect")
         width = sum(block.design.shape[1] for block in blocks)
@@ -426,6 +460,9 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
     found: list[tuple[str, Hyperparameter]] = []
     if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
         found.append(("sigma", model.likelihood.sigma))
+    phi = getattr(model.likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
+    if isinstance(phi, Hyperparameter):
+        found.append(("phi", phi))
     for effect in model.predictor.effects:
         precision = getattr(effect, "precision", None)
         if isinstance(precision, Hyperparameter):
@@ -846,9 +883,18 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 return CompiledGaussian(sigma)
     else:
         likelihood = model.likelihood
+        phi = getattr(likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
+        if isinstance(phi, Hyperparameter):
+            parameter_names.append(phi.name)
+            parameter_bounds[phi.name] = _log_bounds(phi)
 
-        def factory(resolved: dict, likelihood: object = likelihood) -> object:
-            return likelihood.materialize({})
+        # materialize is lenient (picks phi out of the joint mapping); a phi-less
+        # family (Poisson/Bernoulli) ignores `resolved` and returns unchanged.
+        # Binomial's trials vector is data, bound onto the compiled likelihood.
+        trials = _binomial_trials(model, frame)
+
+        def factory(resolved: dict, likelihood: object = likelihood, trials=trials) -> object:
+            return likelihood.materialize(resolved).for_observations(trials)
 
     constraint_labels = _qualified_labels([item.block for item in scalable])
     extra_constraints, extra_constraint_rhs = resolve_constraints(
@@ -915,5 +961,6 @@ def build_prediction_context(
         entries=tuple(entries),
         likelihood=compiled.likelihood,
         offset=model.offset,
+        trials=model.likelihood.trials if isinstance(model.likelihood, Binomial) else None,
         width=compiled.design.shape[1],
     )

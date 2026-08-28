@@ -119,6 +119,52 @@ def test_load_bernoulli_model(tmp_path):
     assert model.offset is None
 
 
+@pytest.mark.parametrize(
+    "family_name, cls_name",
+    [("nbinomial", "NegativeBinomial"), ("gamma", "Gamma"), ("beta", "Beta")],
+)
+def test_load_phi_family_models(tmp_path, family_name, cls_name):
+    import pylgm
+
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        f"likelihood: {{family: {family_name}, phi: 2.5}}\n"
+        "data: {time: t}\n"
+        "predictor: {fixed: '1'}\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, getattr(pylgm, cls_name))
+    assert model.likelihood.phi == 2.5
+
+
+def test_load_phi_family_defaults_phi_when_omitted(tmp_path):
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\nlikelihood: {family: gamma}\ndata: {time: t}\npredictor: {fixed: '1'}\n"
+    )
+    assert load_model(path).likelihood.phi == 1.0
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        # sigma is gaussian-only
+        "response: y\nlikelihood: {family: gamma, sigma: 1.0}\npredictor: {fixed: '1'}",
+        # phi is not valid for poisson/bernoulli/gaussian
+        "response: y\nlikelihood: {family: poisson, phi: 2.0}\npredictor: {fixed: '1'}",
+        "response: y\nlikelihood: {family: gaussian, sigma: 1, phi: 2.0}\npredictor: {fixed: '1'}",
+        # phi must be finite-positive
+        "response: y\nlikelihood: {family: beta, phi: 0}\npredictor: {fixed: '1'}",
+    ],
+)
+def test_load_model_rejects_invalid_phi_usage(tmp_path, document):
+    path = tmp_path / "m.yaml"
+    path.write_text(document)
+    with pytest.raises(ConfigurationError):
+        load_model(path)
+
+
 _SPATIAL_GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"]}
 _INLINE_GRAPH = "{a: [b], b: [a, c], c: [b]}"
 
@@ -235,4 +281,42 @@ def test_load_model_reports_missing_graph_file(tmp_path: Path) -> None:
     path.write_text(_spatial_doc("name: area, type: besag, index: region, graph_file: nope.graph"))
 
     with pytest.raises(ConfigurationError):
+        load_model(path)
+
+
+def test_load_binomial_model(tmp_path: Path) -> None:
+    from pylgm import Binomial
+
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: binomial\n  trials: n\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1'\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, Binomial)
+    assert model.likelihood.trials == "n"
+
+
+@pytest.mark.parametrize(
+    "likelihood_body, match",
+    [
+        # binomial without its required trials column
+        ("family: binomial", "trials is required"),
+        # trials on a non-binomial family
+        ("family: poisson\n  trials: n", "trials is not a valid"),
+    ],
+)
+def test_load_model_rejects_invalid_trials_usage(
+    tmp_path: Path, likelihood_body: str, match: str
+) -> None:
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        f"likelihood:\n  {likelihood_body}\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1'\n"
+    )
+    with pytest.raises(ConfigurationError, match=match):
         load_model(path)

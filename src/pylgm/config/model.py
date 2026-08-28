@@ -22,16 +22,30 @@ class _DataModelConfig(StrictModel):
     time: str | None = None
 
 
+_PHI_FAMILIES = ("nbinomial", "gamma", "beta")
+
+
 class _LikelihoodModelConfig(StrictModel):
-    family: Literal["gaussian", "poisson", "bernoulli"]
+    family: Literal["gaussian", "poisson", "bernoulli", "binomial", "nbinomial", "gamma", "beta"]
     sigma: FinitePositiveFloat | None = None
+    # NB/Gamma/Beta dispersion/precision; fixed only in YAML (a Hyperparameter phi
+    # stays Python-API-only), optional because the families default it to 1.0.
+    phi: FinitePositiveFloat | None = None
+    # Binomial per-row trials column name (required for binomial, rejected otherwise).
+    trials: str | None = None
 
     @model_validator(mode="after")
-    def _sigma_matches_family(self) -> "_LikelihoodModelConfig":
+    def _fields_match_family(self) -> "_LikelihoodModelConfig":
         if self.family == "gaussian" and self.sigma is None:
             raise ValueError("sigma is required for likelihood: {family: gaussian}")
         if self.family != "gaussian" and self.sigma is not None:
             raise ValueError(f"sigma is not a valid field for likelihood: {{family: {self.family}}}")
+        if self.family not in _PHI_FAMILIES and self.phi is not None:
+            raise ValueError(f"phi is not a valid field for likelihood: {{family: {self.family}}}")
+        if self.family == "binomial" and not self.trials:
+            raise ValueError("trials is required for likelihood: {family: binomial}")
+        if self.family != "binomial" and self.trials is not None:
+            raise ValueError(f"trials is not a valid field for likelihood: {{family: {self.family}}}")
         return self
 
 
@@ -113,13 +127,28 @@ def _build_effect(config: _EffectModelConfig, base_dir: Path) -> object:
 
 
 def _build_likelihood(config: _LikelihoodModelConfig) -> object:
-    from pylgm.likelihoods import Bernoulli, Gaussian, Poisson
+    from pylgm.likelihoods import (
+        Bernoulli,
+        Beta,
+        Binomial,
+        Gamma,
+        Gaussian,
+        NegativeBinomial,
+        Poisson,
+    )
 
     if config.family == "gaussian":
         return Gaussian(config.sigma)
     if config.family == "poisson":
         return Poisson()
-    return Bernoulli()
+    if config.family == "bernoulli":
+        return Bernoulli()
+    if config.family == "binomial":
+        return Binomial(config.trials)
+    # phi-families: phi is optional in YAML, the family defaults it to 1.0.
+    phi_families = {"nbinomial": NegativeBinomial, "gamma": Gamma, "beta": Beta}
+    family = phi_families[config.family]
+    return family() if config.phi is None else family(config.phi)
 
 
 def _build_model(config: _StandaloneModelConfig, base_dir: Path) -> LGM:

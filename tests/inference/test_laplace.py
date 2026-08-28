@@ -150,3 +150,82 @@ def test_genuine_non_convergence_still_raises():
     compiled = compile_lgm(model, panel)
     with pytest.raises(InferenceConvergenceError):
         fit_laplace(compiled, max_iterations=1)
+
+
+@pytest.mark.parametrize("family_name", ["nbinomial", "gamma"])
+def test_laplace_log_link_families_intercept_matches_log_mean(family_name):
+    # NB & Gamma both use a log link; the intercept-only score equation is
+    # solved by mu = mean(y), i.e. eta = log(ybar), independent of phi.
+    from pylgm import Gamma, NegativeBinomial
+
+    family = {"nbinomial": NegativeBinomial(2.5), "gamma": Gamma(2.5)}[family_name]
+    frame = pd.DataFrame({"t": [1, 2, 3, 4], "y": [2.0, 3.0, 5.0, 6.0]})
+    model = LGM("y", family, Fixed("1", prior_precision=1e-8), time="t")
+    result = fit_laplace(compile_lgm(model, _panel(frame)))
+    np.testing.assert_allclose(result.mean, [np.log(4.0)], atol=1e-6)
+    assert result.diagnostics["final_gradient_norm"] < 1e-8
+
+
+def test_laplace_beta_intercept_matches_logit_link_mode():
+    # Beta uses a logit link; for data symmetric about 0.5 the mean(logit y)
+    # term vanishes, so the intercept-only mode is logit(0.5) = 0.
+    from pylgm import Beta
+
+    frame = pd.DataFrame({"t": [1, 2, 3, 4], "y": [0.2, 0.8, 0.3, 0.7]})
+    model = LGM("y", Beta(5.0), Fixed("1", prior_precision=1e-8), time="t")
+    result = fit_laplace(compile_lgm(model, _panel(frame)))
+    np.testing.assert_allclose(result.mean, [0.0], atol=1e-6)
+
+
+def test_empirical_bayes_recovers_planted_nbinomial_dispersion():
+    # A phi Hyperparameter must flow through the generalized likelihood hook and
+    # be estimated: fit EB on data drawn from a known NB2 dispersion.
+    from pylgm import Hyperparameter, NegativeBinomial
+
+    rng = np.random.default_rng(0)
+    n, mu, phi_true = 4000, np.exp(1.0), 3.0
+    y = rng.negative_binomial(phi_true, phi_true / (phi_true + mu), size=n).astype(float)
+    frame = pd.DataFrame({"t": np.arange(n), "y": y})
+    model = LGM(
+        "y",
+        NegativeBinomial(Hyperparameter("phi", initial=1.0, transform="log")),
+        Fixed("1", prior_precision=1e-8),
+        time="t",
+    )
+    result = model.fit(frame, engine="laplace", hyperparameters="optimize")
+    assert result.hyperparameters["phi"] == pytest.approx(phi_true, rel=0.1)
+
+
+def test_laplace_binomial_intercept_matches_aggregate_logit():
+    # Aggregated binomial, logit link: the intercept-only mode is logit of the
+    # pooled success rate, logit(sum y / sum n), independent of the split.
+    from pylgm import Binomial
+
+    frame = pd.DataFrame(
+        {"t": [1, 2, 3, 4], "y": [3.0, 4.0, 7.0, 2.0], "n": [10.0, 8.0, 12.0, 5.0]}
+    )
+    model = LGM("y", Binomial("n"), Fixed("1", prior_precision=1e-8), time="t")
+    result = fit_laplace(compile_lgm(model, _panel(frame)))
+    total_y, total_n = 16.0, 35.0
+    np.testing.assert_allclose(result.mean, [np.log(total_y / (total_n - total_y))], atol=1e-6)
+    assert result.diagnostics["final_gradient_norm"] < 1e-8
+
+
+def test_laplace_binomial_predicts_counts_with_new_trials():
+    # Fit with a trials column, then predict on new rows whose trials column
+    # differs: fitted_mean must be n_new * p (counts), not the probability p.
+    from pylgm import Binomial
+
+    frame = pd.DataFrame(
+        {"t": [1, 2, 3, 4], "y": [3.0, 4.0, 7.0, 2.0], "n": [10.0, 8.0, 12.0, 5.0]}
+    )
+    model = LGM("y", Binomial("n"), Fixed("1", prior_precision=1e-8), time="t")
+    result = model.fit(frame, engine="laplace")
+    p = 1.0 / (1.0 + np.exp(-float(result.mean[0])))
+
+    new_data = pd.DataFrame({"t": [5, 6, 7], "n": [100.0, 50.0, 7.0]})
+    prediction = result.predict(new_data)
+    np.testing.assert_allclose(prediction.fitted_mean, np.array([100.0, 50.0, 7.0]) * p)
+
+    with pytest.raises(ValueError, match="trials column"):
+        result.predict(pd.DataFrame({"t": [5], "z": [1.0]}))

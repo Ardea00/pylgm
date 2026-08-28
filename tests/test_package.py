@@ -54,6 +54,8 @@ def test_spark_example_runs_and_reports_prediction_keys() -> None:
         text=True,
         env=env,
     )
+    if completed.returncode != 0 and "JAVA_GATEWAY_EXITED" in completed.stderr:
+        pytest.skip("Spark example needs a JVM (no Java installed)")
     assert completed.returncode == 0, completed.stderr
     assert "prediction_keys" in completed.stdout
 

@@ -7,8 +7,11 @@ For the precise semantics of each shipped feature, follow the links into the
 
 ## Shipped in 0.3
 
-- **Likelihoods** — Gaussian (exact engine), Poisson and Bernoulli (Laplace
-  engine). See [likelihoods](likelihoods.md).
+- **Likelihoods** — Gaussian (exact engine), Poisson, Bernoulli, Binomial
+  (counts `n·p` with a per-row trials column), NegativeBinomial (overdispersed
+  counts), Gamma (positive-continuous), and Beta (proportions in `(0,1)`), all
+  on the Laplace engine, with fixed or estimated dispersion `φ`. See
+  [likelihoods](likelihoods.md).
 - **Effects** — `Fixed`, `IID`, `RW1`/`RW2`, stationary `AR1`, the `MIDAS`
   mixed-frequency smooth-lag effect and its restricted (parametric)
   `MIDASParametric` counterpart (exp-Almon / Beta lag kernels), and the
@@ -56,7 +59,11 @@ For the precise semantics of each shipped feature, follow the links into the
 
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
-1. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
+1. **Survival likelihoods** — `weibullsurv` and `exponentialsurv`. Unlike the
+   GLM families these are not plain response-scale likelihoods: they need an
+   event-time + right-censoring data contract (per-row event/censoring
+   indicator and follow-up time), so they carry their own data-plumbing slice
+   rather than reusing the GLM response column.
 2. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
 3. **Directed & dynamic network structure** — a SAR effect
    (`(I−ρW)ᵀ(I−ρW)`) for directed economic influence that symmetrized CAR

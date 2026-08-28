@@ -66,6 +66,54 @@ below. A runnable example lives at
 Spark data-boundary path (Spark only collects and canonicalizes data; the
 Laplace fit itself still runs on the driver, same as `exact_gaussian`).
 
+## The GLM families
+
+Beyond `Gaussian`, `Poisson`, and `Bernoulli`, the Laplace engine fits four
+more generalized-linear families. All reuse the same Newton mode-finder — they
+differ only in their per-observation link and derivatives.
+
+| Family | Link | Response support | Dispersion `phi` | `fitted_mean` |
+|--------|------|------------------|------------------|---------------|
+| `NegativeBinomial(phi=1.0)` | log | non-negative integers | `Var = mu + mu^2/phi` (NB2); `phi -> inf` is Poisson | `exp(mean + var/2)` |
+| `Gamma(phi=1.0)` | log | positive reals | `Var = mu^2/phi`; shape `a = phi` | `exp(mean + var/2)` |
+| `Beta(phi=1.0)` | logit | open interval `(0, 1)` | `Beta(mu*phi, (1-mu)*phi)` precision | point estimate `logit^-1(mean)` |
+| `Binomial(trials="col")` | logit | integers `0 <= y <= n` | — (no free dispersion) | counts `n * p` |
+
+```python
+from pylgm import Beta, Binomial, Fixed, Gamma, LGM, NegativeBinomial
+
+# Overdispersed counts (fixed dispersion phi=2.5)
+LGM("y", NegativeBinomial(2.5), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+
+# Positive-continuous (gamma) and proportions in (0, 1) (beta)
+LGM("y", Gamma(3.0), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+LGM("rate", Beta(10.0), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+
+# Aggregated binomial: `trials` names the per-row count column n; predicts n*p
+LGM("successes", Binomial("n"), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+```
+
+**Dispersion `phi`.** For NB/Gamma/Beta, `phi` is a strictly-positive
+concentration parameter. Pass a fixed float, or a
+[`Hyperparameter`](empirical-bayes.md#empirical-bayes) to estimate it by
+type-II ML alongside the effect precisions (`hyperparameters="optimize"`). The
+YAML frontend accepts a fixed value only: `likelihood: {family: nbinomial, phi:
+2.5}` (phi is optional and defaults to 1.0); `gaussian` still requires `sigma`,
+and non-φ families reject `phi`.
+
+**Binomial `trials`.** `Binomial` takes the *name* of a per-row trials column
+`n` (not a value). The response `y` is the success count, and both the fitted
+values and out-of-sample `predict()` return **counts** `n * p` rather than the
+probability `p` — so `predict(new_data)` requires `new_data` to carry its own
+trials column, and scores each new row against its own `n`. The `n = 1` case
+reduces exactly to `Bernoulli`. In YAML: `likelihood: {family: binomial,
+trials: n}` (required for binomial, rejected for every other family).
+
+`response_prediction` for `Beta` and `Binomial` follows the `Bernoulli`
+convention — a point estimate that ignores the linear-predictor variance —
+while the two log-link families (`NegativeBinomial`, `Gamma`) apply the same
+exact lognormal correction `exp(mean + var/2)` as `Poisson`.
+
 ## The `predictive_variance` convention
 
 `predictive_variance` is the **linear-predictor** posterior variance
