@@ -659,6 +659,11 @@ class _BaseResult:
     @property
     def covariance(self) -> np.ndarray:
         if self._covariance is None:
+            if getattr(self, "_latent_variances", None) is not None:
+                raise DenseReferenceLimitError(
+                    "integrated posterior covariance is not materialised at this scale; "
+                    "use latent_marginals() for the marginal variances"
+                )
             if getattr(self, "_sparse_posterior", None) is not None:
                 raise DenseReferenceLimitError(
                     "posterior covariance is not materialised at this scale; use "
@@ -978,6 +983,7 @@ class INLAResult(_BaseResult):
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
+    _latent_variances: np.ndarray | None = field(repr=False)
 
     def __init__(
         self,
@@ -999,6 +1005,7 @@ class INLAResult(_BaseResult):
         latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = None,
         prediction_context: object | None = None,
         observation_variance: float | None = None,
+        latent_variances: np.ndarray | None = None,
     ) -> None:
         def _validate_inla_extras() -> None:
             if not isinstance(criteria, ModelCriteria):
@@ -1030,6 +1037,11 @@ class INLAResult(_BaseResult):
                 self,
                 "observation_variance",
                 None if observation_variance is None else float(observation_variance),
+            )
+            object.__setattr__(
+                self,
+                "_latent_variances",
+                latent_variances if latent_variances is None else _readonly_array(latent_variances),
             )
 
         self._init_common(
@@ -1070,6 +1082,10 @@ class INLAResult(_BaseResult):
                 except KeyError as error:
                     raise KeyError(f"unknown latent block {block!r}") from error
             return self._latent_marginal_table.select(selection)
+        if self._covariance is None and self._latent_variances is not None:
+            return latent_marginals_from_variances(
+                self._mean, self._latent_variances, self.block_slices, block
+            )
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:

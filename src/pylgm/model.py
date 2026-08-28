@@ -202,6 +202,10 @@ def _rebuild_result(
             link_name=result.link_name,
             latent_marginal_table=result.latent_marginal_table,
             observation_variance=result.observation_variance,
+            # ponytail: latent_variances is a full-latent diagonal (not row-indexed
+            # like predictive_mean/predictive_variance), so caller_order does not
+            # permute it -- straight pass-through is correct.
+            latent_variances=getattr(result, "_latent_variances", None),
             **common,
         )
     # ponytail: caller_order only permutes prediction rows (predictive_mean/
