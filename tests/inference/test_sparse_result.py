@@ -95,3 +95,15 @@ def test_sparse_result_marginals_match_dense_but_covariance_guarded(small_model_
     with pytest.raises(DenseReferenceLimitError) as exc:
         _ = sparse.covariance
     assert "E-sparse-C" not in str(exc.value)
+
+
+def test_rebuild_preserves_sparse_posterior(small_model_forced_sparse):
+    from pylgm.inference.gaussian import _fit_sparse
+    from pylgm.model import _rebuild_result
+
+    sparse = _fit_sparse(small_model_forced_sparse)
+    order = np.arange(sparse.predictive_mean.size)[::-1]
+    rebuilt = _rebuild_result(sparse, caller_order=order)
+    assert rebuilt._sparse_posterior is sparse._sparse_posterior
+    # latent marginals still computable after rebuild
+    assert np.all(np.isfinite(rebuilt.latent_marginals().variance))

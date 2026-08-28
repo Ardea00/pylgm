@@ -204,7 +204,14 @@ def _rebuild_result(
             observation_variance=result.observation_variance,
             **common,
         )
-    return GaussianResult(observation_variance=result.observation_variance, **common)
+    # ponytail: caller_order only permutes prediction rows (predictive_mean/
+    # predictive_variance above), never the latent index space, so the sparse
+    # posterior needs no reindexing -- straight pass-through is correct.
+    return GaussianResult(
+        observation_variance=result.observation_variance,
+        sparse_posterior=getattr(result, "_sparse_posterior", None),
+        **common,
+    )
 
 
 def _align_predictions_with_source_rows(
