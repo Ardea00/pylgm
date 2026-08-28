@@ -1,0 +1,23 @@
+# Declarative form of the Scotland lip-cancer disease-mapping model (see run.py):
+#   observed_i ~ Poisson(mu_i),  log(mu_i) = log_E_i + b0 + b1*aff_i + s_i
+# where s is a Besag (ICAR) spatial effect over the district adjacency graph.
+#
+# The YAML frontend takes fixed plug-in hyperparameters only, so the spatial
+# precision is pinned here rather than estimated as run.py does. graph_file
+# points straight at the shipped graph.json neighbour dict -- no conversion.
+#
+#   from pylgm.config import load_model
+#   model = load_model(Path("config.yaml"))
+#   result = model.fit(pd.read_csv("data.csv"))
+response: observed
+likelihood:
+  family: poisson
+offset: log_E
+predictor:
+  fixed: "1 + aff"
+  effects:
+    - name: spatial
+      type: besag
+      index: area
+      precision: 1.0
+      graph_file: graph.json

@@ -59,8 +59,11 @@ already documented above for `RW`/intrinsic effects.
 
 **From YAML:** the standalone `load_model` frontend declares `besag`,
 `proper_car`, and `bym2` effects, with the neighbour graph given inline as
-`graph:` or as a path to an R-INLA `.graph` file via `graph_file:` (resolved
-relative to the YAML file). Fixed values only — `precision`, `rho` (required
+`graph:` or as a path via `graph_file:` (resolved relative to the YAML file).
+`graph_file:` accepts an R-INLA `.graph` file or a `.json` neighbour dict
+(`{node: [neighbour, ...]}`, or `{node: {neighbour: weight}}` when weighted) —
+the same shape the inline `graph:` and Python `graph=` arguments take, so an
+existing JSON adjacency is reusable without conversion. Fixed values only — `precision`, `rho` (required
 for `proper_car`), `phi` (`bym2`), and `scale` (`besag`); estimating a
 hyperparameter stays Python-API-only. Example:
 
