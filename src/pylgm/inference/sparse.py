@@ -113,6 +113,32 @@ class SparsePosterior:
             out[d] = cho_solve(self.d_factor, rhs[d])
         return out
 
+    def _unconstrained_marginal(self) -> np.ndarray:
+        """diag(P_post^-1) -- the unconstrained posterior variance, full length."""
+        diag = np.zeros(self.latent_size)
+        s, d = self.sparse_index, self.dense_index
+        if s.size:
+            diag_ss = selected_inverse_diagonal(self.a_ss_matrix)   # diag(A_ss^-1)
+            if d.size:
+                w = self.a_ss.solve(self.b)                          # A_ss^-1 B  (n_s x m)
+                sinv_wt = cho_solve(self.schur_factor, w.T)          # S^-1 W^T   (m x n_s)
+                diag_ss = diag_ss + np.einsum("ij,ji->i", w, sinv_wt)
+            diag[s] = diag_ss
+        if d.size:
+            m = d.size
+            factor = self.schur_factor if s.size else self.d_factor
+            diag[d] = np.diag(cho_solve(factor, np.eye(m)))
+        return diag
+
+    def marginal_variances(self) -> np.ndarray:
+        """diag(Sigma_c) -- constrained posterior marginal variances, full length."""
+        diag = self._unconstrained_marginal()
+        if self.w_constraint is not None:
+            w = self.w_constraint                                    # latent x c
+            cw = cho_solve(self.cap_factor, w.T)                     # c x latent
+            diag = diag - np.einsum("ij,ji->i", w, cw)
+        return np.clip(diag, 0.0, None)
+
 
 @dataclass(frozen=True)
 class SparseFit:

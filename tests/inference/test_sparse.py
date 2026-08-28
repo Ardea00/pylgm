@@ -241,6 +241,41 @@ def test_sparse_matches_dense_extraconstr(besag_extraconstr_model):
     assert np.isclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6)
 
 
+def test_sparse_marginal_variances_match_dense_unconstrained(proper_car_with_intercept_model):
+    """diag(Sigma) from the sparse posterior must equal _fit_dense's covariance
+    diagonal on the unconstrained, well-conditioned proper-CAR fixture -- this
+    exercises the Takahashi + Schur composition with w_constraint is None."""
+    model = proper_car_with_intercept_model
+    assert model.constraints.shape[0] == 0
+    dense = _fit_dense(model)
+    posterior = sparse_constrained_gaussian(model).posterior
+    got = posterior.marginal_variances()
+    assert np.allclose(got, np.diag(dense.covariance), atol=1e-7)
+
+
+def test_sparse_marginal_variances_match_dense_besag(besag_with_intercept_model):
+    """diag(Sigma_c) from the sparse posterior must equal _fit_dense's covariance
+    diagonal on the Besag+intercept fixture -- this exercises the Rue-Held
+    constrained correction.
+
+    Tolerance: the unconstrained posterior precision here is confounded (the
+    intrinsic field's null mode coincides with the intercept absent the
+    sum-to-zero constraint, cond ~2.5e9), so _unconstrained_marginal computes
+    diag(P^-1) for a near-singular P and the Rue-Held correction then subtracts
+    the null direction back out -- a catastrophic-cancellation path. Measured
+    relative error is ~1e-7, consistent with the ~1e9 condition number times
+    machine epsilon; rtol=1e-6/atol=1e-8 covers that without masking a logic
+    error (a wrong composition would miss by orders of magnitude, not ~1e-7).
+    """
+    model = besag_with_intercept_model
+    assert model.constraints.shape[0] >= 1
+    dense = _fit_dense(model)
+    posterior = sparse_constrained_gaussian(model).posterior
+    got = posterior.marginal_variances()
+    want = np.diag(dense.covariance)
+    assert np.allclose(got, want, rtol=1e-6, atol=1e-8)
+
+
 def test_selected_inverse_diagonal_matches_dense_inverse():
     """Takahashi selected inversion must equal diag(inv(Q)) on ring and grid GMRFs."""
     import numpy as np
