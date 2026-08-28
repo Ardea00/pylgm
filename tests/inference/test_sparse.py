@@ -276,6 +276,62 @@ def test_sparse_marginal_variances_match_dense_besag(besag_with_intercept_model)
     assert np.allclose(got, want, rtol=1e-6, atol=1e-8)
 
 
+def test_sparse_predictive_and_covariance_match_dense_unconstrained(
+    proper_car_with_intercept_model,
+):
+    """predictive_variances / linear_combination_variances / covariance_dense
+    must equal the _fit_dense oracle on the well-conditioned, unconstrained
+    proper-CAR fixture (w_constraint is None) -- this is the tight-tolerance
+    correctness gate for the quadratic-form math itself."""
+    model = proper_car_with_intercept_model
+    assert model.constraints.shape[0] == 0
+    dense = _fit_dense(model)
+    posterior = sparse_constrained_gaussian(model).posterior
+
+    design = model.design.toarray()
+    want_pv = np.einsum("ij,jk,ik->i", design, dense.covariance, design)
+    got_pv = posterior.predictive_variances(model.design)
+    assert np.allclose(got_pv, want_pv, atol=1e-7)
+
+    weights = design[:5]
+    want_lc = np.einsum("ij,jk,ik->i", weights, dense.covariance, weights)
+    assert np.allclose(posterior.linear_combination_variances(weights), want_lc, atol=1e-7)
+
+    assert np.allclose(posterior.covariance_dense(), dense.covariance, atol=1e-7)
+
+
+def test_sparse_predictive_and_covariance_match_dense_besag(besag_with_intercept_model):
+    """Same three comparisons on the Besag+intercept fixture (w_constraint is
+    not None) -- exercises the Rue-Held constrained correction in all three
+    methods.
+
+    Tolerance: as in test_sparse_marginal_variances_match_dense_besag, the
+    unconstrained posterior precision here is confounded (intrinsic field's
+    null mode == the intercept absent the sum-to-zero constraint, cond ~2.5e9),
+    so this is a genuine catastrophic-cancellation path, not a bug: measured
+    relative error ~cond * eps ~= 2.5e9 * 2.2e-16 ~= 5.5e-7. rtol=1e-6/atol=1e-8
+    covers that without masking a wrong composition (which would miss by
+    orders of magnitude, not ~1e-7).
+    """
+    model = besag_with_intercept_model
+    assert model.constraints.shape[0] >= 1
+    dense = _fit_dense(model)
+    posterior = sparse_constrained_gaussian(model).posterior
+
+    design = model.design.toarray()
+    want_pv = np.einsum("ij,jk,ik->i", design, dense.covariance, design)
+    got_pv = posterior.predictive_variances(model.design)
+    assert np.allclose(got_pv, want_pv, rtol=1e-6, atol=1e-8)
+
+    weights = design[:5]
+    want_lc = np.einsum("ij,jk,ik->i", weights, dense.covariance, weights)
+    got_lc = posterior.linear_combination_variances(weights)
+    assert np.allclose(got_lc, want_lc, rtol=1e-6, atol=1e-8)
+
+    got_cov = posterior.covariance_dense()
+    assert np.allclose(got_cov, dense.covariance, rtol=1e-6, atol=1e-8)
+
+
 def test_selected_inverse_diagonal_matches_dense_inverse():
     """Takahashi selected inversion must equal diag(inv(Q)) on ring and grid GMRFs."""
     import numpy as np

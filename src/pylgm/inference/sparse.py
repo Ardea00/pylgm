@@ -139,6 +139,32 @@ class SparsePosterior:
             diag = diag - np.einsum("ij,ji->i", w, cw)
         return np.clip(diag, 0.0, None)
 
+    def predictive_variances(self, design) -> np.ndarray:
+        """diag(design Σ_c designᵀ) — one variance per row of ``design``."""
+        dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
+        # ponytail: apply_inverse densifies designᵀ to (latent x n_rows). At very
+        # large latent × request width this is the memory ceiling — batch the
+        # columns of designᵀ if it ever bites; fine at current network scale.
+        cov_dt = self.apply_inverse(dense.T)                        # Σ designᵀ (latent x n_rows)
+        var = np.einsum("ij,ji->i", dense, cov_dt)
+        if self.w_constraint is not None:
+            mw = dense @ self.w_constraint                          # n_rows x c
+            cw = cho_solve(self.cap_factor, mw.T)                   # c x n_rows
+            var = var - np.einsum("ij,ji->i", mw, cw)
+        return np.clip(var, 0.0, None)
+
+    def linear_combination_variances(self, weights) -> np.ndarray:
+        """diag(M Σ_c Mᵀ) — same quadratic form as predictive_variances."""
+        return self.predictive_variances(weights)
+
+    def covariance_dense(self) -> np.ndarray:
+        """Full constrained covariance Σ_c (O(n²) — opt-in escape hatch)."""
+        sigma = self.apply_inverse(np.eye(self.latent_size))
+        if self.w_constraint is not None:
+            w = self.w_constraint
+            sigma = sigma - w @ cho_solve(self.cap_factor, w.T)
+        return 0.5 * (sigma + sigma.T)
+
 
 @dataclass(frozen=True)
 class SparseFit:
