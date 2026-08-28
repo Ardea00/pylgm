@@ -211,19 +211,22 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
 
     variance = float(model.likelihood.variance)
     fit = sparse_constrained_gaussian(model)
+    predictive_variance = fit.posterior.predictive_variances(model.design)
     _require_finite("posterior mean", fit.mean)
     _require_finite("log marginal likelihood", fit.log_marginal_likelihood)
     _require_finite("predictive mean", fit.predictive_mean)
+    _require_finite("predictive variance", predictive_variance)
     return GaussianResult(
         labels=model.labels,
         mean=fit.mean,
-        covariance=None,                       # pending E-sparse-C
+        covariance=None,                       # never materialised above the guard
         log_marginal_likelihood=fit.log_marginal_likelihood,
         predictive_mean=fit.predictive_mean,
-        predictive_variance=None,              # pending E-sparse-C
+        predictive_variance=predictive_variance,
         observation_variance=variance,
         block_slices=fit.block_slices,
         diagnostics=fit.diagnostics,
+        sparse_posterior=fit.posterior,
     )
 
 

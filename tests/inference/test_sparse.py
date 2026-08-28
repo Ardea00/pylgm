@@ -3,7 +3,7 @@ import pytest
 from scipy.linalg import null_space
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import NumericalError
+from pylgm.exceptions import DenseReferenceLimitError, NumericalError
 from pylgm.inference.gaussian import _fit_dense, fit_gaussian
 from pylgm.inference.sparse import (
     SparseSpdFactor,
@@ -382,7 +382,11 @@ def test_forced_sparse_under_guard_matches_dense(proper_car_with_intercept_model
         g._MAX_DENSE_LATENT_DIMENSION = original
     assert np.allclose(sparse.mean, dense.mean, atol=1e-7)
     assert np.isclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6)
-    with pytest.raises(NotImplementedError, match="E-sparse-C"):
+    # Task 5: the sparse posterior is now attached, so the full covariance is a
+    # scale guard (DenseReferenceLimitError), not the posterior-less pending-C
+    # NotImplementedError -- scoped accessors (latent_marginals/predictive_variance)
+    # are exercised in tests/inference/test_sparse_result.py.
+    with pytest.raises(DenseReferenceLimitError):
         _ = sparse.covariance
 
 

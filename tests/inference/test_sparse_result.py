@@ -5,6 +5,21 @@ import pytest
 from pylgm.inference.result import GaussianResult
 
 
+@pytest.fixture
+def small_model_forced_sparse(proper_car_with_intercept_model):
+    """A small, well-conditioned model passed straight to ``_fit_sparse``.
+
+    ``_fit_sparse`` does not consult the dense-size guard, so any compiled
+    model works; reuses the well-conditioned no-constraint proper-CAR fixture
+    from ``tests/inference/conftest.py`` (rather than the Besag+intercept
+    fixture) because the intrinsic Besag field is ill-conditioned
+    (cond ~ 2.5e9, per Tasks 3-4), which makes the tight ``atol=1e-7``
+    marginal-variance comparison against the dense reference too fragile for
+    reasons unrelated to this task's routing logic.
+    """
+    return proper_car_with_intercept_model
+
+
 def _covless_result():
     return GaussianResult(
         labels=("a:1", "a:2"),
@@ -55,3 +70,28 @@ def test_align_reorders_without_covariance():
     aligned = _align_predictions_with_source_rows(result, np.array([1, 0]))
     assert aligned._covariance is None
     assert aligned._predictive_variance is None
+
+
+def test_sparse_result_marginals_match_dense_but_covariance_guarded(small_model_forced_sparse):
+    """Past the guard: scoped accessors work via the posterior; covariance raises."""
+    from pylgm.exceptions import DenseReferenceLimitError
+    from pylgm.inference.gaussian import _fit_dense, _fit_sparse
+
+    model = small_model_forced_sparse
+    dense = _fit_dense(model)
+    sparse = _fit_sparse(model)
+
+    # marginal variances match
+    got = sparse.latent_marginals().variance
+    assert np.allclose(got, dense.latent_marginals().variance, atol=1e-7)
+    # linear combinations match too
+    weights = np.eye(len(model.labels))
+    got_combo = sparse.linear_combinations(weights).variance
+    want_combo = dense.linear_combinations(weights).variance
+    assert np.allclose(got_combo, want_combo, atol=1e-7)
+    # predictive variance materialised on the result
+    assert np.allclose(sparse.predictive_variance, dense.predictive_variance, atol=1e-7)
+    # covariance is guarded (scale error, NOT pending-C)
+    with pytest.raises(DenseReferenceLimitError) as exc:
+        _ = sparse.covariance
+    assert "E-sparse-C" not in str(exc.value)
