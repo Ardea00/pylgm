@@ -4,12 +4,11 @@ from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import bmat, csr_matrix, diags, hstack, identity
+from scipy.sparse import bmat, csr_matrix, hstack, identity
 from scipy.sparse.csgraph import connected_components
 
-from pylgm.effects.besag import _scaled_structure
+from pylgm.effects.besag import _scaled_structure, _sparse_scaled_structure
 from pylgm.effects.graph import design_from_graph, normalize_graph
-from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.ir.model import LatentBlock
 
 _BYM2_AUGMENT_NODES = 1024
@@ -54,24 +53,18 @@ def _build_bym2_augmented(
     precision: float,
     phi: float,
 ) -> LatentBlock:
-    """Augmented (x, u*) BYM2 block: 2n latent, sparse joint precision, sum-to-zero
-    on u* only. Reproduces the dense BYM2 x-marginal exactly and scales (no
-    eigendecomposition). Selected for large connected graphs.
+    """Augmented (x, u*) BYM2 block: 2n latent, sparse joint precision, one
+    sum-to-zero per connected component on u* only. Reproduces the dense BYM2
+    x-marginal exactly and scales (no eigendecomposition). Selected for large
+    graphs; multi-component graphs (islands) are supported — each component
+    carries its own u* sum-to-zero, and an isolated node contributes an
+    unconstrained IID u* (its R* diagonal is 1, matching the dense path).
     """
     if not 0.0 <= phi < 1.0:
         raise ValueError(f"phi must lie in [0, 1); got {phi}")
     nodes, w = normalize_graph(graph)
     n = len(nodes)
-    n_components, _ = connected_components(w, directed=False)
-    if n_components != 1:
-        # ponytail: augmented path assumes null = (√φ·1, 1) over one component.
-        # Per-component augmentation is out of this slice; small multi-component
-        # BYM2 still fits via the dense spectral path.
-        raise NotImplementedError(
-            "augmented BYM2 requires a single connected graph component"
-        )
-    degree = np.asarray(w.sum(axis=1)).ravel()
-    rstar = sorbye_rue_scale((diags(degree) - w).tocsc(), null_dim=1)  # sparse R*
+    rstar = _sparse_scaled_structure(w)  # per-component sparse R*, isolated -> 1
     a = 1.0 / (1.0 - phi)
     b = -np.sqrt(phi) / (1.0 - phi)
     d = phi / (1.0 - phi)
@@ -81,8 +74,16 @@ def _build_bym2_augmented(
     x_design = design_from_graph(nodes, frame, index)  # n_obs x n
     design = hstack([x_design, csr_matrix((x_design.shape[0], n))], format="csr")
     labels = tuple(nodes) + tuple(f"{node}__u" for node in nodes)
-    constraints = np.zeros((1, 2 * n))
-    constraints[0, n:] = 1.0
+    _, membership = connected_components(w, directed=False)
+    rows = []
+    for component in range(membership.max() + 1):
+        mask = membership == component
+        if np.count_nonzero(mask) == 1:
+            continue  # isolated IID u*: proper on its own, no sum-to-zero
+        row = np.zeros(2 * n)
+        row[n:][mask] = 1.0
+        rows.append(row)
+    constraints = np.array(rows) if rows else np.empty((0, 2 * n))
     return LatentBlock(name, labels, design, joint, constraints)
 
 

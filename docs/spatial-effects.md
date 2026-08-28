@@ -15,10 +15,12 @@ which parses the R-INLA/latte `.graph` text format into that same dict shape.
 The graph's nodes are the effect's domain, so it may include regions absent
 from the observed data (e.g. to predict at unobserved regions); every
 observed region must be a node in the graph, or `fit` raises a clear error.
-A node with zero neighbours is rejected at declaration time — an isolated
-region has no ICAR structure to borrow strength from and should be modeled as
-an `IID` effect instead — while a multi-node disconnected component (an
-"island" group) is supported and gets its own sum-to-zero constraint.
+A node with zero neighbours (an isolated region) has no ICAR structure to
+borrow strength from, so it is handled gracefully as an independent
+unit-variance `IID` singleton: its structure diagonal is 1 and it carries no
+sum-to-zero constraint (R-INLA's `adjust.for.con.comp` default), rather than
+aborting the fit. A multi-node disconnected component (an "island" group) is
+likewise supported and gets its own sum-to-zero constraint.
 
 `scale=True` (the default) applies the Sørbye–Rue (2014) scaling
 convention: each connected component's structure matrix is rescaled to a
@@ -233,8 +235,10 @@ of the scaled structure's generalized inverse and then reassembled cheaply at
 any `(τ, φ)`. Because this precision is full-rank, `BYM2` carries **no
 constraint at all** — unlike `Besag` (one sum-to-zero constraint per
 connected component). `graph` takes the same neighbour-dict or
-`load_graph_file(path)` input as `Besag`/`ProperCAR`, with the same isolated-
-node rejection and disconnected-graph support.
+`load_graph_file(path)` input as `Besag`/`ProperCAR`, with the same graceful
+isolated-node handling (an isolated region becomes an independent IID unit)
+and disconnected-graph support — in both the dense spectral and the augmented
+large-graph paths.
 
 ```python
 import numpy as np
@@ -330,8 +334,7 @@ Because `BYM2`'s precision is unconstrained, like `ProperCAR` it works under
 for carrying a sum-to-zero constraint.
 
 **Not yet built:** the augmented (2n) representation exposing the structured
-component `u*` separately, a config-file `bym2` effect type, graceful
-isolated-node handling, and sparse/large-graph scaling — see the
+component `u*` separately as a reported latent — see the
 [spatial roadmap](roadmap.md)
 for what's next.
 

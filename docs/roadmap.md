@@ -21,8 +21,10 @@ For the precise semantics of each shipped feature, follow the links into the
   estimated), and `BYM2` (with `φ` fixed or estimated), complete for the dense
   reference regime. Graphs may be **weighted** (`{node: {neighbour: weight}}`),
   so the same family models firm-ownership / interbank-exposure / supply-chain
-  networks, not only geographic adjacency. See
-  [spatial effects](spatial-effects.md).
+  networks, not only geographic adjacency. Isolated regions (no neighbours) are
+  handled gracefully as independent `IID` singletons in `Besag`/`BYM2` (dense
+  and augmented paths), and the augmented large-graph `BYM2` supports
+  multi-component (island) graphs. See [spatial effects](spatial-effects.md).
 - **Hyperparameter estimation** — type-II ML empirical Bayes and MAP-II with
   PC/Gaussian priors, with bounded hyperparameters. See
   [empirical Bayes](empirical-bayes.md).
@@ -51,8 +53,9 @@ For the precise semantics of each shipped feature, follow the links into the
 
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
-1. **Graceful isolated-node handling** in graphs, and the augmented 2n CAR
-   representation.
+1. **Augmented CAR structured component `u*`** exposed as a separately
+   reported latent (the 2n representation currently reproduces the `x`-marginal
+   but does not surface `u*` in results).
 2. **Additional likelihoods** — e.g. Binomial and negative-Binomial counts.
 3. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
 4. **Directed & dynamic network structure** — a SAR effect

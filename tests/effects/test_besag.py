@@ -90,10 +90,35 @@ def test_scale_false_leaves_raw_laplacian():
     assert np.allclose(block.precision.toarray(), expected)
 
 
-def test_isolated_node_raises():
+def test_isolated_node_is_iid_singleton():
+    # An isolated region (no neighbours) is treated as an independent IID unit:
+    # structure diagonal 1, decoupled from the rest, and it gets NO sum-to-zero
+    # constraint (unlike the connected component, which keeps one). It no longer
+    # aborts the fit -- R-INLA's adjust.for.con.comp default.
     graph = {"A": ["B"], "B": ["A"], "C": []}
-    with pytest.raises(ValueError, match="'C'"):
-        build_besag(_frame(["A", "B", "C"]), "region", "region", graph, 1.0)
+    block = build_besag(_frame(["A", "B", "C"]), "region", "region", graph, 1.0)
+    r = block.precision.toarray()
+    assert r[2, 2] == 1.0  # C: unit-variance IID
+    assert np.allclose(r[2, :2], 0.0) and np.allclose(r[:2, 2], 0.0)  # decoupled
+    assert block.constraints.shape == (1, 3)  # one for {A,B}, none for isolated C
+    assert np.array_equal(block.constraints[0], np.array([1, 1, 0], dtype=float))
+
+
+def test_sparse_scaled_structure_matches_dense():
+    # The augmented (large-graph) BYM2 path scales R* component-by-component in
+    # sparse form; it must reproduce the validated dense scaler bit-for-bit,
+    # including the isolated-node IID diagonal.
+    from pylgm.effects.besag import _scaled_structure, _sparse_scaled_structure
+    from pylgm.effects.graph import normalize_graph
+
+    graph = {
+        "a0": ["a1"], "a1": ["a0", "a2"], "a2": ["a1"],
+        "b0": ["b1"], "b1": ["b0"], "iso": [],
+    }
+    nodes, w = normalize_graph(graph)
+    dense = _scaled_structure(w, nodes, True)
+    sparse = _sparse_scaled_structure(w).toarray()
+    assert np.allclose(sparse, dense, atol=1e-12)
 
 
 def test_observed_region_absent_from_graph_raises():

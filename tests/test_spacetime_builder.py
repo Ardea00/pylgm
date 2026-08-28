@@ -114,3 +114,13 @@ def test_rejects_too_few_time_levels_for_rw():
     frame = _frame(["a", "b", "c"], [0, 1])  # T=2, order=2 needs T>2
     with pytest.raises(ValueError):
         build_spacetime(frame, "st", "area", "t", None, "II", 2, 1.0, True)
+
+
+def test_space_structured_rejects_isolated_area():
+    # Besag/BYM2 treat an isolated node as an IID singleton, but a space-
+    # structured interaction's null-basis counts one indicator per component,
+    # so an isolated (nulless) area would be over-constrained. It stays rejected.
+    graph = {"a": ["b"], "b": ["a"], "c": []}  # c isolated
+    frame = _frame(["a", "b", "c"], [0, 1, 2])
+    with pytest.raises(ValueError, match="isolated area"):
+        build_spacetime(frame, "st", "area", "t", graph, "III", 1, 1.0, True)

@@ -100,6 +100,16 @@ def build_spacetime(
 
     # Kronecker precision factors.
     if interaction in _SPACE_STRUCTURED:
+        # ponytail: reject isolated areas here rather than inherit Besag's
+        # graceful IID singleton. The space null-basis counts one indicator per
+        # component, so an IID (nulless) singleton would be over-constrained.
+        # Graceful isolated space-time areas are a separate slice.
+        isolated = [areas[i] for i in np.flatnonzero(np.asarray(w.sum(axis=1)).ravel() == 0)]
+        if isolated:
+            raise ValueError(
+                f"{name} type {interaction} has isolated area(s) with no neighbours "
+                f"(unsupported in space-structured interactions): {isolated!r}"
+            )
         k_s = csr_matrix(_scaled_structure(w, areas, scale))
     else:
         k_s = identity(S, format="csr")
