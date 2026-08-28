@@ -217,13 +217,40 @@ def test_sparse_matches_dense_extraconstr(besag_extraconstr_model):
     assert np.isclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6)
 
 
-def test_selected_inverse_diagonal_raises():
-    from scipy.sparse import csr_matrix
-    from pylgm.inference.sparse import SparseSpdFactor, selected_inverse_diagonal
+def test_selected_inverse_diagonal_matches_dense_inverse():
+    """Takahashi selected inversion must equal diag(inv(Q)) on ring and grid GMRFs."""
+    import numpy as np
+    from scipy.sparse import lil_matrix
+    from pylgm.inference.sparse import selected_inverse_diagonal
 
-    factor = SparseSpdFactor(csr_matrix(np.eye(3)), "id")
-    with pytest.raises(NotImplementedError, match="E-sparse-C"):
-        selected_inverse_diagonal(factor, np.array([0, 1, 2]))
+    def ring(n, ridge=0.4):
+        q = lil_matrix((n, n))
+        for i in range(n):
+            q[i, i] = 2.0 + ridge
+            q[i, (i + 1) % n] = -1.0
+            q[i, (i - 1) % n] = -1.0
+        return q.tocsc()
+
+    def grid(m, ridge=0.3):
+        n = m * m
+        q = lil_matrix((n, n))
+        idx = lambda r, c: r * m + c  # noqa: E731
+        for r in range(m):
+            for c in range(m):
+                i = idx(r, c)
+                deg = 0
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    rr, cc = r + dr, c + dc
+                    if 0 <= rr < m and 0 <= cc < m:
+                        q[i, idx(rr, cc)] = -1.0
+                        deg += 1
+                q[i, i] = deg + ridge
+        return q.tocsc()
+
+    for mat in (ring(300), ring(1000), grid(20), grid(30)):
+        got = selected_inverse_diagonal(mat)
+        want = np.diag(np.linalg.inv(mat.toarray()))
+        assert np.max(np.abs(got - want)) < 1e-9
 
 
 def test_forced_sparse_under_guard_matches_dense(proper_car_with_intercept_model):

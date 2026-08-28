@@ -190,15 +190,58 @@ def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) 
     return total
 
 
-def selected_inverse_diagonal(factor: "SparseSpdFactor", indices: np.ndarray) -> np.ndarray:
-    """Diagonal of the inverse at ``indices`` -- posterior marginal variances.
+def selected_inverse_diagonal(matrix) -> np.ndarray:
+    """Diagonal of ``matrix⁻¹`` for a sparse SPD matrix — the exact selected
+    inverse via Takahashi recursion on the SuperLU fill pattern.
 
-    The single plug-point for E-sparse-C: the Takahashi selected-inversion
-    recursion replaces this body and nothing else in the call path changes.
+    Symmetric-mode ``splu`` (``MMD_AT_PLUS_A`` + ``SymmetricMode`` +
+    ``diag_pivot_thresh=0.0``) yields ``perm_r == perm_c`` and a unit-lower ``L``
+    with ``U == D·Lᵀ``. A reverse column sweep on the below-diagonal fill pattern
+    reconstructs exactly the selected-inverse entries needed for the diagonal.
+    Off-pattern sub-block entries are true zeros (SuperLU drops only numerical
+    zeros), so ``Sig.get(key, 0.0)`` is exact. Result is in the original ordering.
     """
-    raise NotImplementedError(
-        "sparse posterior variances (selected inversion) pending E-sparse-C"
+    q_csc = matrix.tocsc()
+    n = q_csc.shape[0]
+    lu = splu(
+        q_csc,
+        permc_spec="MMD_AT_PLUS_A",
+        options=dict(SymmetricMode=True),
+        diag_pivot_thresh=0.0,
     )
+    pc = lu.perm_c
+    if not np.array_equal(lu.perm_r, pc):
+        raise NumericalError("selected inversion expected a symmetric factorization")
+    lower = lu.L.tocsc()
+    diag_u = lu.U.diagonal().astype(float)
+    indptr, indices, data = lower.indptr, lower.indices, lower.data.astype(float)
+    below_rows: list = [None] * n
+    below_l: list = [None] * n
+    sig: dict = {}
+    for i in range(n):
+        seg = indices[indptr[i]:indptr[i + 1]]
+        val = data[indptr[i]:indptr[i + 1]]
+        mask = seg > i
+        below_rows[i] = seg[mask]
+        below_l[i] = val[mask]
+    for i in range(n - 1, -1, -1):
+        below = below_rows[i]
+        below_vals = below_l[i]
+        if len(below):
+            k = len(below)
+            sub = np.empty((k, k))
+            for a in range(k):
+                for b in range(k):
+                    ra, rb = below[a], below[b]
+                    lo, hi = (ra, rb) if ra <= rb else (rb, ra)
+                    sub[a, b] = sig.get((hi, lo), 0.0)
+            sig_below = -sub @ below_vals
+            for a in range(k):
+                sig[(below[a], i)] = sig_below[a]
+            sig[(i, i)] = 1.0 / diag_u[i] - below_vals @ sig_below
+        else:
+            sig[(i, i)] = 1.0 / diag_u[i]
+    return np.array([sig[(pc[i], pc[i])] for i in range(n)])
 
 
 def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
