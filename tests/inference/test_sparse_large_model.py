@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from pylgm import Besag, Fixed, Gaussian, Hyperparameter, LGM
+from pylgm.exceptions import DenseReferenceLimitError
 from pylgm.priors import PCPrecision
 
 # A connected ring over N regions -> intrinsic Besag (single sum-to-zero
@@ -40,18 +41,34 @@ def test_large_spatial_model_fits_mean_and_lml(large_besag_frame_and_model):
     assert result.hyperparameters  # estimated, non-empty
     assert all(np.isfinite(v) for v in result.hyperparameters.values())
     assert np.isfinite(result.predictive_mean).all()
-    # Uncertainty is pending E-sparse-C.
-    for accessor in (
-        lambda: result.covariance,
-        lambda: result.predictive_variance,
-        lambda: result.latent_marginals(),
-        lambda: result.predict(frame),
-    ):
-        with pytest.raises(NotImplementedError, match="E-sparse-C"):
-            accessor()
+
+    # E-sparse-C: the uncertainty surface now works past the dense guard --
+    # marginal + predictive variances and predict() are finite (no dense oracle
+    # at this size; small-model dense-equivalence is Tasks 3-6's job).
+    marg = result.latent_marginals()
+    assert marg.variance.shape[0] == result.mean.shape[0]
+    assert np.isfinite(marg.variance).all() and (marg.variance >= 0).all()
+    assert np.isfinite(result.predictive_variance).all()
+    predicted = result.predict(frame)
+    assert np.isfinite(predicted.predictive_mean).all()
+    assert np.isfinite(predicted.predictive_variance).all()
+    # The full covariance is a scale limit, not pending-C: it must not be
+    # materialised at 5001 dim, and the error must say so (not "E-sparse-C").
+    with pytest.raises(DenseReferenceLimitError) as exc:
+        _ = result.covariance
+    assert "E-sparse-C" not in str(exc.value)
 
 
-def test_large_model_integrate_is_unsupported(large_besag_frame_and_model):
+def test_large_model_integrate_returns_finite_diagonal_uncertainty(large_besag_frame_and_model):
+    """INLA integration past the dense guard: diagonal latent/predictive
+    uncertainty is finite; the full covariance stays a scale limit."""
     model, frame = large_besag_frame_and_model
-    with pytest.raises(NotImplementedError, match="E-sparse-C"):
-        model.fit(frame, hyperparameters="integrate")
+    result = model.fit(frame, hyperparameters="integrate")
+    assert np.isfinite(result.mean).all()
+    assert np.isfinite(result.log_marginal_likelihood)
+    marg = result.latent_marginals()
+    assert marg.variance.shape[0] == result.mean.shape[0]
+    assert np.isfinite(marg.variance).all() and (marg.variance >= 0).all()
+    assert np.isfinite(result.predictive_variance).all()
+    with pytest.raises(DenseReferenceLimitError):
+        _ = result.covariance
