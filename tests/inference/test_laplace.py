@@ -194,3 +194,38 @@ def test_empirical_bayes_recovers_planted_nbinomial_dispersion():
     )
     result = model.fit(frame, engine="laplace", hyperparameters="optimize")
     assert result.hyperparameters["phi"] == pytest.approx(phi_true, rel=0.1)
+
+
+def test_laplace_binomial_intercept_matches_aggregate_logit():
+    # Aggregated binomial, logit link: the intercept-only mode is logit of the
+    # pooled success rate, logit(sum y / sum n), independent of the split.
+    from pylgm import Binomial
+
+    frame = pd.DataFrame(
+        {"t": [1, 2, 3, 4], "y": [3.0, 4.0, 7.0, 2.0], "n": [10.0, 8.0, 12.0, 5.0]}
+    )
+    model = LGM("y", Binomial("n"), Fixed("1", prior_precision=1e-8), time="t")
+    result = fit_laplace(compile_lgm(model, _panel(frame)))
+    total_y, total_n = 16.0, 35.0
+    np.testing.assert_allclose(result.mean, [np.log(total_y / (total_n - total_y))], atol=1e-6)
+    assert result.diagnostics["final_gradient_norm"] < 1e-8
+
+
+def test_laplace_binomial_predicts_counts_with_new_trials():
+    # Fit with a trials column, then predict on new rows whose trials column
+    # differs: fitted_mean must be n_new * p (counts), not the probability p.
+    from pylgm import Binomial
+
+    frame = pd.DataFrame(
+        {"t": [1, 2, 3, 4], "y": [3.0, 4.0, 7.0, 2.0], "n": [10.0, 8.0, 12.0, 5.0]}
+    )
+    model = LGM("y", Binomial("n"), Fixed("1", prior_precision=1e-8), time="t")
+    result = model.fit(frame, engine="laplace")
+    p = 1.0 / (1.0 + np.exp(-float(result.mean[0])))
+
+    new_data = pd.DataFrame({"t": [5, 6, 7], "n": [100.0, 50.0, 7.0]})
+    prediction = result.predict(new_data)
+    np.testing.assert_allclose(prediction.fitted_mean, np.array([100.0, 50.0, 7.0]) * p)
+
+    with pytest.raises(ValueError, match="trials column"):
+        result.predict(pd.DataFrame({"t": [5], "z": [1.0]}))

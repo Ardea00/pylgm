@@ -323,3 +323,59 @@ def test_new_families_gradient_and_third_derivative_finite_difference():
         d2 = lambda e: (like.gradient(e + h, y) - like.gradient(e - h, y)) / (2 * h)
         fd3 = (d2(eta + h) - d2(eta - h)) / (2 * h)
         np.testing.assert_allclose(like.third_derivative(eta, y), fd3, atol=1e-3)
+
+
+def test_binomial_glm_pieces_and_bernoulli_reduction():
+    from pylgm import Bernoulli, Binomial
+    from pylgm.likelihoods import CompiledBinomial
+
+    n = np.array([10.0, 8.0, 12.0, 5.0])
+    y = np.array([3.0, 4.0, 7.0, 2.0])
+    eta = np.array([-0.5, 0.2, 0.8, -0.1])
+    lk = Binomial("n").materialize({}).for_observations(n)
+    p = 1.0 / (1.0 + np.exp(-eta))
+
+    # grad = y - n*p ; weight = n*p*(1-p) ; response_mean = n*p (counts)
+    np.testing.assert_allclose(lk.gradient(eta, y), y - n * p)
+    np.testing.assert_allclose(lk.working_weights(eta, y), n * p * (1 - p))
+    assert np.all(lk.working_weights(eta, y) > 0)
+    np.testing.assert_allclose(lk.response_mean(eta), n * p)
+
+    # n=1 reduces exactly to Bernoulli
+    y01 = np.array([0.0, 1.0, 1.0, 0.0])
+    lk1 = CompiledBinomial().for_observations(np.ones(4))
+    bern = Bernoulli().materialize({})
+    np.testing.assert_allclose(lk1.gradient(eta, y01), bern.gradient(eta, y01))
+    np.testing.assert_allclose(lk1.working_weights(eta, y01), bern.working_weights(eta, y01))
+
+
+def test_binomial_density_and_cdf_match_scipy():
+    from scipy.stats import binom
+    from pylgm import Binomial
+
+    n = np.array([10.0, 8.0, 12.0])
+    y = np.array([3.0, 4.0, 7.0])
+    eta = np.array([-0.5, 0.2, 0.8])
+    lk = Binomial("n").materialize({}).for_observations(n)
+    p = 1.0 / (1.0 + np.exp(-eta))
+    np.testing.assert_allclose(lk.pointwise_log_density(eta, y).sum(), lk.log_likelihood(eta, y))
+    np.testing.assert_allclose(lk.pointwise_log_density(eta, y), binom.logpmf(y, n, p), atol=1e-10)
+    np.testing.assert_allclose(lk.cdf(eta, y), binom.cdf(y, n, p), atol=1e-10)
+
+
+def test_binomial_rejects_out_of_support_response():
+    from pylgm import Binomial
+    from pylgm.exceptions import DataContractError
+
+    lk = Binomial("n").materialize({}).for_observations(np.array([10.0, 8.0]))
+    with pytest.raises(DataContractError, match="exceed"):
+        lk.validate_response(np.array([3.0, 10.0]))
+    with pytest.raises(DataContractError, match="non-negative integer"):
+        lk.validate_response(np.array([2.5, 3.0]))
+
+
+def test_binomial_trials_requires_nonempty_column_name():
+    from pylgm import Binomial
+
+    with pytest.raises(ValueError, match="non-empty column name"):
+        Binomial("")

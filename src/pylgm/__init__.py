@@ -15,7 +15,15 @@ from pylgm.effects import (
     load_graph_file,
 )
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
-from pylgm.likelihoods import Bernoulli, Beta, Gamma, Gaussian, NegativeBinomial, Poisson
+from pylgm.likelihoods import (
+    Bernoulli,
+    Beta,
+    Binomial,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Poisson,
+)
 from pylgm.model import LGM
 from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
@@ -28,6 +36,7 @@ __all__ = [
     "Bernoulli",
     "Besag",
     "Beta",
+    "Binomial",
     "BYM2",
     "CandidateFailure",
     "ComparisonResult",

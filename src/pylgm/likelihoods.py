@@ -209,6 +209,70 @@ class CompiledBernoulli(_CompiledLikelihood):
 
 
 @dataclass(frozen=True)
+class CompiledBinomial(_CompiledLikelihood):
+    """Aggregated Bernoulli trials with a logit link.
+
+    ``trials`` is the per-row number of trials n, bound via ``for_observations``;
+    the response y is the success count and the fitted mean is n*p. The n=1 case
+    reduces exactly to :class:`CompiledBernoulli`.
+    """
+
+    trials: object = None
+    link: LogitLink = field(default_factory=LogitLink, init=False)
+
+    def for_observations(self, trials: "np.ndarray | None") -> "CompiledBinomial":
+        return CompiledBinomial(trials)
+
+    def _n(self) -> np.ndarray:
+        return np.asarray(self.trials, dtype=float)
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        # Full density incl. the log-binomial-coefficient constant, so the sum
+        # matches pointwise_log_density and the LML is comparable across families.
+        # The constant is independent of eta, so the mode and gradient are unchanged.
+        return float(np.sum(self.pointwise_log_density(eta, y)))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.asarray(y, dtype=float) - self._n() * self.link.inverse(eta)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        p = self.link.inverse(eta)
+        return self._n() * p * (1.0 - p)
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        p = self.link.inverse(np.asarray(eta, dtype=float))
+        return -self._n() * p * (1.0 - p) * (1.0 - 2.0 * p)
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return self._n() * self.link.inverse(eta)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return self._n() * self.link.inverse(np.asarray(eta_mean, dtype=float))  # counts; variance ignored
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        n = self._n()
+        log_choose = gammaln(n + 1.0) - gammaln(y + 1.0) - gammaln(n - y + 1.0)
+        return log_choose + y * eta - n * np.logaddexp(0.0, eta)
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        k = np.floor(np.asarray(y, dtype=float))
+        n = self._n()
+        p = self.link.inverse(eta)
+        # P(Y<=k) = I_{1-p}(n-k, k+1); guard a=0 at k=n (where the cdf is 1).
+        return np.where(k >= n, 1.0, betainc(np.maximum(n - k, 1.0), k + 1.0, 1.0 - p))
+
+    def validate_response(self, y: np.ndarray) -> None:
+        y = np.asarray(y, dtype=float)
+        if not np.all(np.isfinite(y)) or np.any(y < 0.0) or np.any(y != np.floor(y)):
+            raise DataContractError("binomial responses must be non-negative integers")
+        if np.any(y > self._n()):
+            raise DataContractError("binomial responses must not exceed the number of trials")
+
+
+@dataclass(frozen=True)
 class CompiledNegativeBinomial(_CompiledLikelihood):
     """A negative-binomial (NB2) likelihood with a log link and dispersion phi.
 
@@ -409,6 +473,21 @@ class Bernoulli:
 
     def materialize(self, values: Mapping[str, float]) -> CompiledBernoulli:
         return CompiledBernoulli()
+
+
+@dataclass(frozen=True)
+class Binomial:
+    """A binomial likelihood; ``trials`` names the per-row trial-count column."""
+
+    trials: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trials, str) or not self.trials:
+            raise ValueError("Binomial trials must be a non-empty column name")
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledBinomial:
+        # The trials vector is data; the compiler binds it via for_observations.
+        return CompiledBinomial()
 
 
 @dataclass(frozen=True)

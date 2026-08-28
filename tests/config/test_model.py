@@ -282,3 +282,41 @@ def test_load_model_reports_missing_graph_file(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError):
         load_model(path)
+
+
+def test_load_binomial_model(tmp_path: Path) -> None:
+    from pylgm import Binomial
+
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: binomial\n  trials: n\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1'\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, Binomial)
+    assert model.likelihood.trials == "n"
+
+
+@pytest.mark.parametrize(
+    "likelihood_body, match",
+    [
+        # binomial without its required trials column
+        ("family: binomial", "trials is required"),
+        # trials on a non-binomial family
+        ("family: poisson\n  trials: n", "trials is not a valid"),
+    ],
+)
+def test_load_model_rejects_invalid_trials_usage(
+    tmp_path: Path, likelihood_body: str, match: str
+) -> None:
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        f"likelihood:\n  {likelihood_body}\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1'\n"
+    )
+    with pytest.raises(ConfigurationError, match=match):
+        load_model(path)

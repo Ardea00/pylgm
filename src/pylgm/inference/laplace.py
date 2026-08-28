@@ -24,7 +24,11 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     observed = model.observed
     y_obs = y[observed]
     offset_obs = offset[observed]
-    likelihood.validate_response(y_obs)
+    # Binomial carries a per-row trials vector; the fit loop works on the observed
+    # rows, so bind their trials. For every other likelihood this returns self.
+    _trials = getattr(likelihood, "trials", None)
+    lk_obs = likelihood.for_observations(_trials[observed] if _trials is not None else None)
+    lk_obs.validate_response(y_obs)
 
     basis = _constraint_null_space(model.constraints, latent_size)
     reduced_dim = basis.shape[1]
@@ -50,7 +54,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     def objective(z: np.ndarray) -> float:
         eta = reduced_design @ z + offset_obs
         return (
-            -likelihood.log_likelihood(eta, y_obs)
+            -lk_obs.log_likelihood(eta, y_obs)
             + 0.5 * float(z @ reduced_precision @ z)
             + float(z @ prior_linear)
         )
@@ -64,8 +68,8 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
         current = objective(z)
         for iterations in range(1, max_iterations + 1):
             eta = reduced_design @ z + offset_obs
-            grad_ll = likelihood.gradient(eta, y_obs)
-            weights = likelihood.working_weights(eta, y_obs)
+            grad_ll = lk_obs.gradient(eta, y_obs)
+            weights = lk_obs.working_weights(eta, y_obs)
             gradient = reduced_precision @ z + prior_linear - reduced_design.T @ grad_ll
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
@@ -93,7 +97,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
             eta = reduced_design @ z + offset_obs
             gradient = (
                 reduced_precision @ z + prior_linear
-                - reduced_design.T @ likelihood.gradient(eta, y_obs)
+                - reduced_design.T @ lk_obs.gradient(eta, y_obs)
             )
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
@@ -111,7 +115,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
                 # decrement inside the loop cures the same stalls but stops earlier
                 # than the gradient test on well-scaled problems, relocating the
                 # mode; here, every fit that converges today is untouched.
-                weights = likelihood.working_weights(eta, y_obs)
+                weights = lk_obs.working_weights(eta, y_obs)
                 hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
                 factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
                 decrement = -0.5 * float(gradient @ cho_solve(factor, -gradient))
@@ -120,15 +124,15 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
                 converged = True
                 newton_decrement = decrement
         eta = reduced_design @ z + offset_obs
-        weights = likelihood.working_weights(eta, y_obs)
+        weights = lk_obs.working_weights(eta, y_obs)
         hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
         factor, logdet_posterior = _factor_positive_definite(hessian, "reduced posterior precision")
         reduced_covariance = cho_solve(factor, np.eye(reduced_dim))
-        loglik_mode = likelihood.log_likelihood(eta, y_obs)
+        loglik_mode = lk_obs.log_likelihood(eta, y_obs)
     else:
         reduced_covariance = np.empty((0, 0))
         logdet_posterior = 0.0
-        loglik_mode = likelihood.log_likelihood(offset_obs, y_obs)
+        loglik_mode = lk_obs.log_likelihood(offset_obs, y_obs)
 
     mean = basis @ z if x_p is None else x_p + basis @ z
     covariance = basis @ reduced_covariance @ basis.T

@@ -51,7 +51,8 @@ class PredictionContext:
     entries: tuple[tuple[str, object], ...]
     likelihood: object
     offset: str | None
-    width: int
+    trials: str | None = None
+    width: int = 0
 
 
 def _fixed_block(spec: ModelSpec, new_data: pd.DataFrame) -> np.ndarray:
@@ -223,6 +224,20 @@ def _offset_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
     return np.asarray(new_data[context.offset], dtype=float)
 
 
+def _prediction_likelihood(context: PredictionContext, new_data: pd.DataFrame) -> object:
+    """Rebind a Binomial likelihood to new_data's own trials so it predicts n*p.
+
+    Non-binomial likelihoods have no trials column and return unchanged.
+    """
+    if context.trials is None:
+        return context.likelihood
+    if context.trials not in new_data.columns:
+        raise ValueError(
+            f"predict() new_data is missing the trials column {context.trials!r}"
+        )
+    return context.likelihood.for_observations(np.asarray(new_data[context.trials], dtype=float))
+
+
 def _require_finite(name: str, value: np.ndarray) -> None:
     if not np.isfinite(value).all():
         raise NumericalError(f"predict() produced non-finite {name}")
@@ -243,7 +258,7 @@ def predict_from(
     eta = np.asarray(design @ mean + offset, dtype=float)
     predictive_variance = np.einsum("ij,jk,ik->i", design, covariance, design)
 
-    likelihood = context.likelihood
+    likelihood = _prediction_likelihood(context, new_data)
     fitted_mean = np.asarray(likelihood.response_prediction(eta, predictive_variance), dtype=float)
 
     _require_finite("predictive mean", eta)
@@ -275,7 +290,7 @@ def predict_from_sparse(
     eta = np.asarray(design @ mean + offset, dtype=float)
     predictive_variance = np.asarray(sparse_posterior.predictive_variances(design), dtype=float)
 
-    likelihood = context.likelihood
+    likelihood = _prediction_likelihood(context, new_data)
     fitted_mean = np.asarray(likelihood.response_prediction(eta, predictive_variance), dtype=float)
 
     _require_finite("predictive mean", eta)
