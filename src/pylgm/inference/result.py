@@ -751,10 +751,18 @@ class _BaseResult:
         posterior (marginalized over the hyperparameter grid), not a
         posterior conditional on a single hyperparameter value.
         """
-        from pylgm.inference.prediction import predict_from
+        from pylgm.inference.prediction import predict_from, predict_from_sparse
 
         if self._covariance is None:
-            raise NotImplementedError(_PENDING_C)
+            sparse_posterior = getattr(self, "_sparse_posterior", None)
+            if sparse_posterior is None:
+                raise NotImplementedError(_PENDING_C)
+            if self.prediction_context is None:
+                raise ValueError(
+                    "this result carries no prediction context; predict() is available "
+                    "on results produced by LGM.fit"
+                )
+            return predict_from_sparse(self.prediction_context, self.mean, sparse_posterior, new_data)
         if self.prediction_context is None:
             raise ValueError(
                 "this result carries no prediction context; predict() is available "

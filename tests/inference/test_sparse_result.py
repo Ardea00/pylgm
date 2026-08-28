@@ -107,3 +107,36 @@ def test_rebuild_preserves_sparse_posterior(small_model_forced_sparse):
     assert rebuilt._sparse_posterior is sparse._sparse_posterior
     # latent marginals still computable after rebuild
     assert np.all(np.isfinite(rebuilt.latent_marginals().variance))
+
+
+def test_sparse_predict_matches_dense(proper_car_with_intercept_model):
+    import pandas as pd
+
+    from pylgm.inference.gaussian import _fit_sparse
+    from pylgm.inference.prediction import PredictionContext, predict_from
+    from pylgm.model import _rebuild_result
+
+    model = proper_car_with_intercept_model
+    sparse = _fit_sparse(model)
+    posterior = sparse._sparse_posterior
+    dense_cov = posterior.covariance_dense()
+
+    labels = tuple(str(label) for label in model.labels)
+    # A one-hot structured block spanning the full latent vector; new_data
+    # picks the first few latent rows. width == latent_size so design @ mean
+    # conforms -- this is a routing test, not a domain-realistic design.
+    context = PredictionContext(
+        entries=(("structured", ("node", "node", labels)),),
+        likelihood=model.likelihood,
+        offset=None,
+        width=len(labels),
+    )
+    new_data = pd.DataFrame({"node": list(labels[:5])})
+
+    want = predict_from(context, sparse.mean, dense_cov, new_data)
+    rebuilt = _rebuild_result(sparse, prediction_context=context)
+    got = rebuilt.predict(new_data)
+
+    assert np.allclose(got.predictive_mean, want.predictive_mean, atol=1e-7)
+    assert np.allclose(got.predictive_variance, want.predictive_variance, atol=1e-7)
+    assert np.allclose(got.fitted_mean, want.fitted_mean, atol=1e-7)
