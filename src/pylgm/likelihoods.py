@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 import numpy as np
-from scipy.special import gammaln, erf, gammaincc, gammainc, betainc, digamma, polygamma
+from scipy.special import gammaln, erf, gammaincc, gammainc, betainc, digamma, polygamma, gamma as gamma_fn
 
 from pylgm.links import IdentityLink, LogLink, LogitLink
 from pylgm.exceptions import DataContractError
@@ -463,6 +463,77 @@ class CompiledBeta(_CompiledLikelihood):
 
 
 @dataclass(frozen=True)
+class CompiledWeibullSurv(_CompiledLikelihood):
+    """Weibull proportional-hazards survival with shape ``alpha`` and a log link.
+
+    ``eta`` is the log relative risk: hazard ``h(t)=alpha*t**(alpha-1)*exp(eta)``,
+    cumulative ``H(t)=t**alpha*exp(eta)``, survival ``S(t)=exp(-H(t))``. The event
+    indicator ``delta`` and the left-truncation entry time ``v`` are bound per
+    observation via ``for_observations``; ``entry=None`` means no truncation
+    (``v=0``). Exponential survival is this class with ``alpha=1``.
+    """
+
+    alpha: float
+    event: object = None          # delta, bound via for_observations
+    entry: object = None          # v (left truncation), bound via for_observations
+    link: LogLink = field(default_factory=LogLink, init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "alpha", _positive_real(self.alpha, "alpha"))
+
+    def for_observations(self, aux: "Mapping[str, np.ndarray] | None") -> "CompiledWeibullSurv":
+        if aux is None:
+            return self
+        return CompiledWeibullSurv(self.alpha, aux.get("event"), aux.get("entry"))
+
+    def _delta(self) -> np.ndarray:
+        return np.asarray(self.event, dtype=float)
+
+    def _at_risk(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """A = (t**alpha - v**alpha) * exp(eta), the at-risk cumulative hazard."""
+        eta = np.asarray(eta, dtype=float)
+        t = np.asarray(y, dtype=float)
+        v = np.zeros_like(t) if self.entry is None else np.asarray(self.entry, dtype=float)
+        return (t ** self.alpha - v ** self.alpha) * np.exp(eta)
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(np.sum(self.pointwise_log_density(eta, y)))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._delta() - self._at_risk(eta, y)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._at_risk(eta, y)          # -d2/deta2 = A > 0 (posterior precision PD)
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return -self._at_risk(eta, y)
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        # E[T] = scale * Gamma(1 + 1/alpha), scale = exp(-eta/alpha)
+        return np.exp(-np.asarray(eta, dtype=float) / self.alpha) * gamma_fn(1.0 + 1.0 / self.alpha)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return self.response_mean(np.asarray(eta_mean, dtype=float))  # point estimate; variance ignored
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        t = np.asarray(y, dtype=float)
+        d = self._delta()
+        a = self.alpha
+        return d * (math.log(a) + (a - 1.0) * np.log(t) + eta) - self._at_risk(eta, y)
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        t = np.asarray(y, dtype=float)
+        return 1.0 - np.exp(-(t ** self.alpha) * np.exp(eta))    # marginal event CDF (entry ignored)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        y = np.asarray(y, dtype=float)
+        if not np.all(np.isfinite(y)) or np.any(y <= 0.0):
+            raise DataContractError("survival response (follow-up time) must be positive")
+
+
+@dataclass(frozen=True)
 class Poisson:
     """A Poisson likelihood with a canonical log link."""
 
@@ -536,3 +607,46 @@ class Beta:
 
     def materialize(self, values: Mapping[str, float]) -> CompiledBeta:
         return CompiledBeta(_resolve_phi(self.phi, values))
+
+
+def _survival_columns(event: object, entry: object) -> None:
+    if not isinstance(event, str) or not event:
+        raise ValueError("survival event must be a non-empty column name")
+    if entry is not None and (not isinstance(entry, str) or not entry):
+        raise ValueError("survival entry must be a non-empty column name or None")
+
+
+@dataclass(frozen=True)
+class WeibullSurv:
+    """Weibull proportional-hazards survival; ``event`` names the 0/1 indicator column.
+
+    ``shape`` is the Weibull shape alpha (fixed float or optimisable Hyperparameter).
+    ``entry`` optionally names a left-truncation (delayed-entry) time column.
+    """
+
+    event: str
+    shape: float | Hyperparameter = 1.0
+    entry: str | None = None
+
+    def __post_init__(self) -> None:
+        _survival_columns(self.event, self.entry)
+        if isinstance(self.shape, Hyperparameter):
+            return
+        object.__setattr__(self, "shape", _positive_real(self.shape, "shape"))
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledWeibullSurv:
+        return CompiledWeibullSurv(_resolve_phi(self.shape, values))
+
+
+@dataclass(frozen=True)
+class ExponentialSurv:
+    """Exponential proportional-hazards survival (Weibull with shape alpha = 1)."""
+
+    event: str
+    entry: str | None = None
+
+    def __post_init__(self) -> None:
+        _survival_columns(self.event, self.entry)
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledWeibullSurv:
+        return CompiledWeibullSurv(1.0)

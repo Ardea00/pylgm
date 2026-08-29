@@ -19,10 +19,12 @@ from pylgm.likelihoods import (
     Bernoulli,
     Beta,
     Binomial,
+    ExponentialSurv,
     Gamma,
     Gaussian,
     NegativeBinomial,
     Poisson,
+    WeibullSurv,
 )
 from pylgm.model import LGM
 from pylgm.parameters import Hyperparameter
@@ -41,6 +43,7 @@ __all__ = [
     "CandidateFailure",
     "ComparisonResult",
     "Experiment",
+    "ExponentialSurv",
     "FailureCause",
     "Fixed",
     "Gamma",
@@ -61,5 +64,6 @@ __all__ = [
     "RW1",
     "RW2",
     "SpaceTime",
+    "WeibullSurv",
     "__version__",
 ]
