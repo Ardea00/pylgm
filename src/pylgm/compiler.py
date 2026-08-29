@@ -41,7 +41,10 @@ from pylgm.effects import (
 )
 from pylgm.effects.ar1 import ar1_structure
 from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
-from pylgm.effects.sar import build_dynamic_spatial_panel, _panel_networks, _sdpd_operator
+from pylgm.effects.sar import (
+    build_dynamic_spatial_panel, _panel_networks, _sdpd_operator,
+    _sar_operator, _gram_precision,
+)
 from pylgm.effects.bym2 import (
     _build_bym2_augmented,
     _BYM2_AUGMENT_NODES,
@@ -872,8 +875,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             def build(values, wmat=wmat, n_nodes=n_nodes, tau_name=tau_name,
                       tau_fixed=tau_fixed, rho_name=rho_name) -> csr_matrix:
                 tau = values[tau_name] if tau_name else tau_fixed
-                m = identity(n_nodes, format="csr") - values[rho_name] * wmat
-                return csr_matrix(tau * (m.T @ m))
+                m = _sar_operator(wmat, values[rho_name])
+                return _gram_precision(m, tau)
 
             params = tuple(nm for nm in (tau_name, rho_name) if nm)
             scalable.append(ParametricBlock(template, params, build))
@@ -931,7 +934,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 eta = values[eta_name] if eta_name else eta_fixed
                 tau = values[tau_name] if tau_name else tau_fixed
                 m = _sdpd_operator(ws, rho, gamma, eta)
-                return csr_matrix(tau * (m.T @ m))
+                return _gram_precision(m, tau)
 
             params = tuple(nm for nm in (tau_name, rho_name, gamma_name, eta_name) if nm)
             scalable.append(ParametricBlock(template, params, build))

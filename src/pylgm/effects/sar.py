@@ -12,7 +12,11 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import bmat, csr_matrix, identity
 
-from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
+from pylgm.effects.directed_graph import (
+    normalize_directed_graph,
+    row_standardize,
+    sorted_time_keys,
+)
 from pylgm.effects.graph import design_from_graph
 from pylgm.ir.model import LatentBlock
 
@@ -59,7 +63,7 @@ def _panel_networks(
     """
     if not isinstance(graphs, Mapping) or not graphs:
         raise ValueError("graphs must be a non-empty mapping of time -> graph")
-    times = tuple(sorted(map(str, graphs)))
+    times = sorted_time_keys(graphs)
     per_period: dict[str, tuple[tuple[str, ...], csr_matrix]] = {}
     union: set[str] = set()
     for t in times:

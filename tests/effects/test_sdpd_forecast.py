@@ -32,3 +32,11 @@ def test_multi_step_iterates():
         assert mean.shape == (n,)
         assert np.all(np.isfinite(mean))
         assert np.all(var > 0)
+
+
+def test_future_times_sort_numerically():
+    from pylgm.effects.directed_graph import sorted_time_keys
+
+    assert sorted_time_keys({"9": 0, "10": 0, "2": 0}) == ("2", "9", "10")
+    assert sorted_time_keys({"2021": 0, "2020": 0}) == ("2020", "2021")
+    assert sorted_time_keys({"b": 0, "a": 0}) == ("a", "b")  # non-numeric falls back

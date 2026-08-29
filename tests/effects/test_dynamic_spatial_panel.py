@@ -72,3 +72,13 @@ def test_unobserved_time_without_graph_rejected():
         build_dynamic_spatial_panel(
             frame, "d", "unit", "period", {"1": _graph()}, rho=0.3, gamma=0.0, eta=0.0, precision=1.0
         )
+
+
+def test_numeric_period_labels_sort_numerically_not_lexically():
+    # Panel keyed "1".."11": lexicographic order would place "10","11" before "2",
+    # silently mis-specifying SDPD temporal adjacency. Must be true numeric order.
+    from pylgm.effects.sar import _panel_networks
+
+    graphs = {str(t): {"a": ["b"], "b": ["a"]} for t in range(1, 12)}
+    _units, times, _ws = _panel_networks(graphs)
+    assert times == tuple(str(t) for t in range(1, 12))

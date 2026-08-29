@@ -82,3 +82,17 @@ def canonical_directed_graph(graph: Mapping) -> tuple[tuple[str, tuple], ...]:
             neighbours = tuple(sorted(nodes[j] for j in columns))
         result.append((node, neighbours))
     return tuple(result)
+
+
+def sorted_time_keys(keys) -> tuple[str, ...]:
+    """Period labels sorted numerically when all parse as numbers, else lexically.
+
+    Guards against lexicographic mis-ordering of integer period labels
+    (``"10" < "2"`` as strings), which would silently mis-specify the SDPD
+    temporal adjacency for panels keyed 1..12 or any period >= 10.
+    """
+    labels = [str(k) for k in keys]
+    try:
+        return tuple(sorted(labels, key=lambda s: (float(s), s)))
+    except ValueError:
+        return tuple(sorted(labels))

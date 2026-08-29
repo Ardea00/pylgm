@@ -17,7 +17,11 @@ import pandas as pd
 from scipy.sparse import csr_matrix, diags, identity
 from scipy.sparse.linalg import splu
 
-from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
+from pylgm.effects.directed_graph import (
+    normalize_directed_graph,
+    row_standardize,
+    sorted_time_keys,
+)
 from pylgm.effects.sar import _panel_networks
 from pylgm.parameters import Hyperparameter
 
@@ -91,7 +95,7 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
     marginals = result.latent_marginals(effect.name)
     x_grid = np.asarray(marginals.mean, dtype=float).reshape(t_count, n)
     v_grid = np.asarray(marginals.variance, dtype=float).reshape(t_count, n)
-    future_times = tuple(sorted(map(str, future_graphs)))
+    future_times = sorted_time_keys(future_graphs)
     future_ws = [
         _align_to_units(dict(future_graphs[_key(future_graphs, t)]), units) for t in future_times
     ]
