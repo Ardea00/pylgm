@@ -499,6 +499,9 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
     phi = getattr(model.likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
     if isinstance(phi, Hyperparameter):
         found.append(("phi", phi))
+    shape = getattr(model.likelihood, "shape", None)  # Weibull survival shape
+    if isinstance(shape, Hyperparameter):
+        found.append(("shape", shape))
     for effect in model.predictor.effects:
         precision = getattr(effect, "precision", None)
         if isinstance(precision, Hyperparameter):

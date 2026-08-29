@@ -283,3 +283,41 @@ def test_survival_entry_after_time_raises():
     model = LGM("y", WeibullSurv("d", entry="v"), Fixed("1"), time="t")
     with pytest.raises(DataContractError, match="entry"):
         compile_lgm(model, _panel(frame))
+
+
+def test_empirical_bayes_recovers_planted_weibull_shape():
+    from pylgm import Hyperparameter, WeibullSurv
+
+    rng = np.random.default_rng(1)
+    n, alpha_true, b0 = 6000, 1.8, 0.5
+    scale = np.exp(-b0 / alpha_true)
+    t = rng.weibull(alpha_true, size=n) * scale
+    frame = pd.DataFrame({"t": np.arange(n), "y": t, "d": np.ones(n)})
+    model = LGM(
+        "y",
+        WeibullSurv("d", shape=Hyperparameter("alpha", initial=1.0, transform="log")),
+        Fixed("1", prior_precision=1e-8),
+        time="t",
+    )
+    result = model.fit(frame, engine="laplace", hyperparameters="optimize")
+    assert result.hyperparameters["alpha"] == pytest.approx(alpha_true, rel=0.1)
+
+
+def test_weibull_surv_left_truncation_fits_end_to_end():
+    # Delayed entry: rows enter the risk set at v>0. Fit must run and the slope
+    # estimate must be finite and close to the planted value.
+    from pylgm import WeibullSurv
+
+    rng = np.random.default_rng(2)
+    n, alpha, b1 = 5000, 1.2, -0.6
+    x = rng.normal(size=n)
+    eta = b1 * x
+    scale = np.exp(-eta / alpha)
+    t = rng.weibull(alpha, size=n) * scale
+    v = np.minimum(0.2 * rng.random(n), 0.99 * t)      # entry strictly before t
+    frame = pd.DataFrame({"t": np.arange(n), "y": t, "x": x, "d": np.ones(n), "v": v})
+    model = LGM("y", WeibullSurv("d", shape=alpha, entry="v"), Fixed("1 + x"), time="t")
+    result = model.fit(frame, engine="laplace")
+    idx = {lab: i for i, lab in enumerate(result.labels)}
+    assert np.isfinite(result.mean[idx["fixed:x"]])
+    assert result.mean[idx["fixed:x"]] == pytest.approx(b1, abs=0.08)
