@@ -21,6 +21,7 @@ from pylgm.effects import (
     ProperCAR,
     RW1,
     RW2,
+    SAR,
     SpaceTime,
     build_ar1,
     build_besag,
@@ -31,12 +32,14 @@ from pylgm.effects import (
     build_midas_parametric,
     build_proper_car,
     build_random_walk,
+    build_sar,
     build_spacetime,
     midas_penalty,
     midas_weights,
     normalize_graph,
 )
 from pylgm.effects.ar1 import ar1_structure
+from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
 from pylgm.effects.bym2 import (
     _build_bym2_augmented,
     _BYM2_AUGMENT_NODES,
@@ -316,6 +319,13 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.index, dict(effect.graph), rho, precision
                 )
                 precisions[effect.name] = precision
+            elif isinstance(effect, SAR):
+                precision = _resolved_precision(effect.precision)
+                rho = _resolved_precision(effect.rho)
+                block = build_sar(
+                    frame, effect.name, effect.index, dict(effect.graph), rho, precision
+                )
+                precisions[effect.name] = precision
             elif isinstance(effect, BYM2):
                 precision = _resolved_precision(effect.precision)
                 phi = _resolved_precision(effect.phi) if isinstance(effect.phi, Hyperparameter) else effect.phi
@@ -472,6 +482,8 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
         if isinstance(effect, BYM2) and isinstance(effect.phi, Hyperparameter):
             found.append((effect.name, effect.phi))
         if isinstance(effect, AR1) and isinstance(effect.rho, Hyperparameter):
+            found.append((effect.name, effect.rho))
+        if isinstance(effect, SAR) and isinstance(effect.rho, Hyperparameter):
             found.append((effect.name, effect.rho))
         if isinstance(effect, MIDASParametric):
             for shape in (effect.shape1, effect.shape2):
@@ -808,6 +820,45 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 return csr_matrix(tau * ar1_structure(level_count, values[rho_name]))
 
             params = tuple(n for n in (tau_name, rho_name) if n)
+            scalable.append(ParametricBlock(template, params, build))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            parameter_names.append(rho_name)
+            parameter_bounds[rho_name] = rho_bounds
+            continue
+        if isinstance(effect, SAR):
+            if not isinstance(effect.rho, Hyperparameter):
+                block = _compiled_block(
+                    effect.name, build_sar,
+                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, value,
+                )
+                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+                if optimized:
+                    parameter_names.append(precision.name)
+                    parameter_bounds[precision.name] = _log_bounds(precision)
+                continue
+            rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="SAR rho", inset=1e-6)
+            nodes, w = normalize_directed_graph(dict(effect.graph))
+            w = row_standardize(w)
+            template = _compiled_block(
+                effect.name, build_sar,
+                frame, effect.name, effect.index, dict(effect.graph),
+                float(effect.rho.initial), value if not optimized else 1.0,
+            )
+            tau_name = precision.name if optimized else None
+            tau_fixed = None if optimized else value
+            rho_name = effect.rho.name
+            wmat = w
+            n_nodes = len(nodes)
+
+            def build(values, wmat=wmat, n_nodes=n_nodes, tau_name=tau_name,
+                      tau_fixed=tau_fixed, rho_name=rho_name) -> csr_matrix:
+                tau = values[tau_name] if tau_name else tau_fixed
+                m = identity(n_nodes, format="csr") - values[rho_name] * wmat
+                return csr_matrix(tau * (m.T @ m))
+
+            params = tuple(nm for nm in (tau_name, rho_name) if nm)
             scalable.append(ParametricBlock(template, params, build))
             if optimized:
                 parameter_names.append(precision.name)
