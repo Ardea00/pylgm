@@ -27,7 +27,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     # Binomial carries a per-row trials vector; the fit loop works on the observed
     # rows, so bind their trials. For every other likelihood this returns self.
     _trials = getattr(likelihood, "trials", None)
-    lk_obs = likelihood.for_observations(_trials[observed] if _trials is not None else None)
+    lk_obs = likelihood.for_observations({"trials": _trials[observed]} if _trials is not None else None)
     lk_obs.validate_response(y_obs)
 
     basis = _constraint_null_space(model.constraints, latent_size)

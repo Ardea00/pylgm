@@ -268,21 +268,29 @@ def _warn_missing_spacetime_main_effects(effects) -> None:
             )
 
 
-def _binomial_trials(model: "LGM", frame: object) -> "np.ndarray | None":
-    """Extract and validate the per-row trials vector for a Binomial likelihood.
+def _likelihood_columns(model: "LGM", frame: object) -> "dict | None":
+    """Extract and validate the per-row auxiliary data a likelihood binds.
 
-    Returns ``None`` for every other likelihood, so binding it via
-    ``for_observations`` is a no-op (the trials hook defaults to ``return self``).
+    Returns ``{"trials": ...}`` for Binomial and ``None`` for every family that
+    binds no per-row data (its ``for_observations`` hook is then a no-op).
     """
-    if not isinstance(model.likelihood, Binomial):
+    like = model.likelihood
+    if isinstance(like, Binomial):
+        column = like.trials
+        if column not in frame.columns:
+            raise DataContractError(f"trials column not found: {column!r}")
+        trials = frame[column].to_numpy(dtype=float)
+        if not np.all(np.isfinite(trials)) or np.any(trials < 1.0) or np.any(trials != np.floor(trials)):
+            raise CompilationError("binomial trials column must be positive integers")
+        return {"trials": trials}
+    return None
+
+
+def _slice_aux(aux: "dict | None", observed: "np.ndarray") -> "dict | None":
+    """Slice each bound vector to the observed rows (None entries stay None)."""
+    if aux is None:
         return None
-    column = model.likelihood.trials
-    if column not in frame.columns:
-        raise DataContractError(f"trials column not found: {column!r}")
-    trials = frame[column].to_numpy(dtype=float)
-    if not np.all(np.isfinite(trials)) or np.any(trials < 1.0) or np.any(trials != np.floor(trials)):
-        raise CompilationError("binomial trials column must be positive integers")
-    return trials
+    return {k: (v[observed] if v is not None else None) for k, v in aux.items()}
 
 
 def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
@@ -423,10 +431,9 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         compiled_likelihood = model.likelihood.materialize(values)
         observed = panel.observed
         # Binomial carries a per-row trials vector; binding is a no-op otherwise.
-        trials = _binomial_trials(model, frame)
-        obs_trials = trials[observed] if trials is not None else None
-        compiled_likelihood.for_observations(obs_trials).validate_response(y[observed])
-        compiled_likelihood = compiled_likelihood.for_observations(trials)
+        aux = _likelihood_columns(model, frame)
+        compiled_likelihood.for_observations(_slice_aux(aux, observed)).validate_response(y[observed])
+        compiled_likelihood = compiled_likelihood.for_observations(aux)
         if not blocks:
             raise CompilationError("model must contain at least one latent effect")
         width = sum(block.design.shape[1] for block in blocks)
@@ -891,10 +898,10 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         # materialize is lenient (picks phi out of the joint mapping); a phi-less
         # family (Poisson/Bernoulli) ignores `resolved` and returns unchanged.
         # Binomial's trials vector is data, bound onto the compiled likelihood.
-        trials = _binomial_trials(model, frame)
+        aux = _likelihood_columns(model, frame)
 
-        def factory(resolved: dict, likelihood: object = likelihood, trials=trials) -> object:
-            return likelihood.materialize(resolved).for_observations(trials)
+        def factory(resolved: dict, likelihood: object = likelihood, aux=aux) -> object:
+            return likelihood.materialize(resolved).for_observations(aux)
 
     constraint_labels = _qualified_labels([item.block for item in scalable])
     extra_constraints, extra_constraint_rhs = resolve_constraints(

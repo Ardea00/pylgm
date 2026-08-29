@@ -35,12 +35,13 @@ def _resolve_phi(phi: object, values: Mapping[str, float]) -> float:
 class _CompiledLikelihood:
     """Shared per-observation binding hook for compiled likelihoods.
 
-    Default is a no-op: one compiled likelihood serves both the observed-row
-    fit calls and the all-row prediction call unchanged. Only ``CompiledBinomial``
-    overrides it, to bind its per-row trials vector.
+    Default is a no-op: one compiled likelihood serves both the observed-row fit
+    calls and the all-row prediction call unchanged. Families needing per-row
+    data (Binomial trials; survival event/entry) override this to bind the
+    vectors named in ``aux``.
     """
 
-    def for_observations(self, trials: "np.ndarray | None") -> "_CompiledLikelihood":
+    def for_observations(self, aux: "Mapping[str, np.ndarray] | None") -> "_CompiledLikelihood":
         return self
 
 
@@ -220,8 +221,10 @@ class CompiledBinomial(_CompiledLikelihood):
     trials: object = None
     link: LogitLink = field(default_factory=LogitLink, init=False)
 
-    def for_observations(self, trials: "np.ndarray | None") -> "CompiledBinomial":
-        return CompiledBinomial(trials)
+    def for_observations(self, aux: "Mapping[str, np.ndarray] | None") -> "CompiledBinomial":
+        if aux is None:
+            return self
+        return CompiledBinomial(aux["trials"])
 
     def _n(self) -> np.ndarray:
         return np.asarray(self.trials, dtype=float)

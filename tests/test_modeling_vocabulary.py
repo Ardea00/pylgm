@@ -338,7 +338,7 @@ def test_binomial_glm_pieces_and_bernoulli_reduction():
     n = np.array([10.0, 8.0, 12.0, 5.0])
     y = np.array([3.0, 4.0, 7.0, 2.0])
     eta = np.array([-0.5, 0.2, 0.8, -0.1])
-    lk = Binomial("n").materialize({}).for_observations(n)
+    lk = Binomial("n").materialize({}).for_observations({"trials": n})
     p = 1.0 / (1.0 + np.exp(-eta))
 
     # grad = y - n*p ; weight = n*p*(1-p) ; response_mean = n*p (counts)
@@ -349,7 +349,7 @@ def test_binomial_glm_pieces_and_bernoulli_reduction():
 
     # n=1 reduces exactly to Bernoulli
     y01 = np.array([0.0, 1.0, 1.0, 0.0])
-    lk1 = CompiledBinomial().for_observations(np.ones(4))
+    lk1 = CompiledBinomial().for_observations({"trials": np.ones(4)})
     bern = Bernoulli().materialize({})
     np.testing.assert_allclose(lk1.gradient(eta, y01), bern.gradient(eta, y01))
     np.testing.assert_allclose(lk1.working_weights(eta, y01), bern.working_weights(eta, y01))
@@ -362,7 +362,7 @@ def test_binomial_density_and_cdf_match_scipy():
     n = np.array([10.0, 8.0, 12.0])
     y = np.array([3.0, 4.0, 7.0])
     eta = np.array([-0.5, 0.2, 0.8])
-    lk = Binomial("n").materialize({}).for_observations(n)
+    lk = Binomial("n").materialize({}).for_observations({"trials": n})
     p = 1.0 / (1.0 + np.exp(-eta))
     np.testing.assert_allclose(lk.pointwise_log_density(eta, y).sum(), lk.log_likelihood(eta, y))
     np.testing.assert_allclose(lk.pointwise_log_density(eta, y), binom.logpmf(y, n, p), atol=1e-10)
@@ -373,7 +373,7 @@ def test_binomial_rejects_out_of_support_response():
     from pylgm import Binomial
     from pylgm.exceptions import DataContractError
 
-    lk = Binomial("n").materialize({}).for_observations(np.array([10.0, 8.0]))
+    lk = Binomial("n").materialize({}).for_observations({"trials": np.array([10.0, 8.0])})
     with pytest.raises(DataContractError, match="exceed"):
         lk.validate_response(np.array([3.0, 10.0]))
     with pytest.raises(DataContractError, match="non-negative integer"):
