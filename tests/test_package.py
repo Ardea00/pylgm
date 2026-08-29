@@ -30,6 +30,8 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
         "ComparisonResult",
         "CandidateFailure",
         "FailureCause",
+        "WeibullSurv",
+        "ExponentialSurv",
     }
 
     assert expected.issubset(set(pylgm.__all__))

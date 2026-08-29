@@ -320,3 +320,33 @@ def test_load_model_rejects_invalid_trials_usage(
     )
     with pytest.raises(ConfigurationError, match=match):
         load_model(path)
+
+
+def test_weibullsurv_config_builds_model(tmp_path: Path) -> None:
+    from pylgm import WeibullSurv
+
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: weibullsurv\n  event: d\n  shape: 1.5\n  entry: v\n"
+        "data:\n  time: t\n  panel: [region]\n"
+        "predictor:\n  fixed: '1'\n"
+        "  effects: [{name: b, type: iid, index: region, precision: 1.0}]\n"
+    )
+    model = load_model(path)
+    assert isinstance(model.likelihood, WeibullSurv)
+    assert model.likelihood.event == "d"
+    assert model.likelihood.shape == 1.5
+    assert model.likelihood.entry == "v"
+
+
+def test_exponentialsurv_config_rejects_shape(tmp_path: Path) -> None:
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: exponentialsurv\n  event: d\n  shape: 2.0\n"
+        "data:\n  time: t\n"
+        "predictor:\n  fixed: '1'\n"
+    )
+    with pytest.raises(ConfigurationError, match="shape"):
+        load_model(path)
