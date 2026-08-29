@@ -8,6 +8,7 @@ from pylgm.effects.midas import build_midas, build_midas_parametric, midas_penal
 from pylgm.effects.proper_car import build_proper_car
 from pylgm.effects.random_walk import build_random_walk, difference_operator
 from pylgm.effects.sar import build_dynamic_spatial_panel, build_sar
+from pylgm.effects.sdpd_forecast import forecast_dynamic_spatial_panel
 from pylgm.effects.spacetime import build_spacetime
 from pylgm.effects.spec import (
     AR1,
@@ -54,6 +55,7 @@ __all__ = [
     "build_sar",
     "build_spacetime",
     "difference_operator",
+    "forecast_dynamic_spatial_panel",
     "midas_penalty",
     "midas_weights",
     "canonical_graph",
