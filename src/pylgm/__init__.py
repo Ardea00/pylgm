@@ -11,6 +11,7 @@ from pylgm.effects import (
     ProperCAR,
     RW1,
     RW2,
+    SAR,
     SpaceTime,
     load_graph_file,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "ProperCAR",
     "RW1",
     "RW2",
+    "SAR",
     "SpaceTime",
     "__version__",
 ]

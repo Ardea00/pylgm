@@ -176,6 +176,35 @@ class ProperCAR(_ComposableEffect):
 
 
 @dataclass(frozen=True)
+class SAR(_ComposableEffect):
+    """A directed spatial-autoregressive latent effect: precision
+    ``precision * (I - ρW)ᵀ(I - ρW)`` on a row-standardized directed graph."""
+
+    name: str
+    index: str
+    graph: Mapping
+    rho: float | Hyperparameter
+    precision: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.directed_graph import canonical_directed_graph
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if isinstance(self.rho, Hyperparameter):
+            object.__setattr__(self, "rho", self.rho)
+        else:
+            rho = _finite_real(self.rho, "rho")
+            if not -1.0 < rho < 1.0:
+                raise ValueError("rho must lie strictly inside (-1, 1)")
+            object.__setattr__(self, "rho", rho)
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        object.__setattr__(self, "graph", canonical_directed_graph(self.graph))
+
+
+@dataclass(frozen=True)
 class BYM2(_ComposableEffect):
     """A BYM2 spatial latent effect: scaled ICAR + IID mixed by ``phi``."""
 
@@ -315,7 +344,7 @@ class SpaceTime(_ComposableEffect):
 
 
 EffectSpec: TypeAlias = (
-    Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | BYM2 | MIDAS | MIDASParametric | SpaceTime
+    Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | SAR | BYM2 | MIDAS | MIDASParametric | SpaceTime
 )
 
 
@@ -333,7 +362,7 @@ class Predictor:
         if any(
             not isinstance(
                 effect,
-                (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, MIDASParametric, SpaceTime),
+                (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, SAR, BYM2, MIDAS, MIDASParametric, SpaceTime),
             )
             for effect in effects
         ):
@@ -347,7 +376,7 @@ class Predictor:
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
         if isinstance(
-            other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, BYM2, MIDAS, MIDASParametric, SpaceTime)
+            other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, SAR, BYM2, MIDAS, MIDASParametric, SpaceTime)
         ):
             return Predictor(self.effects + (other,))
         return NotImplemented
@@ -365,5 +394,6 @@ __all__ = [
     "ProperCAR",
     "RW1",
     "RW2",
+    "SAR",
     "SpaceTime",
 ]
