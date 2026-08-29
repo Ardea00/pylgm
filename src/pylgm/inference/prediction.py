@@ -44,8 +44,9 @@ class PredictionContext:
     ``entries`` is an ordered tuple of block descriptors, in fitted block
     order: ``("fixed", ModelSpec)``,
     ``("structured", (block_name, index_column, labels_tuple))``,
-    ``("midas", (block_name, columns_tuple))``, or
-    ``("spacetime", (block_name, space, time, area_labels, time_labels))``.
+    ``("midas", (block_name, columns_tuple))``,
+    ``("spacetime", (block_name, space, time, area_labels, time_labels))``, or
+    ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``.
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -179,6 +180,35 @@ def _spacetime_block(
     return design
 
 
+def _dynamic_spatial_panel_block(
+    entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
+) -> np.ndarray:
+    name, unit, time, unit_labels, time_labels = entry
+    for column in (unit, time):
+        if column not in new_data.columns:
+            raise ValueError(
+                f"predict() new_data is missing column {column!r} required by the "
+                f"{name!r} dynamic-spatial-panel block"
+            )
+    unit_pos = {label: i for i, label in enumerate(unit_labels)}
+    time_pos = {label: j for j, label in enumerate(time_labels)}
+    units = new_data[unit].map(str)
+    times = new_data[time].map(str)
+    unseen = sorted(set(units[~units.isin(unit_pos)]) | set(times[~times.isin(time_pos)]))
+    if unseen:
+        raise ValueError(
+            f"predict() cannot score rows whose {name!r} unit/time was not in the "
+            f"fitted model: {unseen!r}. predict reuses the fitted latent posterior, so it "
+            "cannot create a new latent cell. To forecast future periods, use the SDPD "
+            "forecast() helper instead."
+        )
+    n = len(unit_labels)
+    cells = times.map(time_pos).to_numpy() * n + units.map(unit_pos).to_numpy()
+    design = np.zeros((len(new_data), n * len(time_labels)))
+    design[np.arange(len(new_data)), cells] = 1.0
+    return design
+
+
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
     if not isinstance(new_data, pd.DataFrame) or new_data.empty:
         raise ValueError("predict() new_data must be a non-empty pandas DataFrame")
@@ -194,6 +224,8 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_midas_parametric_block(payload, new_data))
         elif kind == "spacetime":
             blocks.append(_spacetime_block(payload, new_data))
+        elif kind == "dynamic_spatial_panel":
+            blocks.append(_dynamic_spatial_panel_block(payload, new_data))
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
     design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))

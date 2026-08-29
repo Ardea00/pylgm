@@ -14,6 +14,7 @@ from pylgm.effects import (
     AR1,
     Besag,
     BYM2,
+    DynamicSpatialPanel,
     Fixed,
     IID,
     MIDAS,
@@ -40,6 +41,7 @@ from pylgm.effects import (
 )
 from pylgm.effects.ar1 import ar1_structure
 from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
+from pylgm.effects.sar import build_dynamic_spatial_panel, _panel_networks, _sdpd_operator
 from pylgm.effects.bym2 import (
     _build_bym2_augmented,
     _BYM2_AUGMENT_NODES,
@@ -326,6 +328,17 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                     frame, effect.name, effect.index, dict(effect.graph), rho, precision
                 )
                 precisions[effect.name] = precision
+            elif isinstance(effect, DynamicSpatialPanel):
+                precision = _resolved_precision(effect.precision)
+                block = build_dynamic_spatial_panel(
+                    frame, effect.name, effect.unit, effect.time,
+                    {t: dict(g) for t, g in dict(effect.graphs).items()},
+                    _resolved_precision(effect.rho),
+                    _resolved_precision(effect.gamma),
+                    _resolved_precision(effect.eta),
+                    precision,
+                )
+                precisions[effect.name] = precision
             elif isinstance(effect, BYM2):
                 precision = _resolved_precision(effect.precision)
                 phi = _resolved_precision(effect.phi) if isinstance(effect.phi, Hyperparameter) else effect.phi
@@ -485,6 +498,10 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
             found.append((effect.name, effect.rho))
         if isinstance(effect, SAR) and isinstance(effect.rho, Hyperparameter):
             found.append((effect.name, effect.rho))
+        if isinstance(effect, DynamicSpatialPanel):
+            for coeff in (effect.rho, effect.gamma, effect.eta):
+                if isinstance(coeff, Hyperparameter):
+                    found.append((effect.name, coeff))
         if isinstance(effect, MIDASParametric):
             for shape in (effect.shape1, effect.shape2):
                 if isinstance(shape, Hyperparameter):
@@ -866,6 +883,73 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             parameter_names.append(rho_name)
             parameter_bounds[rho_name] = rho_bounds
             continue
+        if isinstance(effect, DynamicSpatialPanel):
+            graphs = {t: dict(g) for t, g in dict(effect.graphs).items()}
+            coeff_is_hp = any(
+                isinstance(p, Hyperparameter) for p in (effect.rho, effect.gamma, effect.eta)
+            )
+            if not coeff_is_hp:
+                block = _compiled_block(
+                    effect.name, build_dynamic_spatial_panel,
+                    frame, effect.name, effect.unit, effect.time, graphs,
+                    effect.rho, effect.gamma, effect.eta, value,
+                )
+                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+                if optimized:
+                    parameter_names.append(precision.name)
+                    parameter_bounds[precision.name] = _log_bounds(precision)
+                continue
+            _, _, ws = _panel_networks(graphs)
+
+            def _coeff(param):
+                if isinstance(param, Hyperparameter):
+                    return param.name, None
+                return None, float(param)
+
+            rho_name, rho_fixed = _coeff(effect.rho)
+            gamma_name, gamma_fixed = _coeff(effect.gamma)
+            eta_name, eta_fixed = _coeff(effect.eta)
+            tau_name = precision.name if optimized else None
+            tau_fixed = None if optimized else value
+
+            template = _compiled_block(
+                effect.name, build_dynamic_spatial_panel,
+                frame, effect.name, effect.unit, effect.time, graphs,
+                rho_fixed if rho_fixed is not None else float(effect.rho.initial),
+                gamma_fixed if gamma_fixed is not None else float(effect.gamma.initial),
+                eta_fixed if eta_fixed is not None else float(effect.eta.initial),
+                value if not optimized else 1.0,
+            )
+
+            def build(values, ws=ws,
+                      rho_name=rho_name, rho_fixed=rho_fixed,
+                      gamma_name=gamma_name, gamma_fixed=gamma_fixed,
+                      eta_name=eta_name, eta_fixed=eta_fixed,
+                      tau_name=tau_name, tau_fixed=tau_fixed) -> csr_matrix:
+                rho = values[rho_name] if rho_name else rho_fixed
+                gamma = values[gamma_name] if gamma_name else gamma_fixed
+                eta = values[eta_name] if eta_name else eta_fixed
+                tau = values[tau_name] if tau_name else tau_fixed
+                m = _sdpd_operator(ws, rho, gamma, eta)
+                return csr_matrix(tau * (m.T @ m))
+
+            params = tuple(nm for nm in (tau_name, rho_name, gamma_name, eta_name) if nm)
+            scalable.append(ParametricBlock(template, params, build))
+            if rho_name:
+                parameter_names.append(rho_name)
+                parameter_bounds[rho_name] = _bounded_parameter(
+                    effect.rho, -1.0, 1.0, label="SDPD rho", inset=1e-6
+                )
+            if gamma_name:
+                parameter_names.append(gamma_name)
+                parameter_bounds[gamma_name] = _real_bounds(effect.gamma)
+            if eta_name:
+                parameter_names.append(eta_name)
+                parameter_bounds[eta_name] = _real_bounds(effect.eta)
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            continue
         if isinstance(effect, MIDAS):
             # Q(tau) = tau * DtD + delta * P0. The delta * P0 term does not scale
             # with tau, so an estimated tau needs a ParametricBlock (rebuild per
@@ -999,6 +1083,13 @@ def build_prediction_context(
                 ("spacetime", (effect.name, effect.space, effect.time,
                                tuple(dict.fromkeys(area_labels)),
                                tuple(dict.fromkeys(time_labels))))
+            )
+        elif isinstance(effect, DynamicSpatialPanel):
+            unit_labels = tuple(dict.fromkeys(label.split("@", 1)[0] for label in block.labels))
+            time_labels = tuple(dict.fromkeys(label.split("@", 1)[1] for label in block.labels))
+            entries.append(
+                ("dynamic_spatial_panel",
+                 (effect.name, effect.unit, effect.time, unit_labels, time_labels))
             )
         else:
             entries.append(("structured", (effect.name, effect.index, block.labels)))
