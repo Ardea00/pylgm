@@ -303,6 +303,33 @@ def test_empirical_bayes_recovers_planted_weibull_shape():
     assert result.hyperparameters["alpha"] == pytest.approx(alpha_true, rel=0.1)
 
 
+def test_weibull_surv_predict_uses_fitted_shape():
+    # Fit with an estimated shape, predict on new rows: the predicted E[T] must use
+    # the FITTED alpha, not the Hyperparameter's initial guess.
+    from pylgm import Hyperparameter, WeibullSurv
+    from scipy.special import gamma as gamma_fn
+
+    rng = np.random.default_rng(3)
+    n, alpha_true, b0 = 4000, 1.9, 0.4
+    scale = np.exp(-b0 / alpha_true)
+    t = rng.weibull(alpha_true, size=n) * scale
+    frame = pd.DataFrame({"t": np.arange(n), "y": t, "d": np.ones(n)})
+    model = LGM(
+        "y",
+        WeibullSurv("d", shape=Hyperparameter("alpha", initial=1.0, transform="log")),
+        Fixed("1", prior_precision=1e-8),
+        time="t",
+    )
+    result = model.fit(frame, engine="laplace", hyperparameters="optimize")
+    alpha_hat = result.hyperparameters["alpha"]
+    new = pd.DataFrame({"t": [n], "y": [1.0], "d": [1.0]})
+    pred = result.predict(new)
+    eta_hat = float(result.mean[0])
+    expected = np.exp(-eta_hat / alpha_hat) * gamma_fn(1.0 + 1.0 / alpha_hat)
+    # would differ by >5% if the initial alpha=1.0 were used instead of alpha_hat
+    np.testing.assert_allclose(pred.fitted_mean, [expected], rtol=1e-3)
+
+
 def test_weibull_surv_left_truncation_fits_end_to_end():
     # Delayed entry: rows enter the risk set at v>0. Fit must run and the slope
     # estimate must be finite and close to the planted value.
