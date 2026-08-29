@@ -229,3 +229,57 @@ def test_laplace_binomial_predicts_counts_with_new_trials():
 
     with pytest.raises(ValueError, match="trials column"):
         result.predict(pd.DataFrame({"t": [5], "z": [1.0]}))
+
+
+def test_laplace_exponential_surv_intercept_solves_score_equation():
+    # Intercept-only exponential PH: the MLE of eta solves sum(delta) = sum(t*exp(eta)),
+    # i.e. eta_hat = log( sum(delta) / sum(t) ). With a near-flat prior the mode matches.
+    from pylgm import ExponentialSurv
+
+    frame = pd.DataFrame({
+        "t": np.arange(1, 6, dtype=float),
+        "y": [1.0, 2.0, 1.5, 3.0, 2.5],          # follow-up times
+        "d": [1.0, 0.0, 1.0, 1.0, 0.0],          # events
+    })
+    model = LGM("y", ExponentialSurv("d"), Fixed("1", prior_precision=1e-8), time="t")
+    result = fit_laplace(compile_lgm(model, _panel(frame)))
+    expected = np.log(frame["d"].sum() / frame["y"].sum())
+    np.testing.assert_allclose(result.mean, [expected], atol=1e-6)
+    assert result.diagnostics["final_gradient_norm"] < 1e-8
+
+
+def test_laplace_weibull_surv_fixed_shape_recovers_slope():
+    # Fixed-shape Weibull PH: recover a planted slope from simulated event times.
+    from pylgm import WeibullSurv
+
+    rng = np.random.default_rng(0)
+    n, alpha, b0, b1 = 6000, 1.5, 0.3, -0.8
+    x = rng.normal(size=n)
+    eta = b0 + b1 * x
+    scale = np.exp(-eta / alpha)                  # S(t)=exp(-(t/scale)^alpha)
+    t = rng.weibull(alpha, size=n) * scale        # all observed (no censoring)
+    frame = pd.DataFrame({"t": np.arange(n), "y": t, "x": x, "d": np.ones(n)})
+    model = LGM("y", WeibullSurv("d", shape=alpha), Fixed("1 + x"), time="t")
+    result = model.fit(frame, engine="laplace")
+    idx = {lab: i for i, lab in enumerate(result.labels)}
+    assert result.mean[idx["fixed:x"]] == pytest.approx(b1, abs=0.05)
+
+
+def test_survival_missing_event_column_raises():
+    from pylgm import ExponentialSurv
+    from pylgm.exceptions import DataContractError
+
+    frame = pd.DataFrame({"t": [1, 2], "y": [1.0, 2.0]})   # no "d" column
+    model = LGM("y", ExponentialSurv("d"), Fixed("1"), time="t")
+    with pytest.raises(DataContractError, match="event column not found"):
+        compile_lgm(model, _panel(frame))
+
+
+def test_survival_entry_after_time_raises():
+    from pylgm import WeibullSurv
+    from pylgm.exceptions import DataContractError
+
+    frame = pd.DataFrame({"t": [1, 2], "y": [1.0, 2.0], "d": [1.0, 1.0], "v": [0.5, 3.0]})
+    model = LGM("y", WeibullSurv("d", entry="v"), Fixed("1"), time="t")
+    with pytest.raises(DataContractError, match="entry"):
+        compile_lgm(model, _panel(frame))
