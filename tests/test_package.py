@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tomllib
 
+import numpy as np
 import pytest
 
 import pylgm
@@ -135,6 +136,15 @@ def test_hybrid_nowcast_example_reports_correlation():
     )
     assert completed.returncode == 0, completed.stderr
     assert "corr(pred,y)=" in completed.stdout
+
+
+def test_directed_network_sar_example_estimates_rho():
+    import runpy
+    ns = runpy.run_path("examples/directed_network_sar/run.py")
+    result = ns["main"]()
+    assert "rho" in result
+    assert np.isfinite(result["rho"])
+    assert -1.0 < result["rho"] < 1.0
 
 
 def test_installed_console_entrypoint_loads_and_reports_help() -> None:

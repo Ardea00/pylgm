@@ -54,6 +54,16 @@ For the precise semantics of each shipped feature, follow the links into the
   reported latent**: `latent_marginals("region")` returns the `x`-marginals and
   `latent_marginals("region.structured")` the `u*` marginals. See
   [spatial effects](spatial-effects.md).
+- **Directed & dynamic network structure** — a directed `SAR` effect
+  (`(I−ρW)ᵀ(I−ρW)` on a row-standardized, generally-asymmetric `W`) for
+  economic influence relations that symmetric CAR discards, and its
+  time-varying generalization `DynamicSpatialPanel` (contemporaneous `ρ`,
+  temporal `γ`, spatio-temporal-diffusion `η` over a balanced `unit x time`
+  grid, `T=1` reducing exactly to `SAR`). Both fit past the dense guard
+  through the E-sparse solver, support forward forecasting
+  (`forecast_dynamic_spatial_panel`) for future periods' networks, and `SAR`
+  is declarable from YAML (`type: sar`). See [spatial effects](spatial-effects.md)
+  and [`examples/directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar).
 
 ## Next
 
@@ -65,11 +75,7 @@ Ordered roughly by expected value to users. Nothing here is committed to a date.
    indicator and follow-up time), so they carry their own data-plumbing slice
    rather than reusing the GLM response column.
 2. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-3. **Directed & dynamic network structure** — a SAR effect
-   (`(I−ρW)ᵀ(I−ρW)`) for directed economic influence that symmetrized CAR
-   discards, and time-varying `W_t` — building on the weighted-graph support
-   above.
-4. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
+3. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
    mixed-frequency nowcasting frontend and a YAML `midas` effect type, building
    on the now-shipped `MIDASParametric` exp-Almon / Beta lag kernels.
 
