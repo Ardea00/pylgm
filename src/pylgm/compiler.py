@@ -286,6 +286,10 @@ def _likelihood_columns(model: "LGM", frame: object) -> "dict | None":
             raise CompilationError("binomial trials column must be positive integers")
         return {"trials": trials}
     if isinstance(like, (WeibullSurv, ExponentialSurv)):
+        if not np.all(np.isfinite(frame[model.response].to_numpy(dtype=float))):
+            raise DataContractError(
+                f"survival response {model.response!r} (follow-up time) must be observed for every row"
+            )
         if like.event not in frame.columns:
             raise DataContractError(f"event column not found: {like.event!r}")
         event = frame[like.event].to_numpy(dtype=float)

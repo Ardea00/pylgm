@@ -285,6 +285,20 @@ def test_survival_entry_after_time_raises():
         compile_lgm(model, _panel(frame))
 
 
+def test_survival_unobserved_response_raises():
+    from pylgm import ExponentialSurv
+    from pylgm.exceptions import DataContractError
+
+    frame = pd.DataFrame({
+        "t": np.arange(1, 7, dtype=float),
+        "y": [1.0, 2.0, 1.5, np.nan, 2.5, 3.0],   # follow-up times, one unobserved
+        "d": [1.0, 0.0, 1.0, 1.0, 0.0, 1.0],       # events
+    })
+    model = LGM("y", ExponentialSurv("d"), Fixed("1"), time="t")
+    with pytest.raises(DataContractError, match="must be observed"):
+        model.fit(frame, engine="laplace")
+
+
 def test_empirical_bayes_recovers_planted_weibull_shape():
     from pylgm import Hyperparameter, WeibullSurv
 
