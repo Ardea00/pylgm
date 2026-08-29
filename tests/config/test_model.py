@@ -320,3 +320,24 @@ def test_load_model_rejects_invalid_trials_usage(
     )
     with pytest.raises(ConfigurationError, match=match):
         load_model(path)
+
+
+def test_sar_config_builds_effect():
+    from pylgm.config.model import _EffectModelConfig, _build_effect
+    from pathlib import Path
+    from pylgm.effects.spec import SAR
+
+    config = _EffectModelConfig(
+        name="s", type="sar", index="region",
+        graph={"a": ["b"], "b": ["a"]}, rho=0.4,
+    )
+    effect = _build_effect(config, Path("."))
+    assert isinstance(effect, SAR)
+    assert effect.index == "region"
+
+
+def test_sar_config_requires_rho():
+    from pylgm.config.model import _EffectModelConfig
+
+    with pytest.raises(ValueError, match="rho"):
+        _EffectModelConfig(name="s", type="sar", index="region", graph={"a": ["b"]})
