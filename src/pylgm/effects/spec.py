@@ -205,6 +205,55 @@ class SAR(_ComposableEffect):
 
 
 @dataclass(frozen=True)
+class DynamicSpatialPanel(_ComposableEffect):
+    """A dynamic spatial panel (SDPD): per-period directed networks ``W_t`` with
+    contemporaneous (``rho``), temporal (``gamma``) and spatio-temporal-diffusion
+    (``eta``) coefficients. Precision ``precision * MᵀM`` for the block-bidiagonal
+    operator ``M`` (see the S-slice design spec)."""
+
+    name: str
+    unit: str
+    time: str
+    graphs: Mapping
+    rho: float | Hyperparameter
+    gamma: float | Hyperparameter = 0.0
+    eta: float | Hyperparameter = 0.0
+    precision: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.directed_graph import canonical_directed_graph
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "unit", _non_empty_string(self.unit, "unit"))
+        object.__setattr__(self, "time", _non_empty_string(self.time, "time"))
+        if isinstance(self.rho, Hyperparameter):
+            object.__setattr__(self, "rho", self.rho)
+        else:
+            rho = _finite_real(self.rho, "rho")
+            if not -1.0 < rho < 1.0:
+                raise ValueError("rho must lie strictly inside (-1, 1)")
+            object.__setattr__(self, "rho", rho)
+        for field_name in ("gamma", "eta"):
+            value = getattr(self, field_name)
+            if not isinstance(value, Hyperparameter):
+                object.__setattr__(self, field_name, _finite_real(value, field_name))
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        if not isinstance(self.graphs, Mapping) or not self.graphs:
+            raise ValueError("graphs must be a non-empty mapping of time -> graph")
+        canonical = tuple(
+            (str(t), canonical_directed_graph(g))
+            for t, g in sorted(self.graphs.items(), key=lambda kv: str(kv[0]))
+        )
+        object.__setattr__(self, "graphs", canonical)
+
+    @property
+    def index(self) -> str:
+        return self.unit
+
+
+@dataclass(frozen=True)
 class BYM2(_ComposableEffect):
     """A BYM2 spatial latent effect: scaled ICAR + IID mixed by ``phi``."""
 
@@ -344,7 +393,19 @@ class SpaceTime(_ComposableEffect):
 
 
 EffectSpec: TypeAlias = (
-    Fixed | IID | RW1 | RW2 | AR1 | Besag | ProperCAR | SAR | BYM2 | MIDAS | MIDASParametric | SpaceTime
+    Fixed
+    | IID
+    | RW1
+    | RW2
+    | AR1
+    | Besag
+    | ProperCAR
+    | SAR
+    | DynamicSpatialPanel
+    | BYM2
+    | MIDAS
+    | MIDASParametric
+    | SpaceTime
 )
 
 
@@ -362,7 +423,21 @@ class Predictor:
         if any(
             not isinstance(
                 effect,
-                (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, SAR, BYM2, MIDAS, MIDASParametric, SpaceTime),
+                (
+                    Fixed,
+                    IID,
+                    RW1,
+                    RW2,
+                    AR1,
+                    Besag,
+                    ProperCAR,
+                    SAR,
+                    DynamicSpatialPanel,
+                    BYM2,
+                    MIDAS,
+                    MIDASParametric,
+                    SpaceTime,
+                ),
             )
             for effect in effects
         ):
@@ -376,7 +451,22 @@ class Predictor:
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
         if isinstance(
-            other, (Fixed, IID, RW1, RW2, AR1, Besag, ProperCAR, SAR, BYM2, MIDAS, MIDASParametric, SpaceTime)
+            other,
+            (
+                Fixed,
+                IID,
+                RW1,
+                RW2,
+                AR1,
+                Besag,
+                ProperCAR,
+                SAR,
+                DynamicSpatialPanel,
+                BYM2,
+                MIDAS,
+                MIDASParametric,
+                SpaceTime,
+            ),
         ):
             return Predictor(self.effects + (other,))
         return NotImplemented
@@ -386,6 +476,7 @@ __all__ = [
     "AR1",
     "Besag",
     "BYM2",
+    "DynamicSpatialPanel",
     "Fixed",
     "IID",
     "MIDAS",
