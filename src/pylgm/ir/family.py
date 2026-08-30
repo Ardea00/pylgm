@@ -372,7 +372,8 @@ class CompiledGaussianFamily:
         if any(not isinstance(name, str) or not name for name in names):
             raise ModelValidationError("parameter names must be non-empty strings")
         if len(names) != len(set(names)):
-            raise ModelValidationError("parameter names must be unique")
+            duplicates = sorted({n for n in names if names.count(n) > 1})
+            raise ModelValidationError(f"parameter names must be unique; repeated: {duplicates}")
         if not isinstance(initial, Hyperparameters):
             raise ModelValidationError("family initial values must be hyperparameters")
         bindings = tuple(
@@ -522,7 +523,8 @@ class CompiledFamily:
         if any(not isinstance(name, str) or not name for name in names):
             raise ModelValidationError("parameter names must be non-empty strings")
         if len(names) != len(set(names)):
-            raise ModelValidationError("parameter names must be unique")
+            duplicates = sorted({n for n in names if names.count(n) > 1})
+            raise ModelValidationError(f"parameter names must be unique; repeated: {duplicates}")
         bound = tuple(
             item.parameter
             for item in block_values
