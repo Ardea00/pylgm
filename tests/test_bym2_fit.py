@@ -56,6 +56,9 @@ def _estimate_phi(frame, seed_graph=None):
     return result.hyperparameters["region.phi"]
 
 
+# phi is weakly identified in a single small realization -- hence the
+# averaging over seeds below -- so individual fits sit near the interval edge.
+@pytest.mark.filterwarnings("ignore:empirical-Bayes estimate")
 def test_phi_estimated_and_tracks_the_simulated_structure():
     # Averaged over seeds, spatially-dependent data must yield a clearly larger
     # phi than independent data (a single small realization is weakly identified).

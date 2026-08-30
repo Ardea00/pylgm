@@ -259,13 +259,7 @@ def test_lgm_rejects_engine_likelihood_mismatch():
 
 
 def test_gaussian_empirical_bayes_estimates_precision():
-    rng = np.random.default_rng(0)
-    regions = ["a", "b", "c", "d"]
-    rows = []
-    for t in range(1, 21):
-        for r in regions:
-            rows.append({"region": r, "t": t, "y": rng.normal()})
-    frame = pd.DataFrame(rows)
+    frame = _panel_frame()
     model = LGM(
         "y", Gaussian(0.5),
         Fixed("1") + IID("region", index="region",
@@ -277,10 +271,16 @@ def test_gaussian_empirical_bayes_estimates_precision():
     assert "region_prec" in result.hyperparameters
     assert result.hyperparameters["region_prec"] > 0
     assert result.diagnostics["empirical_bayes_converged"] is True
+    # An estimate sitting on a bound is set by the bound, not the data, and
+    # would make this test vacuous -- the fixture carries a real region effect.
+    assert result.diagnostics["hyperparameters_at_bound"] == ""
 
 
 def test_poisson_empirical_bayes_runs_via_laplace():
-    rows = [{"region": r, "t": t, "y": float((t + (r == "b")) % 5)}
+    # A real per-region rate difference, so the precision is estimable rather
+    # than running to its bound on an effect that is not there.
+    rng = np.random.default_rng(0)
+    rows = [{"region": r, "t": t, "y": float(rng.poisson(3.0 if r == "a" else 6.0))}
             for t in range(1, 16) for r in ["a", "b"]]
     frame = pd.DataFrame(rows)
     model = LGM(
@@ -351,8 +351,20 @@ def test_empirical_bayes_precision_matches_fixed_precision_refit_at_optimum():
 
 
 def _panel_frame(seed=0):
+    """A panel with a real per-region offset.
+
+    Without one the IID precision is genuinely unidentified -- the data says
+    "no such effect", the estimate runs to its bound, and a test named
+    "estimates precision" verifies nothing about estimation. The offsets are
+    small relative to the noise, so the effect is estimable but not trivial.
+    """
     rng = np.random.default_rng(seed)
-    rows = [{"region": r, "t": t, "y": rng.normal()} for t in range(1, 21) for r in "abcd"]
+    offsets = {"a": 0.6, "b": -0.4, "c": 0.1, "d": -0.3}
+    rows = [
+        {"region": r, "t": t, "y": offsets[r] + rng.normal()}
+        for t in range(1, 21)
+        for r in "abcd"
+    ]
     return pd.DataFrame(rows)
 
 

@@ -68,6 +68,9 @@ def _fit_parametric(frame, cols, graph):
 
 
 @pytest.mark.parametrize("fit", [_fit_umidas, _fit_parametric])
+# The MIDAS smoothness precision pins on this short synthetic series; the
+# test checks composition and recovery of the other terms.
+@pytest.mark.filterwarnings("ignore:empirical-Bayes estimate")
 def test_hybrid_composes_predicts_and_recovers(fit):
     frame, cols, graph, w_true = _panel()
 
