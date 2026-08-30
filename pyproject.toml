@@ -48,6 +48,16 @@ pylgm = "pylgm.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pylgm"]
 
+# The sdist otherwise ships every tracked file. Keep it buildable and testable
+# (src, tests, examples -- tests/test_package.py runs examples/*/run.py), but
+# drop CI plumbing and the in-repo design history, which is ~44% of the tree
+# and is published as a docs site rather than consumed from the tarball.
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.github",
+  "/docs/design",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
