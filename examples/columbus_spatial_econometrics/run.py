@@ -29,6 +29,7 @@ from pylgm import Fixed, Gaussian, Hyperparameter, LGM
 from pylgm.effects.spec import SAR
 
 HERE = Path(__file__).parent
+IMG = HERE.parents[1] / "docs" / "img"
 
 # Published reference values. OLS is Anselin's Table 12.1 and is reproduced in
 # every spatial-econometrics text; the ML spatial-error row is what `spreg`
@@ -46,6 +47,74 @@ def _ols(frame):
     return {"const": beta[0], "INC": beta[1], "HOVAL": beta[2], "rho": None}
 
 
+def _figures(frame, graph, sar_field, estimates):
+    """Write the two figures used on the docs page.
+
+    Skipped, not fatal, when matplotlib is absent: this example runs in CI,
+    where matplotlib is not installed.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+
+    IMG.mkdir(parents=True, exist_ok=True)
+    blue, orange, grey = "#2b6cb0", "#dd6b20", "#718096"
+
+    # Figure 1: what ignoring spatial correlation does to the coefficients ----
+    fig, ax = plt.subplots(figsize=(6.6, 3.9))
+    models = ["OLS\n(ignores space)", "ML spatial error\n(published)", "pyLGM SAR"]
+    inc = [estimates["OLS (pyLGM repo)"]["INC"],
+           estimates["published ML spatial error"]["INC"],
+           estimates["pyLGM SAR"]["INC"]]
+    hoval = [estimates["OLS (pyLGM repo)"]["HOVAL"],
+             estimates["published ML spatial error"]["HOVAL"],
+             estimates["pyLGM SAR"]["HOVAL"]]
+    y = np.arange(len(models))
+    ax.barh(y - 0.18, inc, height=0.34, color=blue, label="income (INC)")
+    ax.barh(y + 0.18, hoval, height=0.34, color=orange, label="housing value (HOVAL)")
+    for i, v in enumerate(inc):
+        ax.text(v - 0.06, y[i] - 0.18, f"{v:.2f}", va="center", ha="right", fontsize=9)
+    ax.set_yticks(y)
+    ax.set_yticklabels(models, fontsize=9)
+    ax.invert_yaxis()
+    ax.axvline(0.0, color=grey, lw=0.8)
+    ax.set_xlabel("estimated coefficient")
+    ax.set_title("Ignoring spatial correlation inflates the income effect\n"
+                 "(Columbus crime, Anselin 1988)", fontsize=10)
+    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+              ncol=2, frameon=False)
+    fig.tight_layout()
+    fig.savefig(IMG / "columbus_coefficients.png", dpi=120)
+    plt.close(fig)
+
+    # Figure 2: the spatial field OLS throws away -----------------------------
+    fig, ax = plt.subplots(figsize=(5.6, 4.6))
+    order = list(frame["id"])
+    values = np.array([sar_field[node] for node in order])
+    limit = np.abs(values).max()
+    dots = ax.scatter(frame["X"], frame["Y"], c=values, cmap="RdBu_r",
+                      vmin=-limit, vmax=limit, s=110, edgecolor="white", linewidth=0.6)
+    position = {node: (x, y_) for node, x, y_ in zip(order, frame["X"], frame["Y"])}
+    for node, neighbours in graph.items():
+        for other in neighbours:
+            if node < other and node in position and other in position:
+                xs = [position[node][0], position[other][0]]
+                ys = [position[node][1], position[other][1]]
+                ax.plot(xs, ys, color=grey, lw=0.4, alpha=0.45, zorder=0)
+    fig.colorbar(dots, ax=ax, label="fitted SAR field")
+    ax.set_title("The spatial field a non-spatial GLM discards\n"
+                 "(neighbourhood centroids, contiguity edges)", fontsize=10)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.tight_layout()
+    fig.savefig(IMG / "columbus_spatial_field.png", dpi=120)
+    plt.close(fig)
+    return True
+
+
 def _pylgm_sar(frame, graph):
     model = LGM(
         response="CRIME",
@@ -61,21 +130,29 @@ def _pylgm_sar(frame, graph):
     result = model.fit(frame)
     names = [label.split(":", 1)[1] for label in result.labels[:3]]
     beta = dict(zip(names, result.mean[:3]))
+    field = {
+        label.split(":", 1)[1]: value
+        for label, value in zip(result.labels, result.mean)
+        if label.startswith("nbhd:")
+    }
     return {
         "const": beta["Intercept"], "INC": beta["INC"], "HOVAL": beta["HOVAL"],
         "rho": result.hyperparameters["nbhd.rho"],
-    }
+    }, field
 
 
 def main() -> dict:
     frame = pd.read_csv(HERE / "data.csv", dtype={"id": str})
-    graph = json.loads((HERE / "graph.json").read_text())
-    return {
+    graph = json.loads((HERE / "graph.json").read_text(encoding="utf-8"))
+    sar, field = _pylgm_sar(frame, graph)
+    estimates = {
         "OLS (pyLGM repo)": _ols(frame),
-        "pyLGM SAR": _pylgm_sar(frame, graph),
+        "pyLGM SAR": sar,
         "published OLS": PUBLISHED["OLS"],
         "published ML spatial error": PUBLISHED["ML spatial error"],
     }
+    estimates["figures_written"] = _figures(frame, graph, field, estimates)
+    return estimates
 
 
 if __name__ == "__main__":

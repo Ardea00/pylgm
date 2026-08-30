@@ -16,8 +16,8 @@ rather than remembered.
 
 | Example | Shows |
 |---|---|
-| [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | **Anselin (1988), Table 12.1** — the reference dataset of spatial econometrics. OLS reproduces the published values exactly; pyLGM's `SAR` lands next to the published ML spatial-error estimates, halving the apparent income effect |
-| [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | A **network that changes every year** — real US state income and contiguity, recovering knocked-out panel cells ~5× better than the obvious baselines |
+| [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | **Anselin (1988), Table 12.1** — OLS reproduces the published values exactly; `SAR` lands next to the published ML spatial-error estimates, halving the apparent income effect. Walkthrough: [case study](examples-columbus.md) |
+| [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | A **network that changes every year** — real US state income and contiguity, recovering knocked-out panel cells ~5× better than the baselines. Walkthrough: [case study](examples-dynamic-network.md) |
 
 ## Start here
 

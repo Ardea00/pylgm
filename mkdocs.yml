@@ -39,6 +39,8 @@ nav:
       - Spark: spark.md
   - Examples:
       - All examples: examples.md
+      - "Case study: Anselin (1988)": examples-columbus.md
+      - "Case study: dynamic networks": examples-dynamic-network.md
       - Disease mapping (spatial): examples-disease-mapping.md
       - Count regression: examples-count-regression.md
   - Comparison: comparison.md

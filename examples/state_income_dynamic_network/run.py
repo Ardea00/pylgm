@@ -41,6 +41,7 @@ from pylgm import Fixed, Gaussian, Hyperparameter, LGM, forecast_dynamic_spatial
 from pylgm.effects.spec import DynamicSpatialPanel
 
 HERE = Path(__file__).parent
+IMG = HERE.parents[1] / "docs" / "img"
 FIT_YEARS = [str(y) for y in range(1997, 2008)]   # 11 years fitted
 FORECAST_YEARS = ["2008", "2009"]                 # held out
 
@@ -69,6 +70,63 @@ def _network_for(year, log_income, adjacency):
             for other in neighbours
         }
     return weights
+
+
+def _figures(graphs, recovery, truth, recovered, held):
+    """Write the docs figures; skipped when matplotlib is absent (as in CI)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+
+    IMG.mkdir(parents=True, exist_ok=True)
+    blue, grey = "#2b6cb0", "#718096"
+
+    # Figure 1: the network is a time series, not a fixture --------------------
+    fig, ax = plt.subplots(figsize=(6.6, 3.8))
+    edges = [(s_, o) for s_ in graphs[FIT_YEARS[0]] for o in graphs[FIT_YEARS[0]][s_]]
+    series = np.array([[graphs[y][s_][o] for y in FIT_YEARS] for s_, o in edges])
+    years = [int(y) for y in FIT_YEARS]
+    for row in series[:: max(1, len(series) // 60)]:
+        ax.plot(years, row, color=blue, alpha=0.18, lw=0.8)
+    ax.plot(years, series.mean(axis=0), color="#c53030", lw=2.2, label="mean edge weight")
+    ax.set_xlabel("year")
+    ax.set_ylabel("edge weight (income similarity)")
+    ax.set_title("One network per year: contiguity edges reweighted annually\n"
+                 "(48 US states, weight built from the previous year)", fontsize=10)
+    ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(IMG / "state_network_drift.png", dpi=120)
+    plt.close(fig)
+
+    # Figure 2: recovering knocked-out panel cells ----------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.9))
+    names = list(recovery)
+    scores = [recovery[n] for n in names]
+    order = np.argsort(scores)
+    colours = [blue if names[i].startswith("SDPD") else grey for i in order]
+    axes[0].barh(range(len(order)), [scores[i] for i in order], color=colours)
+    axes[0].set_yticks(range(len(order)))
+    axes[0].set_yticklabels([names[i].replace(" (dynamic network)", "\n(dynamic network)")
+                             for i in order], fontsize=8)
+    axes[0].invert_yaxis()
+    axes[0].set_xlabel("RMSE on held-out cells (log income)")
+    axes[0].set_title("Recovering 20% knocked-out cells", fontsize=10)
+
+    axes[1].scatter(truth, recovered, s=26, color=blue, alpha=0.7, edgecolor="white",
+                    linewidth=0.4)
+    lo, hi = float(min(truth)), float(max(truth))
+    axes[1].plot([lo, hi], [lo, hi], color=grey, lw=1.0, ls="--", label="perfect")
+    axes[1].set_xlabel("actual log income")
+    axes[1].set_ylabel("SDPD reconstruction")
+    axes[1].set_title(f"{len(truth)} held-out cells", fontsize=10)
+    axes[1].legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(IMG / "state_cell_recovery.png", dpi=120)
+    plt.close(fig)
+    return True
 
 
 def main() -> dict:
@@ -120,6 +178,8 @@ def main() -> dict:
         "grand mean": rmse(np.full(len(truth), truth.mean())),
     }
 
+    figures_written = _figures(graphs, recovery, truth, recovered, held)
+
     # How much did the network actually move over the fitted decade?
     first, last = graphs[FIT_YEARS[0]], graphs[FIT_YEARS[-1]]
     drift = float(np.mean([abs(first[s][o] - last[s][o]) for s in first for o in first[s]]))
@@ -148,6 +208,7 @@ def main() -> dict:
         "held_out": int(missing.sum()),
         "network_weight_drift": drift,
         "recovery_rmse": recovery,
+        "figures_written": figures_written,
         "forecast_rmse": forecast_rmse,
         "naive_forecast_rmse": naive_rmse,
     }

@@ -67,7 +67,8 @@ print(result.fitted_mean.round(3).tolist())
 |---|---|
 | [Disease mapping](examples-disease-mapping.md) | `Besag` spatial smoothing on Scotland lip cancer — fit to observed counts jumps 0.63 → 0.96 vs a non-spatial GLM |
 | [Count regression](examples-count-regression.md) | Horseshoe-crab Poisson GLM matching `statsmodels`, plus estimated overdispersion for honest uncertainty |
+| [Anselin (1988) reproduction](examples-columbus.md) | The reference Columbus crime result, reproduced on real contiguity data |
+| [Dynamic networks](examples-dynamic-network.md) | One network per year across 48 US states, filling panel gaps 5× better than the baselines |
 | [Method comparison](comparison.md) | pyLGM vs GLM vs XGBoost vs Metropolis, on problems chosen so each one wins somewhere |
-| [Anselin (1988) reproduction](comparison.md#on-real-data-against-a-published-result) | The reference Columbus crime result, reproduced on real contiguity data |
 
 The [examples gallery](examples.md) indexes all 21 runnable scripts.
