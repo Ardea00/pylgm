@@ -107,16 +107,25 @@ class RW2(_ComposableEffect):
 
 @dataclass(frozen=True)
 class AR1(_ComposableEffect):
-    """A stationary first-order autoregressive latent effect."""
+    """A stationary first-order autoregressive latent effect.
+
+    With ``group`` set, the effect is one independent AR1 series per level of
+    that column -- the panel-econometrics case (a separate series per firm,
+    country, or region) -- sharing ``precision`` and ``rho`` across groups but
+    not their realizations.
+    """
 
     name: str
     index: str
     precision: float | Hyperparameter = 1.0
     rho: float | Hyperparameter = 0.5
+    group: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if self.group is not None:
+            object.__setattr__(self, "group", _non_empty_string(self.group, "group"))
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )

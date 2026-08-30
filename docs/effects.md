@@ -91,9 +91,44 @@ but should count as a step, include it as a row with a `NaN` response at
 `fit` time: it contributes no likelihood but still creates its latent column
 and restores regular spacing, exactly like the future-period rows in
 ["Predicting new rows"](prediction.md#predicting-new-rows) above. **Not shipped**:
-irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type,
-AR(p)/seasonal effects, and group-wise AR1 (a separate series per panel
-unit).
+irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type, and
+AR(p)/seasonal effects.
+
+### Group-wise AR1
+
+`AR1(name, index, precision, rho, group=None)` with `group` set declares **one
+independent AR1 series per level of that column** — a separate series per firm,
+country, or region — sharing `precision` and `rho` across groups but not their
+realizations. This is the panel case: a common persistence parameter estimated
+from all units at once, with each unit keeping its own trajectory.
+
+```python
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + AR1(
+        "dyn", index="t", group="firm",
+        rho=Hyperparameter("dyn.rho", initial=0.0, transform="logit"),
+        precision=Hyperparameter("dyn.precision", initial=1.0),
+    ),
+    likelihood=Gaussian(sigma=0.3),
+)
+```
+
+The latent field has one cell per `(group, index)` pair, laid out group-major
+and labelled `"<group>@<level>"`, so the precision is block diagonal —
+`I_G ⊗ T(ρ)`, one contiguous AR1 band per group. Pooling is in the
+hyperparameters only: fitting `G` groups jointly is *exactly* `G` separate AR1
+fits at the same `ρ` and `precision` (the test suite pins this equality), so no
+group borrows latent strength from another.
+
+The time levels are the union of levels observed anywhere in the frame, so the
+grid is balanced across groups: a `(group, period)` cell absent from the data
+still gets a latent column and a prediction, exactly like the `NaN`-response
+future rows above. `result.predict(new_data)` scores grouped rows; an unseen
+*group* raises, pointing at the same `NaN`-response workflow as an unseen level.
+
+**Regular spacing is assumed within each group**, for the same reason it is for
+the ungrouped effect.
 
 ## MIDAS smooth-lag effect
 
