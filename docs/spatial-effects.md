@@ -342,3 +342,142 @@ marginals — so the spatially-structured part is recoverable separately from
 the total effect. (The dense `n`-dimensional path parameterizes `u*` away and
 reports `x` only.)
 
+## Directed spatial-autoregressive (SAR) effect
+
+`SAR(name, index, graph, rho, precision=1.0)` declares a **directed**
+spatial-autoregressive latent effect, for influence relations that a
+symmetric CAR neighbour graph cannot represent — interbank exposure,
+ownership, or supply-chain dependence, where "`a` is exposed to `b`" does not
+imply "`b` is exposed to `a`". Unlike `Besag`/`ProperCAR`/`BYM2`, `graph`
+need not be symmetric: `graph[node]` lists that node's own counterparties
+(row `i` = who `i` depends on), and edge weights, if given, need not match
+their reverse.
+
+The precision is built from a directed operator rather than a Laplacian:
+
+```
+W row-standardized (each row rescaled to sum to 1)
+M = I - ρW
+Q = precision · MᵀM = precision · (I - ρW)ᵀ(I - ρW)
+```
+
+`MᵀM` is symmetric and positive-definite for any `ρ` in the open interval
+`(-1, 1)` — regardless of `W`'s asymmetry — which is why `ρ` (unlike
+`ProperCAR`'s graph-dependent bound) always validates against the fixed
+`(-1, 1)` interval. `ρ = 0` recovers an independent, unit-scaled precision.
+Row-standardization means `ρ` reads as *how much of a node's latent value is
+explained by the (equally-weighted-average) counterparties' values versus its
+own idiosyncratic shock* — `ρ → 0` independent nodes, `ρ → 1` near-total
+pass-through.
+
+```python
+from pylgm import Fixed, Gaussian, Hyperparameter, LGM, SAR
+
+graph = {"bank_0": ["bank_1", "bank_2"], "bank_1": ["bank_2"], "bank_2": ["bank_0"]}
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + SAR(
+        "influence", "bank", graph,
+        rho=Hyperparameter("influence.rho", initial=0.0, transform="logit"),
+        precision=Hyperparameter("influence.precision", initial=1.0),
+    ),
+    likelihood=Gaussian(sigma=0.1),
+)
+result = model.fit(frame)
+result.hyperparameters["influence.rho"]  # estimated contagion strength
+```
+
+`rho` and `precision` each accept a plain float (fixed) or a `Hyperparameter`
+(estimated by empirical Bayes / integrated under `hyperparameters="integrate"`),
+exactly like `ProperCAR`'s ρ — declare `rho` with `transform="logit"` to
+estimate it. `SAR`'s precision is full-rank, so it carries **no constraint**
+and works under the default `latent_strategy="gaussian"`. See
+[`examples/directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar)
+for a runnable interbank-exposure fit that recovers a known `ρ`.
+
+**From YAML:** the standalone frontend declares `type: sar` alongside
+`besag`/`proper_car`/`bym2`, with `graph`/`graph_file` and a required fixed
+`rho` (estimating `rho` from YAML stays Python-API-only, like `proper_car`).
+
+```yaml
+predictor:
+  effects:
+    - {name: influence, type: sar, index: bank, rho: 0.5, precision: 1.0, graph: {...}}
+```
+
+## Dynamic spatial panel (SDPD)
+
+`DynamicSpatialPanel(name, unit, time, graphs, rho, gamma=0.0, eta=0.0, precision=1.0)`
+is the time-varying generalization of `SAR`: a balanced `unit x time` grid
+with one directed network `W_t` per period (`graphs` is a `{time: graph}`
+mapping), and three coefficients reading the diffusion mechanism:
+
+- **`ρ` (contemporaneous)** — same-period spatial pass-through, as in `SAR`.
+- **`γ` (temporal)** — a unit's own persistence from the previous period
+  (an AR(1)-like term, but per-unit rather than pooled).
+- **`η` (spatio-temporal diffusion)** — how much of a unit's *previous*
+  period's counterparties' values carry forward into it this period.
+
+The latent field is stacked period-major-then-unit (`f"{unit}@{time}"`
+labels) with a block-bidiagonal operator: the diagonal block for period `t`
+is `A_t = I - ρW_t`, and the sub-diagonal block coupling period `t` to `t-1`
+is `-B_t = -(γI + ηW_t)`; the first period has no sub-diagonal block
+(conditional-on-initial). The precision is `Q = precision · MᵀM`, exactly the
+same `_gram_precision` construction `SAR` uses — indeed **`T = 1` reduces
+exactly to `SAR`**. Every `graphs[t]` is aligned onto the union of all
+periods' units, so a unit absent from a given period's network is simply an
+all-zero row that period; the grid itself must still be balanced (every
+`(unit, time)` pair observed).
+
+```python
+from pylgm import DynamicSpatialPanel, Fixed, Gaussian, Hyperparameter, LGM
+
+graphs = {"2021": graph_2021, "2022": graph_2022, "2023": graph_2023}
+model = LGM(
+    response="y",
+    predictor=Fixed("1") + DynamicSpatialPanel(
+        "d", "bank", "year", graphs,
+        rho=Hyperparameter("d.rho", initial=0.0, transform="logit"),
+        gamma=Hyperparameter("d.gamma", initial=0.0, transform="identity"),
+        eta=Hyperparameter("d.eta", initial=0.0, transform="identity"),
+        precision=Hyperparameter("d.precision", initial=1.0),
+    ),
+    likelihood=Gaussian(sigma=0.1),
+)
+result = model.fit(frame)
+```
+
+`rho`, `gamma`, `eta`, and `precision` each independently accept a fixed
+float or a `Hyperparameter`; `rho` should be declared `transform="logit"`
+(bounded to `(-1, 1)`) and `gamma`/`eta` `transform="identity"` (unbounded).
+Like `SAR`, `DynamicSpatialPanel`'s precision is full-rank and unconstrained.
+
+**Forecasting future periods.** `forecast_dynamic_spatial_panel(result,
+effect, future_graphs)` propagates the fitted last-period latent mean and
+marginal variance forward through new periods' networks via the SDPD forward
+recursion `x̂_{t+1} = A_{t+1}⁻¹B_{t+1}x̂_t`, with the matching variance
+propagation carried diagonal-only (marginal, consistent with the gaussian
+latent strategy). It returns a frame with columns `unit, time, mean,
+variance` for the requested future periods:
+
+```python
+from pylgm import forecast_dynamic_spatial_panel
+
+forecast = forecast_dynamic_spatial_panel(
+    result, model.predictor.effects[-1], {"2024": graph_2024, "2025": graph_2025}
+)
+```
+
+**Sparse (E-sparse) scale.** Both `SAR` and `DynamicSpatialPanel` fit past the
+dense-reference guard through the same sparse constrained-Gaussian solver as
+`Besag`/`BYM2`, with posterior mean, marginal variance, estimated
+hyperparameters, and predictions available — but only under the default
+`latent_strategy="gaussian"`: `simplified_laplace`/`laplace` marginals are not
+yet available above the sparse guard for any effect (a general restriction,
+not SAR/SDPD-specific), so use the default strategy at network scale.
+
+**Not yet built:** raw (non-row-standardized) `W`, unbalanced `unit x time`
+grids, non-Gaussian likelihoods' sparse marginals for `SAR`/`DynamicSpatialPanel`,
+and a YAML `dynamic_spatial_panel` type (Python-API-only for now) — see the
+[spatial roadmap](roadmap.md) for what's next.
+

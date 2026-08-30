@@ -139,6 +139,17 @@ def test_hybrid_nowcast_example_reports_correlation():
     assert "corr(pred,y)=" in completed.stdout
 
 
+def test_directed_network_sar_example_estimates_rho():
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/directed_network_sar/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "estimated rho=" in completed.stdout
+
+
 def test_survival_duration_example_reports_hazard_ratio():
     root = Path(__file__).parents[1]
     env = {**os.environ, "PYTHONPATH": str(root / "src")}

@@ -67,12 +67,12 @@ class _LikelihoodModelConfig(StrictModel):
 
 
 _SIMPLE_EFFECTS = ("iid", "rw1", "rw2")
-_SPATIAL_EFFECTS = ("besag", "proper_car", "bym2")
+_SPATIAL_EFFECTS = ("besag", "proper_car", "bym2", "sar")
 
 
 class _EffectModelConfig(StrictModel):
     name: str
-    type: Literal["iid", "rw1", "rw2", "besag", "proper_car", "bym2"]
+    type: Literal["iid", "rw1", "rw2", "besag", "proper_car", "bym2", "sar"]
     index: str
     # Fixed values only; estimating precision/rho/phi (a Hyperparameter) stays
     # Python-API-only. Spatial effects default precision in the builder, so it is
@@ -101,9 +101,9 @@ class _EffectModelConfig(StrictModel):
             raise ValueError(
                 f"spatial effect {self.name!r} requires exactly one of graph or graph_file"
             )
-        if self.type == "proper_car" and self.rho is None:
-            raise ValueError("rho is required for effect type 'proper_car'")
-        if self.type != "proper_car" and self.rho is not None:
+        if self.type in ("proper_car", "sar") and self.rho is None:
+            raise ValueError(f"rho is required for effect type {self.type!r}")
+        if self.type not in ("proper_car", "sar") and self.rho is not None:
             raise ValueError(f"rho is not a valid field for effect type {self.type!r}")
         if self.type != "bym2" and self.phi is not None:
             raise ValueError(f"phi is not a valid field for effect type {self.type!r}")
@@ -126,7 +126,7 @@ class _StandaloneModelConfig(StrictModel):
 
 
 def _build_effect(config: _EffectModelConfig, base_dir: Path) -> object:
-    from pylgm.effects import IID, RW1, RW2, Besag, BYM2, ProperCAR, load_graph_file
+    from pylgm.effects import IID, RW1, RW2, SAR, Besag, BYM2, ProperCAR, load_graph_file
 
     if config.type in _SIMPLE_EFFECTS:
         simple = {"iid": IID, "rw1": RW1, "rw2": RW2}
@@ -139,6 +139,8 @@ def _build_effect(config: _EffectModelConfig, base_dir: Path) -> object:
         return Besag(config.name, config.index, graph, precision, scale)
     if config.type == "proper_car":
         return ProperCAR(config.name, config.index, graph, config.rho, precision)
+    if config.type == "sar":
+        return SAR(config.name, config.index, graph, config.rho, precision)
     phi = 0.5 if config.phi is None else config.phi
     return BYM2(config.name, config.index, graph, precision, phi)
 

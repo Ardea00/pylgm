@@ -149,6 +149,37 @@ def test_proper_car_composes_in_predictor():
     assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "ProperCAR"]
 
 
+def test_sar_spec_validates_and_freezes():
+    from pylgm.effects.spec import SAR
+
+    effect = SAR("s", "region", {"a": ["b"], "b": ["a"]}, rho=0.5)
+    assert effect.name == "s"
+    assert effect.index == "region"
+    hash(effect)  # frozen + hashable (graph canonicalized)
+
+
+def test_sar_spec_rejects_rho_out_of_bounds():
+    from pylgm.effects.spec import SAR
+
+    with pytest.raises(ValueError, match="rho"):
+        SAR("s", "region", {"a": ["b"], "b": ["a"]}, rho=1.5)
+
+
+def test_sar_spec_accepts_hyperparameter_rho():
+    from pylgm.effects.spec import SAR
+    from pylgm.parameters import Hyperparameter
+
+    effect = SAR("s", "region", {"a": ["b"]}, rho=Hyperparameter("s.rho", initial=0.2, transform="logit"))
+    assert isinstance(effect.rho, Hyperparameter)
+
+
+def test_sar_composes_into_predictor():
+    from pylgm.effects.spec import IID, SAR
+
+    predictor = SAR("s", "region", {"a": ["b"], "b": ["a"]}, rho=0.3) + IID("u", "id")
+    assert len(predictor.effects) == 2
+
+
 def test_bym2_defaults():
     from pylgm.effects import BYM2
 
@@ -237,3 +268,69 @@ def test_ar1_composes_in_predictor():
     predictor = Fixed("1") + AR1("trend", index="t")
     assert isinstance(predictor, Predictor)
     assert [type(e).__name__ for e in predictor.effects] == ["Fixed", "AR1"]
+
+
+def test_dynamic_spatial_panel_spec_freezes():
+    from pylgm.effects.spec import DynamicSpatialPanel
+
+    effect = DynamicSpatialPanel(
+        "d", "unit", "period", {"1": {"a": ["b"], "b": ["a"]}}, rho=0.5, gamma=0.2, eta=0.1
+    )
+    assert effect.unit == "unit"
+    assert effect.time == "period"
+    hash(effect)  # frozen + hashable (graphs canonicalized)
+
+
+def test_dynamic_spatial_panel_rejects_rho_out_of_bounds():
+    from pylgm.effects.spec import DynamicSpatialPanel
+
+    with pytest.raises(ValueError, match="rho"):
+        DynamicSpatialPanel("d", "unit", "period", {"1": {"a": ["b"]}}, rho=2.0)
+
+
+def test_dynamic_spatial_panel_accepts_free_gamma_eta_at_large_magnitude():
+    from pylgm.effects.spec import DynamicSpatialPanel
+
+    effect = DynamicSpatialPanel(
+        "d", "unit", "period", {"1": {"a": ["b"]}}, rho=0.1, gamma=1e6, eta=-1e6
+    )
+    assert effect.gamma == 1e6
+    assert effect.eta == -1e6
+
+
+def test_dynamic_spatial_panel_rejects_non_finite_gamma_eta():
+    from pylgm.effects.spec import DynamicSpatialPanel
+
+    with pytest.raises(ValueError, match="gamma"):
+        DynamicSpatialPanel("d", "unit", "period", {"1": {"a": ["b"]}}, rho=0.1, gamma=float("inf"))
+    with pytest.raises(ValueError, match="eta"):
+        DynamicSpatialPanel("d", "unit", "period", {"1": {"a": ["b"]}}, rho=0.1, eta=float("nan"))
+
+
+def test_dynamic_spatial_panel_rejects_non_positive_precision():
+    from pylgm.effects.spec import DynamicSpatialPanel
+
+    with pytest.raises(ValueError, match="precision"):
+        DynamicSpatialPanel("d", "unit", "period", {"1": {"a": ["b"]}}, rho=0.1, precision=0.0)
+
+
+def test_dynamic_spatial_panel_accepts_hyperparameter_coefficients():
+    from pylgm.effects.spec import DynamicSpatialPanel
+    from pylgm.parameters import Hyperparameter
+
+    effect = DynamicSpatialPanel(
+        "d", "unit", "period", {"1": {"a": ["b"]}},
+        rho=Hyperparameter("d.rho", initial=0.0, transform="logit"),
+        gamma=Hyperparameter("d.gamma", initial=0.0, transform="identity"),
+        eta=Hyperparameter("d.eta", initial=0.0, transform="identity"),
+    )
+    assert isinstance(effect.gamma, Hyperparameter)
+
+
+def test_dynamic_spatial_panel_composes_into_predictor():
+    from pylgm.effects.spec import DynamicSpatialPanel, IID
+
+    predictor = DynamicSpatialPanel(
+        "d", "unit", "period", {"1": {"a": ["b"]}}, rho=0.3
+    ) + IID("u", "id")
+    assert len(predictor.effects) == 2

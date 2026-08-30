@@ -7,11 +7,14 @@ from pylgm.effects.iid import build_iid
 from pylgm.effects.midas import build_midas, build_midas_parametric, midas_penalty, midas_weights
 from pylgm.effects.proper_car import build_proper_car
 from pylgm.effects.random_walk import build_random_walk, difference_operator
+from pylgm.effects.sar import build_dynamic_spatial_panel, build_sar
+from pylgm.effects.sdpd_forecast import forecast_dynamic_spatial_panel
 from pylgm.effects.spacetime import build_spacetime
 from pylgm.effects.spec import (
     AR1,
     Besag,
     BYM2,
+    DynamicSpatialPanel,
     Fixed,
     IID,
     MIDAS,
@@ -20,6 +23,7 @@ from pylgm.effects.spec import (
     ProperCAR,
     RW1,
     RW2,
+    SAR,
     SpaceTime,
 )
 
@@ -27,6 +31,7 @@ __all__ = [
     "AR1",
     "Besag",
     "BYM2",
+    "DynamicSpatialPanel",
     "Fixed",
     "IID",
     "MIDAS",
@@ -35,6 +40,7 @@ __all__ = [
     "ProperCAR",
     "RW1",
     "RW2",
+    "SAR",
     "SpaceTime",
     "build_ar1",
     "build_besag",
@@ -45,8 +51,11 @@ __all__ = [
     "build_midas_parametric",
     "build_proper_car",
     "build_random_walk",
+    "build_dynamic_spatial_panel",
+    "build_sar",
     "build_spacetime",
     "difference_operator",
+    "forecast_dynamic_spatial_panel",
     "midas_penalty",
     "midas_weights",
     "canonical_graph",
