@@ -45,8 +45,9 @@ class PredictionContext:
     order: ``("fixed", ModelSpec)``,
     ``("structured", (block_name, index_column, labels_tuple))``,
     ``("midas", (block_name, columns_tuple))``,
-    ``("spacetime", (block_name, space, time, area_labels, time_labels))``, or
-    ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``.
+    ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
+    ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
+    or ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``.
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -151,62 +152,86 @@ def _midas_parametric_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     return (values @ weights).reshape(-1, 1)
 
 
+def _paired_cell_block(
+    name: str,
+    outer_column: str,
+    inner_column: str,
+    outer_labels: tuple[str, ...],
+    inner_labels: tuple[str, ...],
+    new_data: pd.DataFrame,
+    *,
+    block_label: str,
+    pair_label: str,
+    hint: str,
+) -> np.ndarray:
+    """One-hot design for a block whose latent cell is an (outer, inner) pair.
+
+    Shared by the space-time interaction, the dynamic spatial panel, and the
+    grouped AR1: all three index a latent cell by two columns and lay the cells
+    out ``outer_position * len(inner_labels) + inner_position``. Callers pass
+    their own labels in that order, so the caller owns the layout convention;
+    only the lookup, validation, and one-hot construction are shared.
+    """
+    for column in (outer_column, inner_column):
+        if column not in new_data.columns:
+            raise ValueError(
+                f"predict() new_data is missing column {column!r} required by the "
+                f"{name!r} {block_label} block"
+            )
+    outer_pos = {label: i for i, label in enumerate(outer_labels)}
+    inner_pos = {label: j for j, label in enumerate(inner_labels)}
+    outer = new_data[outer_column].map(str)
+    inner = new_data[inner_column].map(str)
+    unseen = sorted(set(outer[~outer.isin(outer_pos)]) | set(inner[~inner.isin(inner_pos)]))
+    if unseen:
+        raise ValueError(
+            f"predict() cannot score rows whose {name!r} {pair_label} was not in the "
+            f"fitted model: {unseen!r}. predict reuses the fitted latent posterior, so it "
+            f"cannot create a new latent cell. {hint}"
+        )
+    cells = outer.map(outer_pos).to_numpy() * len(inner_labels) + inner.map(inner_pos).to_numpy()
+    design = np.zeros((len(new_data), len(outer_labels) * len(inner_labels)))
+    design[np.arange(len(new_data)), cells] = 1.0
+    return design
+
+
 def _spacetime_block(
     entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
 ) -> np.ndarray:
     name, space, time, area_labels, time_labels = entry
-    for column in (space, time):
-        if column not in new_data.columns:
-            raise ValueError(
-                f"predict() new_data is missing column {column!r} required by the "
-                f"{name!r} space-time block"
-            )
-    area_pos = {label: i for i, label in enumerate(area_labels)}
-    time_pos = {label: j for j, label in enumerate(time_labels)}
-    areas = new_data[space].map(str)
-    times = new_data[time].map(str)
-    unseen = sorted(set(areas[~areas.isin(area_pos)]) | set(times[~times.isin(time_pos)]))
-    if unseen:
-        raise ValueError(
-            f"predict() cannot score rows whose {name!r} space/time level was not in the "
-            f"fitted model: {unseen!r}. predict reuses the fitted latent posterior, so it "
-            "cannot create a new latent cell. To forecast new cells, include those rows at "
-            "fit time with a NaN response instead."
-        )
-    T = len(time_labels)
-    cells = areas.map(area_pos).to_numpy() * T + times.map(time_pos).to_numpy()
-    design = np.zeros((len(new_data), len(area_labels) * T))
-    design[np.arange(len(new_data)), cells] = 1.0
-    return design
+    return _paired_cell_block(
+        name, space, time, area_labels, time_labels, new_data,
+        block_label="space-time",
+        pair_label="space/time level",
+        hint="To forecast new cells, include those rows at fit time with a NaN "
+             "response instead.",
+    )
 
 
 def _dynamic_spatial_panel_block(
     entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
 ) -> np.ndarray:
+    # Time-major, unlike the other two: the SDPD operator stacks whole periods.
     name, unit, time, unit_labels, time_labels = entry
-    for column in (unit, time):
-        if column not in new_data.columns:
-            raise ValueError(
-                f"predict() new_data is missing column {column!r} required by the "
-                f"{name!r} dynamic-spatial-panel block"
-            )
-    unit_pos = {label: i for i, label in enumerate(unit_labels)}
-    time_pos = {label: j for j, label in enumerate(time_labels)}
-    units = new_data[unit].map(str)
-    times = new_data[time].map(str)
-    unseen = sorted(set(units[~units.isin(unit_pos)]) | set(times[~times.isin(time_pos)]))
-    if unseen:
-        raise ValueError(
-            f"predict() cannot score rows whose {name!r} unit/time was not in the "
-            f"fitted model: {unseen!r}. predict reuses the fitted latent posterior, so it "
-            "cannot create a new latent cell. To forecast future periods, use the SDPD "
-            "forecast() helper instead."
-        )
-    n = len(unit_labels)
-    cells = times.map(time_pos).to_numpy() * n + units.map(unit_pos).to_numpy()
-    design = np.zeros((len(new_data), n * len(time_labels)))
-    design[np.arange(len(new_data)), cells] = 1.0
-    return design
+    return _paired_cell_block(
+        name, time, unit, time_labels, unit_labels, new_data,
+        block_label="dynamic-spatial-panel",
+        pair_label="unit/time",
+        hint="To forecast future periods, use the SDPD forecast() helper instead.",
+    )
+
+
+def _grouped_structured_block(
+    entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
+) -> np.ndarray:
+    name, group, index_column, group_labels, level_labels = entry
+    return _paired_cell_block(
+        name, group, index_column, group_labels, level_labels, new_data,
+        block_label="grouped",
+        pair_label="group/level",
+        hint="To forecast new levels, include those rows at fit time with a NaN "
+             "response instead.",
+    )
 
 
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
@@ -226,6 +251,8 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_spacetime_block(payload, new_data))
         elif kind == "dynamic_spatial_panel":
             blocks.append(_dynamic_spatial_panel_block(payload, new_data))
+        elif kind == "grouped_structured":
+            blocks.append(_grouped_structured_block(payload, new_data))
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
     design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))

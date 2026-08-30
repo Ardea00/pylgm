@@ -391,7 +391,9 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             elif isinstance(effect, AR1):
                 precision = _resolved_precision(effect.precision)
                 rho = _resolved_precision(effect.rho) if isinstance(effect.rho, Hyperparameter) else effect.rho
-                block = build_ar1(frame, effect.name, effect.index, precision, rho)
+                block = build_ar1(
+                    frame, effect.name, effect.index, precision, rho, effect.group
+                )
                 precisions[effect.name] = precision
             elif isinstance(effect, (RW1, RW2)):
                 precision = _resolved_precision(effect.precision)
@@ -855,7 +857,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             rho_is_hp = isinstance(effect.rho, Hyperparameter)
             if not rho_is_hp:
                 block = _compiled_block(
-                    effect.name, build_ar1, frame, effect.name, effect.index, value, effect.rho
+                    effect.name, build_ar1,
+                    frame, effect.name, effect.index, value, effect.rho, effect.group,
                 )
                 scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
                 if optimized:
@@ -864,9 +867,13 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 continue
             rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="AR1 rho", inset=1e-6)
             level_count = len(ordered_observed_levels(frame[effect.index]))
+            group_count = (
+                1 if effect.group is None else frame[effect.group].astype(str).nunique()
+            )
             template = _compiled_block(
                 effect.name, build_ar1,
                 frame, effect.name, effect.index, value, float(effect.rho.initial),
+                effect.group,
             )
             tau_name = precision.name if optimized else None
             tau_fixed = None if optimized else value
@@ -875,12 +882,15 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             def build(
                 values,
                 level_count=level_count,
+                group_count=group_count,
                 tau_name=tau_name,
                 tau_fixed=tau_fixed,
                 rho_name=rho_name,
             ) -> csr_matrix:
                 tau = values[tau_name] if tau_name else tau_fixed
-                return csr_matrix(tau * ar1_structure(level_count, values[rho_name]))
+                return csr_matrix(
+                    tau * ar1_structure(level_count, values[rho_name], group_count)
+                )
 
             params = tuple(n for n in (tau_name, rho_name) if n)
             scalable.append(ParametricBlock(template, params, build))
@@ -1137,6 +1147,13 @@ def build_prediction_context(
             entries.append(
                 ("dynamic_spatial_panel",
                  (effect.name, effect.unit, effect.time, unit_labels, time_labels))
+            )
+        elif isinstance(effect, AR1) and effect.group is not None:
+            group_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
+            level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
+            entries.append(
+                ("grouped_structured",
+                 (effect.name, effect.group, effect.index, group_labels, level_labels))
             )
         else:
             entries.append(("structured", (effect.name, effect.index, block.labels)))
