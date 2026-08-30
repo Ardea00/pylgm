@@ -116,8 +116,10 @@ dependence vs. idiosyncratic."* Requirements, enforced at declaration:
   their mean). A missing reverse or a weight mismatch raises, naming the pair.
 - Directed / signed economic matrices (exposure, correlations) must be made
   symmetric-nonnegative **before** building the graph; `normalize_graph` is a
-  strict validator, it does not silently symmetrize. A directed-influence
-  precision `(I−ρW)ᵀ(I−ρW)` is a separate effect on the roadmap.
+  strict validator, it does not silently symmetrize. To model the directed
+  relation itself rather than a symmetrized shadow of it, use the
+  [`SAR` effect](#directed-spatial-autoregressive-sar-effect), whose precision
+  `(I−ρW)ᵀ(I−ρW)` accepts an asymmetric `W`.
 
 A bare-label list (`{node: [neighbours]}`) is exactly a weighted graph with all
 weights `1.0`, so existing unweighted graphs, `.graph` files, and YAML are

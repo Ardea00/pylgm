@@ -169,7 +169,7 @@ def _rebuild_result(
     predictive_mean = result.predictive_mean
     # ponytail: read result._covariance/_predictive_variance (private) here --
     # _rebuild_result reconstructs the object, so it needs the raw stored value,
-    # not the pending-C-raising public property.
+    # not the guard-raising public property.
     predictive_variance = result._predictive_variance
     if caller_order is not None:
         predictive_mean = predictive_mean[caller_order]

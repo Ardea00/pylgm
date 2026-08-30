@@ -34,7 +34,7 @@ from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
 from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "AR1",

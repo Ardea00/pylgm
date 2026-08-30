@@ -11,7 +11,7 @@ from collections.abc import Mapping
 import numpy as np
 from scipy.sparse import csr_matrix, diags
 
-from pylgm.effects.graph import _parse_neighbours
+from pylgm.effects.graph import _parse_neighbours, freeze_adjacency
 
 
 def normalize_directed_graph(
@@ -68,20 +68,39 @@ def canonical_directed_graph(graph: Mapping) -> tuple[tuple[str, tuple], ...]:
     store sorted ``(label, weight)`` pairs so weights survive the freeze. A pure
     sink is stored with an empty neighbour tuple so it is preserved.
     """
-    nodes, w = normalize_directed_graph(graph)
-    weighted = bool(w.data.size) and not bool(np.all(w.data == 1.0))
-    result = []
-    for i, node in enumerate(nodes):
-        columns = w.indices[w.indptr[i] : w.indptr[i + 1]]
-        weights = w.data[w.indptr[i] : w.indptr[i + 1]]
-        if weighted:
-            neighbours: tuple = tuple(
-                sorted((nodes[j], float(v)) for j, v in zip(columns, weights))
-            )
-        else:
-            neighbours = tuple(sorted(nodes[j] for j in columns))
-        result.append((node, neighbours))
-    return tuple(result)
+    return freeze_adjacency(*normalize_directed_graph(graph))
+
+
+def reindex_onto(
+    nodes: tuple[str, ...], w: csr_matrix, units: tuple[str, ...]
+) -> csr_matrix:
+    """Re-express ``W`` (indexed by ``nodes``) on the wider ``units`` ordering.
+
+    Units absent from ``nodes`` become all-zero rows/columns. Shared by the
+    panel builder and the forecaster, which both align a period's own network
+    onto the panel's balanced unit universe.
+    """
+    position = {u: i for i, u in enumerate(units)}
+    coo = w.tocoo()
+    rows = [position[nodes[i]] for i in coo.row]
+    cols = [position[nodes[j]] for j in coo.col]
+    return csr_matrix((coo.data, (rows, cols)), shape=(len(units), len(units)))
+
+
+def graphs_by_label(graphs: Mapping) -> dict[str, object]:
+    """Key ``graphs`` by ``str(period)``, rejecting labels that collide.
+
+    Period keys reach the panel builders as ints, strings, or timestamps, but
+    the latent labels and the design lookup are string-keyed. Two keys with the
+    same ``str()`` would silently drop a period's network, so that is an error.
+    """
+    by_label: dict[str, object] = {}
+    for key, graph in graphs.items():
+        label = str(key)
+        if label in by_label:
+            raise ValueError(f"graphs has two period keys that stringify to {label!r}")
+        by_label[label] = graph
+    return by_label
 
 
 def sorted_time_keys(keys) -> tuple[str, ...]:

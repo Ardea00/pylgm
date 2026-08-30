@@ -42,7 +42,7 @@ def test_large_spatial_model_fits_mean_and_lml(large_besag_frame_and_model):
     assert all(np.isfinite(v) for v in result.hyperparameters.values())
     assert np.isfinite(result.predictive_mean).all()
 
-    # E-sparse-C: the uncertainty surface now works past the dense guard --
+    # The uncertainty surface works past the dense guard --
     # marginal + predictive variances and predict() are finite (no dense oracle
     # at this size; small-model dense-equivalence is Tasks 3-6's job).
     marg = result.latent_marginals()
@@ -52,11 +52,12 @@ def test_large_spatial_model_fits_mean_and_lml(large_besag_frame_and_model):
     predicted = result.predict(frame)
     assert np.isfinite(predicted.predictive_mean).all()
     assert np.isfinite(predicted.predictive_variance).all()
-    # The full covariance is a scale limit, not pending-C: it must not be
-    # materialised at 5001 dim, and the error must say so (not "E-sparse-C").
+    # The full covariance is a scale limit, not a missing posterior: it must not
+    # be materialised at 5001 dim, and the error must point at the scoped
+    # accessors rather than claiming no posterior exists.
     with pytest.raises(DenseReferenceLimitError) as exc:
         _ = result.covariance
-    assert "E-sparse-C" not in str(exc.value)
+    assert "not materialised at this scale" in str(exc.value)
 
 
 def test_large_model_integrate_returns_finite_diagonal_uncertainty(large_besag_frame_and_model):

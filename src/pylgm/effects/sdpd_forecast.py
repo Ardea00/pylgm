@@ -18,7 +18,9 @@ from scipy.sparse import csr_matrix, diags, identity
 from scipy.sparse.linalg import splu
 
 from pylgm.effects.directed_graph import (
+    graphs_by_label,
     normalize_directed_graph,
+    reindex_onto,
     row_standardize,
     sorted_time_keys,
 )
@@ -65,12 +67,7 @@ def _align_to_units(graph: Mapping, units: tuple[str, ...]) -> csr_matrix:
         raise ValueError(
             f"forecast network references unit(s) not in the fitted panel: {unknown!r}"
         )
-    position = {u: i for i, u in enumerate(units)}
-    coo = w.tocoo()
-    rows = [position[nodes[i]] for i in coo.row]
-    cols = [position[nodes[j]] for j in coo.col]
-    big = csr_matrix((coo.data, (rows, cols)), shape=(len(units), len(units)))
-    return row_standardize(big)
+    return row_standardize(reindex_onto(nodes, w, units))
 
 
 def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd.DataFrame:
@@ -95,9 +92,10 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
     marginals = result.latent_marginals(effect.name)
     x_grid = np.asarray(marginals.mean, dtype=float).reshape(t_count, n)
     v_grid = np.asarray(marginals.variance, dtype=float).reshape(t_count, n)
+    future_by_label = graphs_by_label(future_graphs)
     future_times = sorted_time_keys(future_graphs)
     future_ws = [
-        _align_to_units(dict(future_graphs[_key(future_graphs, t)]), units) for t in future_times
+        _align_to_units(dict(future_by_label[t]), units) for t in future_times
     ]
     steps = sdpd_forecast(x_grid[-1], v_grid[-1], rho, gamma, eta, tau, future_ws)
     records = []
@@ -105,10 +103,3 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
         for unit, mean_i, var_i in zip(units, mean, var):
             records.append({"unit": unit, "time": t, "mean": mean_i, "variance": var_i})
     return pd.DataFrame.from_records(records)
-
-
-def _key(graphs: Mapping, text: str):
-    for key in graphs:
-        if str(key) == text:
-            return key
-    raise KeyError(text)

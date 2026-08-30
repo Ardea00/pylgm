@@ -35,7 +35,7 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
     }
 
     assert expected.issubset(set(pylgm.__all__))
-    assert pylgm.__version__ == "0.4.0"
+    assert pylgm.__version__ == "0.5.0"
     assert metadata["project"]["version"] == pylgm.__version__
 
 

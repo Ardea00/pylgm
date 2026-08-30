@@ -383,7 +383,7 @@ def test_forced_sparse_under_guard_matches_dense(proper_car_with_intercept_model
     assert np.allclose(sparse.mean, dense.mean, atol=1e-7)
     assert np.isclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-6)
     # Task 5: the sparse posterior is now attached, so the full covariance is a
-    # scale guard (DenseReferenceLimitError), not the posterior-less pending-C
+    # scale guard (DenseReferenceLimitError), not the posterior-less
     # NotImplementedError -- scoped accessors (latent_marginals/predictive_variance)
     # are exercised in tests/inference/test_sparse_result.py.
     with pytest.raises(DenseReferenceLimitError):

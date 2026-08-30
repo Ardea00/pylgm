@@ -29,10 +29,13 @@ Compared to `hyperparameters="optimize"`, this gives:
 - an *integrated* marginal likelihood rather than the conditional one at a
   single hyperparameter value.
 
-This mode uses the **Gaussian latent strategy** at every grid point (the
-exact-Gaussian posterior, or the Laplace approximation for non-Gaussian
-likelihoods) — it does not yet implement INLA's simplified- or full-Laplace
-latent correction. It is practical for a handful of declared
+This mode uses the **Gaussian latent strategy** at every grid point by
+default (the exact-Gaussian posterior, or the Laplace approximation for
+non-Gaussian likelihoods); INLA's simplified- and full-Laplace latent
+corrections are available via `latent_strategy` — see
+["Simplified-Laplace latent marginals"](#simplified-laplace-latent-marginals)
+and ["Full-Laplace latent marginals"](#full-laplace-latent-marginals) below.
+It is practical for a handful of declared
 hyperparameters: the grid grows as `(2 * radius + 1) ** d`, and a
 `max_grid_points` guard raises `OptimizationError` before building a grid
 that would be too large. Model-assessment criteria (DIC, WAIC, CPO, PIT) are

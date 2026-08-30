@@ -13,7 +13,9 @@ import pandas as pd
 from scipy.sparse import bmat, csr_matrix, identity
 
 from pylgm.effects.directed_graph import (
+    graphs_by_label,
     normalize_directed_graph,
+    reindex_onto,
     row_standardize,
     sorted_time_keys,
 )
@@ -63,33 +65,19 @@ def _panel_networks(
     """
     if not isinstance(graphs, Mapping) or not graphs:
         raise ValueError("graphs must be a non-empty mapping of time -> graph")
+    by_label = graphs_by_label(graphs)
     times = sorted_time_keys(graphs)
     per_period: dict[str, tuple[tuple[str, ...], csr_matrix]] = {}
     union: set[str] = set()
     for t in times:
-        nodes_t, w_t = normalize_directed_graph(dict(graphs[_original_key(graphs, t)]))
+        nodes_t, w_t = normalize_directed_graph(dict(by_label[t]))
         per_period[t] = (nodes_t, w_t)
         union |= set(nodes_t)
     units = tuple(sorted(union))
-    position = {u: i for i, u in enumerate(units)}
-    n = len(units)
-    matrices: list[csr_matrix] = []
-    for t in times:
-        nodes_t, w_t = per_period[t]
-        coo = w_t.tocoo()
-        rows = [position[nodes_t[i]] for i in coo.row]
-        cols = [position[nodes_t[j]] for j in coo.col]
-        big = csr_matrix((coo.data, (rows, cols)), shape=(n, n))
-        matrices.append(row_standardize(big))
+    matrices = [
+        row_standardize(reindex_onto(*per_period[t], units)) for t in times
+    ]
     return units, times, matrices
-
-
-def _original_key(graphs: Mapping, text: str):
-    """Return the original ``graphs`` key whose ``str()`` is ``text``."""
-    for key in graphs:
-        if str(key) == text:
-            return key
-    raise KeyError(text)  # unreachable: text came from graphs' own keys
 
 
 def _sdpd_operator(

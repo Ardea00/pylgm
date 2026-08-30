@@ -48,7 +48,7 @@ def test_covless_result_raises_on_uncertainty():
         lambda: result.latent_marginals(),
         lambda: result.linear_combinations(np.eye(2)),
     ):
-        with pytest.raises(NotImplementedError, match="E-sparse-C"):
+        with pytest.raises(NotImplementedError, match="no posterior covariance"):
             accessor()
 
 
@@ -91,10 +91,10 @@ def test_sparse_result_marginals_match_dense_but_covariance_guarded(small_model_
     assert np.allclose(got_combo, want_combo, atol=1e-7)
     # predictive variance materialised on the result
     assert np.allclose(sparse.predictive_variance, dense.predictive_variance, atol=1e-7)
-    # covariance is guarded (scale error, NOT pending-C)
+    # covariance is guarded by scale, NOT by an absent posterior
     with pytest.raises(DenseReferenceLimitError) as exc:
         _ = sparse.covariance
-    assert "E-sparse-C" not in str(exc.value)
+    assert "not materialised at this scale" in str(exc.value)
 
 
 def test_rebuild_preserves_sparse_posterior(small_model_forced_sparse):

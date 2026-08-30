@@ -184,7 +184,7 @@ def _block_column_confinement(model: CompiledLGM) -> list[tuple[int, int, np.nda
     row straddles two blocks -- the sparse prior/quadratic separability assumes
     each constraint touches a single block (block sum-to-zero rows and the
     single-block extra constraints these models carry). A cross-block row would
-    couple two reduced priors; that is E-sparse-C territory.
+    couple two reduced priors, which this decomposition cannot express.
     """
     a = np.asarray(model.constraints, dtype=float)
     row_mass = np.abs(a).sum(axis=1) if a.shape[0] else np.zeros(0)
@@ -472,8 +472,8 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
         # ponytail: when e is nonzero AND a connected-intrinsic sum-to-zero row
         # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
-        # augmented factor densifies. Correct, but defeats sparsity; nonzero-rhs
-        # extra-constraints at scale are E-sparse-C.
+        # augmented factor densifies. Correct, but defeats sparsity: nonzero-rhs
+        # extra-constraints do not scale on this path.
         if np.any(e):
             a_sp = csr_matrix(a)
             aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")

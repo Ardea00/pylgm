@@ -44,7 +44,18 @@ def canonical_graph(
     of bare labels, byte-identical to the historical output; otherwise they are
     a sorted tuple of ``(label, weight)`` pairs so weights survive the freeze.
     """
-    nodes, w = normalize_graph(graph)
+    return freeze_adjacency(*normalize_graph(graph))
+
+
+def freeze_adjacency(
+    nodes: tuple[str, ...], w: csr_matrix
+) -> tuple[tuple[str, tuple], ...]:
+    """Freeze a normalized ``(nodes, W)`` pair into the canonical immutable form.
+
+    Shared by ``canonical_graph`` and the directed
+    ``canonical_directed_graph``: the two differ only in which normalizer
+    validates the input, not in how the result is frozen.
+    """
     weighted = bool(w.data.size) and not bool(np.all(w.data == 1.0))
     result = []
     for i, node in enumerate(nodes):
