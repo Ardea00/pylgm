@@ -1,41 +1,30 @@
 # Internals and release policy
 
-## 0.3 scope and explicit deferrals
+## Scope and explicit deferrals
 
-The 0.3 exact and Laplace engines condition on plain numeric hyperparameter
+The exact and Laplace engines condition on plain numeric hyperparameter
 values. A declarative `Hyperparameter` contributes its validated `.initial`
-value during compilation and, since the ["Empirical Bayes"](empirical-bayes.md#empirical-bayes)
-slice, is estimated by type-II ML rather than merely held fixed. Since the
-same slice's MAP-II follow-up, a `Hyperparameter`'s `prior` — when declared —
-is also consumed: its native-scale log density penalizes the marginal
-likelihood, turning the estimate into a MAP-II point estimate. The prior is
-still not copied into the materialized IR, and it is applied on the
-hyperparameter's native scale with no Jacobian correction for `transform`.
-`PCPrecision` and `GaussianPrior` drive both point estimation and, under
+value during compilation and is estimated by type-II ML rather than merely
+held fixed (see ["Empirical Bayes"](empirical-bayes.md#empirical-bayes)). A
+`Hyperparameter`'s `prior` — when declared — is also consumed: its
+native-scale log density penalizes the marginal likelihood, turning the
+estimate into a MAP-II point estimate. The prior is still **not** copied into
+the materialized IR, and it is applied on the hyperparameter's native scale
+with **no Jacobian correction** for `transform`. `PCPrecision` and
+`GaussianPrior` drive both point estimation and, under
 ["INLA integration"](inla.md#inla-integration), the integrated (marginal) posterior.
 
-Parameterized IR metadata, sparse production engines, and HMC are deferred to
-later slices. The stationary `AR1` effect has shipped — see
-["AR1 effect"](effects.md#ar1-effect) below. The spatial (CAR)
-effect family is now complete for the dense reference regime: `Besag`
-(intrinsic CAR/ICAR), `ProperCAR` (proper CAR, with its spatial-dependence
-parameter `ρ` either fixed or estimated), and `BYM2` (the structured +
-unstructured convolution, with its mixing parameter `φ` either fixed or
-estimated) have all shipped (see ["Besag / intrinsic CAR (ICAR) spatial effect"](spatial-effects.md#besag-intrinsic-car-icar-spatial-effect),
-["Proper CAR spatial effect"](spatial-effects.md#proper-car-spatial-effect),
-["BYM2 spatial effect"](spatial-effects.md#bym2-spatial-effect), and
-["Bounded hyperparameters"](empirical-bayes.md#bounded-hyperparameters) below). Remaining
-spatial follow-ups (the augmented 2n representation, config-file spatial
-effect types, graceful isolated-node handling, and sparse/large-graph
-scaling) are tracked in the
-[spatial roadmap](roadmap.md).
-Optional PySpark input is now
-supported as a data boundary (see below). Pandas fit-row predictions in 0.3
-cover the rows supplied to `LGM.fit`, in the caller's original row order.
-`result.predict(new_data)` extends this to out-of-sample rows by reusing the
-fitted latent posterior (see ["Predicting new rows"](prediction.md#predicting-new-rows)
-below); `new_data` itself must always be a Pandas DataFrame, including for
-results fitted from a Spark DataFrame.
+Predictions cover the rows supplied to `LGM.fit`, in the caller's original row
+order; `result.predict(new_data)` extends this to out-of-sample rows by reusing
+the fitted latent posterior (see
+["Predicting new rows"](prediction.md#predicting-new-rows)). `new_data` must
+always be a Pandas DataFrame, including for results fitted from a Spark
+DataFrame. Optional PySpark input is supported as a data boundary (see below).
+
+What each shipped slice covers is listed on the [roadmap](roadmap.md); the
+per-feature semantics live in the [guide](index.md). Deliberately deferred:
+parameterized IR metadata, sparse production engines, and full MCMC/HMC
+inference.
 
 ## Internal compiled IR policy
 

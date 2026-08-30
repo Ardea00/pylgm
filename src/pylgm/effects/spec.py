@@ -223,6 +223,7 @@ class DynamicSpatialPanel(_ComposableEffect):
     def __post_init__(self) -> None:
         from pylgm.effects.directed_graph import (
             canonical_directed_graph,
+            graphs_by_label,
             sorted_time_keys,
         )
 
@@ -245,7 +246,7 @@ class DynamicSpatialPanel(_ComposableEffect):
         )
         if not isinstance(self.graphs, Mapping) or not self.graphs:
             raise ValueError("graphs must be a non-empty mapping of time -> graph")
-        by_label = {str(t): g for t, g in self.graphs.items()}
+        by_label = graphs_by_label(self.graphs)
         canonical = tuple(
             (t, canonical_directed_graph(by_label[t]))
             for t in sorted_time_keys(self.graphs)

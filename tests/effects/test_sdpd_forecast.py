@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
 from pylgm.effects.sdpd_forecast import sdpd_forecast
@@ -40,3 +41,12 @@ def test_future_times_sort_numerically():
     assert sorted_time_keys({"9": 0, "10": 0, "2": 0}) == ("2", "9", "10")
     assert sorted_time_keys({"2021": 0, "2020": 0}) == ("2020", "2021")
     assert sorted_time_keys({"b": 0, "a": 0}) == ("a", "b")  # non-numeric falls back
+
+
+def test_graphs_by_label_rejects_colliding_period_keys():
+    """Two keys with the same str() would silently drop a period's network."""
+    from pylgm.effects.directed_graph import graphs_by_label
+
+    assert graphs_by_label({1: "a", 2: "b"}) == {"1": "a", "2": "b"}
+    with pytest.raises(ValueError, match="stringify"):
+        graphs_by_label({1: "a", "1": "b"})

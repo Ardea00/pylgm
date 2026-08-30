@@ -19,10 +19,14 @@ if TYPE_CHECKING:
     from pylgm.inference.sparse import SparsePosterior
 
 
-_PENDING_C = (
-    "posterior covariance is unavailable on the sparse path "
-    "(pending E-sparse-C); only mean, marginal likelihood, and predictive_mean "
-    "are available for large models fitted through the sparse solver"
+# A result carrying neither a dense covariance nor a sparse posterior has no
+# second-moment information at all. The fitted paths always supply one of the
+# two, so this is a guard on hand-constructed results, not a reachable
+# limitation of any engine.
+_NO_POSTERIOR = (
+    "this result carries no posterior covariance and no sparse posterior, so "
+    "uncertainty is unavailable; only mean, marginal likelihood, and "
+    "predictive_mean are defined"
 )
 
 
@@ -671,7 +675,7 @@ class _BaseResult:
                     "marginal and projected variances, or sparse_posterior."
                     "covariance_dense() to force the full matrix"
                 )
-            raise NotImplementedError(_PENDING_C)
+            raise NotImplementedError(_NO_POSTERIOR)
         return _readonly_array(self._covariance)
 
     @property
@@ -689,7 +693,7 @@ class _BaseResult:
         recover the response-scale (fitted-value) predictive variance.
         """
         if self._predictive_variance is None:
-            raise NotImplementedError(_PENDING_C)
+            raise NotImplementedError(_NO_POSTERIOR)
         return _readonly_array(self._predictive_variance)
 
     @property
@@ -733,7 +737,7 @@ class _BaseResult:
                 return latent_marginals_from_variances(
                     self._mean, variances, self.block_slices, block
                 )
-            raise NotImplementedError(_PENDING_C)
+            raise NotImplementedError(_NO_POSTERIOR)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
     def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
@@ -745,7 +749,7 @@ class _BaseResult:
             if sparse_posterior is not None:
                 variances = sparse_posterior.linear_combination_variances(weights)
                 return linear_combinations_from_variances(self._mean, variances, weights)
-            raise NotImplementedError(_PENDING_C)
+            raise NotImplementedError(_NO_POSTERIOR)
         return linear_combinations_from(self._mean, self._covariance, weights)
 
     def predict(self, new_data):
@@ -761,7 +765,7 @@ class _BaseResult:
         if self._covariance is None:
             sparse_posterior = getattr(self, "_sparse_posterior", None)
             if sparse_posterior is None:
-                raise NotImplementedError(_PENDING_C)
+                raise NotImplementedError(_NO_POSTERIOR)
             if self.prediction_context is None:
                 raise ValueError(
                     "this result carries no prediction context; predict() is available "
