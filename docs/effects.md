@@ -1,14 +1,95 @@
 # Effects
 
-pyLGM's predictor is a sum of effects. The core building blocks are
-`Fixed` (a formulaic fixed-effects formula), `IID` (exchangeable random
-effects), and the random walks `RW1`/`RW2` (smooth temporal trends); each
-structured effect takes a fixed `precision` or a declared `Hyperparameter`
-(see [Empirical Bayes and priors](empirical-bayes.md)). Runnable examples of
-these live under [`examples/`](https://github.com/Ardea00/pylgm/tree/main/examples). The stationary `AR1` effect is
-documented below; spatial (CAR) effects have their own
-[page](spatial-effects.md). Model-level [linear constraints](#linear-constraints-extraconstr)
-on the assembled latent field are documented at the bottom of this page.
+pyLGM's predictor is a **sum of effects**: `Fixed("1 + x") + IID(...) + RW1(...)`.
+Each structured effect takes a fixed `precision` or a declared
+`Hyperparameter` to be estimated (see
+[Empirical Bayes and priors](empirical-bayes.md)).
+
+## Every effect at a glance
+
+| Effect | What it models | Documented |
+| --- | --- | --- |
+| `Fixed(formula)` | Fixed effects from a formulaic formula | [core](#core-building-blocks) |
+| `IID(name, index)` | Exchangeable random effects per level | [core](#core-building-blocks) |
+| `RW1` / `RW2` | Smooth temporal trends (1st / 2nd difference penalty) | [core](#core-building-blocks) |
+| `AR1(name, index, rho=)` | Stationary first-order autoregression | [AR1](#ar1-effect) |
+| `AR1(..., group=)` | One independent AR1 series **per panel unit** | [group-wise AR1](#group-wise-ar1) |
+| `Seasonal(name, index, period=)` | A slowly-drifting periodic pattern | [Seasonal](#seasonal-effect) |
+| `MIDAS(name, columns)` | Mixed-frequency distributed lag, smoothness-penalised | [MIDAS](#midas-smooth-lag-effect) |
+| `MIDASParametric(...)` | Restricted lag curve (exp-Almon / Beta kernel) | [restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) |
+| `SpaceTime(name, space, time, interaction=)` | Knorr-Held space-time interaction, types I–IV | [SpaceTime](#spacetime-effect-knorr-held-interaction) |
+| `Besag(name, index, graph)` | Intrinsic CAR (ICAR) over a neighbour graph | [spatial](spatial-effects.md#besag-intrinsic-car-icar-spatial-effect) |
+| `ProperCAR(..., rho=)` | Proper CAR with a spatial-dependence parameter | [spatial](spatial-effects.md#proper-car-spatial-effect) |
+| `BYM2(..., phi=)` | Structured + unstructured convolution, interpretable `φ` | [spatial](spatial-effects.md#bym2-spatial-effect) |
+| `SAR(name, index, graph, rho=)` | **Directed** network autoregression `(I−ρW)ᵀ(I−ρW)` | [spatial](spatial-effects.md#directed-spatial-autoregressive-sar-effect) |
+| `DynamicSpatialPanel(...)` | **One network per period** — SDPD, with `ρ`, `γ`, `η` | [spatial](spatial-effects.md#dynamic-spatial-panel-sdpd) |
+| `LGM(constraints=...)` | Arbitrary linear constraints `A x = e` on the latent field | [constraints](#linear-constraints-extraconstr) |
+
+Graphs may be **weighted**, so the CAR family also models ownership,
+interbank-exposure and supply-chain networks rather than only geography — see
+[weighted neighbour graphs](spatial-effects.md#weighted-neighbour-graphs).
+
+Everything on the spatial and network side lives on the
+[spatial and network effects](spatial-effects.md) page; the rest is documented
+below. Runnable scripts for all of them are in the
+[examples gallery](examples.md).
+
+## Core building blocks
+
+### `Fixed(formula, prior_precision=1e-6)`
+
+An ordinary fixed-effect block, built from a
+[formulaic](https://matthewwardrop.github.io/formulaic/) formula, so
+`"1 + x"`, `"1 + x + I(x**2)"` and categorical expansion all behave as they do
+in R-style formulas. `prior_precision` is a ridge on the coefficients — the
+default is deliberately tiny, i.e. an almost-flat prior, so the estimates match
+what an unpenalised regression would give.
+
+Every model needs at most one `Fixed` term; its columns are recomputed from the
+formula when `predict` scores new rows, which is how a categorical level unseen
+at fit time is caught rather than silently mis-encoded.
+
+### `IID(name, index, precision=1.0)`
+
+Exchangeable random effects: one latent value per level of `index`, independent
+given the precision, `Q = τI`. This is the workhorse for "a per-group offset I
+want shrunk toward zero" — regions, firms, individuals.
+
+Unlike a `Fixed` dummy per group, an `IID` term **pools**: the estimated `τ`
+decides how much each level is pulled toward the overall mean, so levels with
+few observations are shrunk more. That is the difference the
+[method comparison](comparison.md#versus-regression-and-glms) measures.
+
+`IID` is also how you add a **frailty** to a survival model, and the
+unstructured half of a `BYM2` convolution.
+
+### `RW1(name, index, precision=1.0)` and `RW2(...)`
+
+Smoothness priors over an **ordered** index. `RW1` penalises first differences
+(the level wanders, the trend is locally flat), `RW2` penalises second
+differences (the *slope* wanders, so the fitted trend is smoother and
+extrapolates linearly rather than flat):
+
+\[
+Q_{\text{RW1}} = \tau D_1^\top D_1,
+\qquad
+Q_{\text{RW2}} = \tau D_2^\top D_2 .
+\]
+
+Both are **intrinsic**: rank-deficient by 1 and 2 respectively, with the null
+space (level, and level+slope) removed by sum-to-zero constraints. That null
+space is a nuisance absorbed by the intercept — which is exactly the opposite of
+[`Seasonal`](#seasonal-effect), whose null space is the signal.
+
+Choose by what you believe about the trend, and note the forecasting
+consequence: past the last observation `RW1` projects a flat mean with variance
+growing linearly in the horizon, while `RW2` continues the local slope with
+variance growing faster. See
+[how forecasting works](how-it-works.md#forecasting).
+
+**Regular spacing is assumed.** Both relate *consecutive* levels with no notion
+of the gap between them, so a missing period should enter as a `NaN`-response
+row to keep the grid regular.
 
 ## AR1 effect
 

@@ -1,4 +1,30 @@
-# Spatial (CAR) effects
+# Spatial and network effects
+
+Effects over a **graph**. The graph does not have to be a map: any relation you
+can write as `{node: [neighbours]}` works, and weighted graphs
+(`{node: {neighbour: weight}}`) cover ownership, interbank-exposure and
+supply-chain networks as readily as adjacency.
+
+| Effect | Graph | Key parameter | Use when |
+| --- | --- | --- | --- |
+| [`Besag`](#besag-intrinsic-car-icar-spatial-effect) | symmetric | `precision` | The standard smoothing prior; improper, sum-to-zero constrained |
+| [`ProperCAR`](#proper-car-spatial-effect) | symmetric | `rho` | You want a proper prior and an interpretable dependence parameter |
+| [`BYM2`](#bym2-spatial-effect) | symmetric | `phi` | You want to split structured vs unstructured variance interpretably |
+| [`SAR`](#directed-spatial-autoregressive-sar-effect) | **directed** | `rho` | The relation is asymmetric — who is exposed to whom |
+| [`DynamicSpatialPanel`](#dynamic-spatial-panel-sdpd) | **directed, per period** | `rho`, `gamma`, `eta` | The network itself changes over time |
+
+The first three are the **CAR family** and require a *symmetric* graph. `SAR`
+and `DynamicSpatialPanel` do not: they build the precision from an
+autoregressive operator instead of a Laplacian, so a generally asymmetric `W`
+stays asymmetric rather than being averaged away.
+
+Two worked case studies use these on real published data:
+[reproducing Anselin (1988)](examples-columbus.md) with `SAR`, and
+[a network that changes every year](examples-dynamic-network.md) with
+`DynamicSpatialPanel`.
+
+All of them scale past the dense-reference guard through the sparse solver
+(see [below](#sparse-e-sparse-scale) and [internals](internals.md)).
 
 ## Besag / intrinsic CAR (ICAR) spatial effect
 
@@ -475,7 +501,9 @@ beta = dict(zip(result.labels, result.mean))
 forecast["response"] = forecast["latent_mean"] + beta["fixed:Intercept"]
 ```
 
-**Sparse (E-sparse) scale.** Both `SAR` and `DynamicSpatialPanel` fit past the
+## Sparse (E-sparse) scale
+
+Both `SAR` and `DynamicSpatialPanel` fit past the
 dense-reference guard through the same sparse constrained-Gaussian solver as
 `Besag`/`BYM2`, with posterior mean, marginal variance, estimated
 hyperparameters, and predictions available — but only under the default

@@ -54,6 +54,7 @@ print(result.fitted_mean.round(3).tolist())
 | [Empirical Bayes and priors](empirical-bayes.md) | Type-II ML, MAP-II priors, bounded hyperparameters |
 | [INLA integration](inla.md) | Grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT |
 | [Prediction](prediction.md) | Fit-row and out-of-sample prediction, and forecasting new levels |
+| [Model comparison](model-comparison.md) | Rolling-origin backtests, candidate selection, calibration metrics, artifacts |
 | [Spark](spark.md) | Spark / Databricks data boundary |
 | [Comparison](comparison.md) | Measured against a GLM, XGBoost and a Metropolis sampler — including where pyLGM loses |
 | [Theory](theory.md) | The LGM class, Laplace/INLA inference, every structured effect, with references |
