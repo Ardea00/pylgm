@@ -114,6 +114,77 @@ convention — a point estimate that ignores the linear-predictor variance —
 while the two log-link families (`NegativeBinomial`, `Gamma`) apply the same
 exact lognormal correction `exp(mean + var/2)` as `Poisson`.
 
+## Survival likelihoods
+
+`WeibullSurv` and `ExponentialSurv` fit event-time (duration) data under a
+**proportional-hazards (PH)** parameterization on the Laplace engine. Unlike
+the GLM families above, the response is a follow-up *time*, not a plain
+outcome, so they carry their own event/censoring data contract:
+
+```python
+from pylgm import Fixed, Hyperparameter, IID, LGM, WeibullSurv
+
+model = LGM(
+    response="spell_time",                      # follow-up time (must be > 0)
+    likelihood=WeibullSurv(
+        "event",                                 # 1 = observed, 0 = right-censored
+        shape=Hyperparameter("alpha", initial=1.0, transform="log"),
+        entry="entry",                           # optional: left-truncation time
+    ),
+    predictor=Fixed("1 + x") + IID("frailty", index="id", precision=2.0),
+)
+result = model.fit(frame, engine="laplace", hyperparameters="optimize")
+```
+
+**Hazard.** With linear predictor `eta`, the hazard is
+`h(t) = alpha * t**(alpha-1) * exp(eta)`, cumulative hazard
+`H(t) = t**alpha * exp(eta)`, survival `S(t) = exp(-H(t))`.
+`ExponentialSurv` is exactly `WeibullSurv` with `alpha = 1` fixed (constant
+hazard). `alpha` may be a fixed float or a `Hyperparameter` (estimated by
+type-II ML, same mechanism as GLM dispersion `phi` above); the fitted value is
+reported on `result.hyperparameters["alpha"]` (or whatever name the
+`Hyperparameter` was given) and — critically — `result.predict(new_data)`
+uses the **fitted** shape, not the `Hyperparameter`'s initial guess.
+
+**Data contract.** `event` names a 0/1 column (1 = the event was observed at
+`response`, 0 = the subject was right-censored — still at risk — at
+`response`). `entry`, if given, names a left-truncation (delayed-entry) time
+column: the subject is only observed to be at risk from `entry` onward, and
+must satisfy `0 <= entry < response`; omit it (`entry=None`, the default) when
+there is no delayed entry. Both apply per row — there is no separate `panel`
+requirement, though `WeibullSurv`/`ExponentialSurv` compose with `panel`/`time`
+like any other likelihood.
+
+**Fitted mean & hazard ratios.** `response_mean` (and hence `fitted_mean`) is
+the unconditional expected duration `E[T] = exp(-eta/alpha) * Gamma(1 +
+1/alpha)` — a closed-form Weibull moment, not a censoring-adjusted estimator;
+compare it against the raw (censored) sample mean with that caveat in mind.
+Exponentiating a fixed-effect coefficient gives the familiar **hazard ratio**
+`exp(beta)`: covariate effects multiply the hazard rather than shifting the
+mean directly.
+
+**Frailty (unobserved heterogeneity).** There is no dedicated "frailty"
+construct — declare it as an ordinary `IID` effect indexed by the individual,
+exactly like the `IID` overdispersion idiom in
+[`examples/count_regression`](https://github.com/Ardea00/pylgm/tree/main/examples/count_regression):
+one latent value per row/individual, identified through the survival
+likelihood's nonlinearity rather than through repeated observations per
+group.
+
+**Not (yet) covered.** Interval-censoring (event known only to fall between
+two visits — needs a person-period/discrete-time Bernoulli recoding instead),
+time-varying covariates (needs episode-splitting into covariate-constant
+sub-intervals), and competing risks (multiple distinct failure causes) are
+outside this slice's scope.
+
+A runnable example — a simulated unemployment-duration panel with
+right-censoring, left-truncation, estimated shape, and an `IID` frailty term
+— lives at
+[`examples/survival_duration/README.md`](https://github.com/Ardea00/pylgm/blob/main/examples/survival_duration/README.md).
+In YAML: `likelihood: {family: weibullsurv, event: d, shape: 1.5, entry: v}` /
+`{family: exponentialsurv, event: d}` (`shape` accepts a fixed value only,
+same as GLM `phi` above; `entry` is optional for both).
+
 ## The `predictive_variance` convention
 
 `predictive_variance` is the **linear-predictor** posterior variance

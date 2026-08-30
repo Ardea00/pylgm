@@ -22,10 +22,12 @@ from pylgm.likelihoods import (
     Bernoulli,
     Beta,
     Binomial,
+    ExponentialSurv,
     Gamma,
     Gaussian,
     NegativeBinomial,
     Poisson,
+    WeibullSurv,
 )
 from pylgm.model import LGM
 from pylgm.parameters import Hyperparameter
@@ -45,6 +47,7 @@ __all__ = [
     "ComparisonResult",
     "DynamicSpatialPanel",
     "Experiment",
+    "ExponentialSurv",
     "FailureCause",
     "Fixed",
     "forecast_dynamic_spatial_panel",
@@ -67,5 +70,6 @@ __all__ = [
     "RW2",
     "SAR",
     "SpaceTime",
+    "WeibullSurv",
     "__version__",
 ]

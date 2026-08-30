@@ -26,13 +26,21 @@ _PHI_FAMILIES = ("nbinomial", "gamma", "beta")
 
 
 class _LikelihoodModelConfig(StrictModel):
-    family: Literal["gaussian", "poisson", "bernoulli", "binomial", "nbinomial", "gamma", "beta"]
+    family: Literal["gaussian", "poisson", "bernoulli", "binomial", "nbinomial",
+                    "gamma", "beta", "weibullsurv", "exponentialsurv"]
     sigma: FinitePositiveFloat | None = None
     # NB/Gamma/Beta dispersion/precision; fixed only in YAML (a Hyperparameter phi
     # stays Python-API-only), optional because the families default it to 1.0.
     phi: FinitePositiveFloat | None = None
     # Binomial per-row trials column name (required for binomial, rejected otherwise).
     trials: str | None = None
+    # Survival event/censoring indicator column (required for weibullsurv/exponentialsurv).
+    event: str | None = None
+    # Survival left-truncation entry-time column (weibullsurv/exponentialsurv only).
+    entry: str | None = None
+    # Weibull shape alpha; fixed only in YAML (a Hyperparameter shape stays
+    # Python-API-only), optional because weibullsurv defaults it to 1.0.
+    shape: FinitePositiveFloat | None = None
 
     @model_validator(mode="after")
     def _fields_match_family(self) -> "_LikelihoodModelConfig":
@@ -46,6 +54,15 @@ class _LikelihoodModelConfig(StrictModel):
             raise ValueError("trials is required for likelihood: {family: binomial}")
         if self.family != "binomial" and self.trials is not None:
             raise ValueError(f"trials is not a valid field for likelihood: {{family: {self.family}}}")
+        survival = self.family in ("weibullsurv", "exponentialsurv")
+        if survival and not self.event:
+            raise ValueError(f"event is required for likelihood: {{family: {self.family}}}")
+        if not survival and self.event is not None:
+            raise ValueError(f"event is not a valid field for likelihood: {{family: {self.family}}}")
+        if not survival and self.entry is not None:
+            raise ValueError(f"entry is not a valid field for likelihood: {{family: {self.family}}}")
+        if self.family != "weibullsurv" and self.shape is not None:
+            raise ValueError(f"shape is not a valid field for likelihood: {{family: {self.family}}}")
         return self
 
 
@@ -133,10 +150,12 @@ def _build_likelihood(config: _LikelihoodModelConfig) -> object:
         Bernoulli,
         Beta,
         Binomial,
+        ExponentialSurv,
         Gamma,
         Gaussian,
         NegativeBinomial,
         Poisson,
+        WeibullSurv,
     )
 
     if config.family == "gaussian":
@@ -147,6 +166,11 @@ def _build_likelihood(config: _LikelihoodModelConfig) -> object:
         return Bernoulli()
     if config.family == "binomial":
         return Binomial(config.trials)
+    if config.family == "weibullsurv":
+        shape = 1.0 if config.shape is None else config.shape
+        return WeibullSurv(config.event, shape=shape, entry=config.entry)
+    if config.family == "exponentialsurv":
+        return ExponentialSurv(config.event, entry=config.entry)
     # phi-families: phi is optional in YAML, the family defaults it to 1.0.
     phi_families = {"nbinomial": NegativeBinomial, "gamma": Gamma, "beta": Beta}
     family = phi_families[config.family]

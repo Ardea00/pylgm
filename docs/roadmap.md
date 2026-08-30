@@ -1,11 +1,11 @@
 # Roadmap
 
-pyLGM 0.3 is a bounded, correct-by-construction foundation. This page is the
+pyLGM 0.5 is a bounded, correct-by-construction foundation. This page is the
 honest map of what's shipped, what's next, and what's deliberately deferred.
 For the precise semantics of each shipped feature, follow the links into the
 [guide](index.md).
 
-## Shipped in 0.3
+## Shipped in 0.5
 
 - **Likelihoods** — Gaussian (exact engine), Poisson, Bernoulli, Binomial
   (counts `n·p` with a per-row trials column), NegativeBinomial (overdispersed
@@ -54,6 +54,13 @@ For the precise semantics of each shipped feature, follow the links into the
   reported latent**: `latent_marginals("region")` returns the `x`-marginals and
   `latent_marginals("region.structured")` the `u*` marginals. See
   [spatial effects](spatial-effects.md).
+- **Survival likelihoods** — `WeibullSurv` (Weibull proportional hazards,
+  shape `alpha` fixed or estimated) and `ExponentialSurv` (`alpha = 1`), with
+  right-censoring (`event`) and left-truncation (`entry`) support, `alpha`
+  estimation by empirical Bayes, and unobserved heterogeneity via an ordinary
+  `IID` frailty term over individuals. See
+  [likelihoods](likelihoods.md#survival-likelihoods) and the runnable
+  [unemployment-duration example](https://github.com/Ardea00/pylgm/tree/main/examples/survival_duration).
 - **Directed & dynamic network structure** — a directed `SAR` effect
   (`(I−ρW)ᵀ(I−ρW)` on a row-standardized, generally-asymmetric `W`) for
   economic influence relations that symmetric CAR discards, and its
@@ -69,13 +76,8 @@ For the precise semantics of each shipped feature, follow the links into the
 
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
-1. **Survival likelihoods** — `weibullsurv` and `exponentialsurv`. Unlike the
-   GLM families these are not plain response-scale likelihoods: they need an
-   event-time + right-censoring data contract (per-row event/censoring
-   indicator and follow-up time), so they carry their own data-plumbing slice
-   rather than reusing the GLM response column.
-2. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-3. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
+1. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
+2. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
    mixed-frequency nowcasting frontend and a YAML `midas` effect type, building
    on the now-shipped `MIDASParametric` exp-Almon / Beta lag kernels.
 

@@ -338,7 +338,7 @@ def test_binomial_glm_pieces_and_bernoulli_reduction():
     n = np.array([10.0, 8.0, 12.0, 5.0])
     y = np.array([3.0, 4.0, 7.0, 2.0])
     eta = np.array([-0.5, 0.2, 0.8, -0.1])
-    lk = Binomial("n").materialize({}).for_observations(n)
+    lk = Binomial("n").materialize({}).for_observations({"trials": n})
     p = 1.0 / (1.0 + np.exp(-eta))
 
     # grad = y - n*p ; weight = n*p*(1-p) ; response_mean = n*p (counts)
@@ -349,7 +349,7 @@ def test_binomial_glm_pieces_and_bernoulli_reduction():
 
     # n=1 reduces exactly to Bernoulli
     y01 = np.array([0.0, 1.0, 1.0, 0.0])
-    lk1 = CompiledBinomial().for_observations(np.ones(4))
+    lk1 = CompiledBinomial().for_observations({"trials": np.ones(4)})
     bern = Bernoulli().materialize({})
     np.testing.assert_allclose(lk1.gradient(eta, y01), bern.gradient(eta, y01))
     np.testing.assert_allclose(lk1.working_weights(eta, y01), bern.working_weights(eta, y01))
@@ -362,7 +362,7 @@ def test_binomial_density_and_cdf_match_scipy():
     n = np.array([10.0, 8.0, 12.0])
     y = np.array([3.0, 4.0, 7.0])
     eta = np.array([-0.5, 0.2, 0.8])
-    lk = Binomial("n").materialize({}).for_observations(n)
+    lk = Binomial("n").materialize({}).for_observations({"trials": n})
     p = 1.0 / (1.0 + np.exp(-eta))
     np.testing.assert_allclose(lk.pointwise_log_density(eta, y).sum(), lk.log_likelihood(eta, y))
     np.testing.assert_allclose(lk.pointwise_log_density(eta, y), binom.logpmf(y, n, p), atol=1e-10)
@@ -373,7 +373,7 @@ def test_binomial_rejects_out_of_support_response():
     from pylgm import Binomial
     from pylgm.exceptions import DataContractError
 
-    lk = Binomial("n").materialize({}).for_observations(np.array([10.0, 8.0]))
+    lk = Binomial("n").materialize({}).for_observations({"trials": np.array([10.0, 8.0])})
     with pytest.raises(DataContractError, match="exceed"):
         lk.validate_response(np.array([3.0, 10.0]))
     with pytest.raises(DataContractError, match="non-negative integer"):
@@ -385,3 +385,107 @@ def test_binomial_trials_requires_nonempty_column_name():
 
     with pytest.raises(ValueError, match="non-empty column name"):
         Binomial("")
+
+
+def test_weibull_surv_ph_pieces_match_poisson_trick():
+    from pylgm import WeibullSurv
+
+    alpha = 1.3
+    t = np.array([0.5, 2.0, 1.0])          # follow-up time (the response)
+    delta = np.array([1.0, 0.0, 1.0])      # event / right-censoring indicator
+    eta = np.array([0.2, -0.4, 0.7])
+    lk = WeibullSurv("d", shape=alpha).materialize({}).for_observations(
+        {"event": delta, "entry": None}
+    )
+    A = (t ** alpha) * np.exp(eta)         # entry = 0
+    np.testing.assert_allclose(lk.gradient(eta, t), delta - A)
+    np.testing.assert_allclose(lk.working_weights(eta, t), A)
+    assert np.all(lk.working_weights(eta, t) > 0)
+    np.testing.assert_allclose(lk.third_derivative(eta, t), -A)
+
+
+def test_weibull_surv_left_truncation_subtracts_entry_hazard():
+    from pylgm import WeibullSurv
+
+    alpha = 1.0                            # exponential for a clean hand value
+    t = np.array([3.0, 4.0])
+    v = np.array([1.0, 0.0])
+    delta = np.array([1.0, 0.0])
+    eta = np.array([0.0, 0.5])
+    lk = WeibullSurv("d", shape=alpha).materialize({}).for_observations(
+        {"event": delta, "entry": v}
+    )
+    A = (t - v) * np.exp(eta)             # (t^1 - v^1) exp(eta)
+    expected = delta * (np.log(alpha) + (alpha - 1.0) * np.log(t) + eta) - A
+    np.testing.assert_allclose(lk.pointwise_log_density(eta, t), expected)
+    np.testing.assert_allclose(lk.gradient(eta, t), delta - A)
+
+
+def test_exponential_surv_equals_weibull_shape_one():
+    from pylgm import ExponentialSurv, WeibullSurv
+
+    t = np.array([0.5, 2.0, 1.5])
+    delta = np.array([1.0, 1.0, 0.0])
+    eta = np.array([0.1, -0.2, 0.3])
+    aux = {"event": delta, "entry": None}
+    exp_lk = ExponentialSurv("d").materialize({}).for_observations(aux)
+    wei_lk = WeibullSurv("d", shape=1.0).materialize({}).for_observations(aux)
+    np.testing.assert_allclose(exp_lk.pointwise_log_density(eta, t),
+                               wei_lk.pointwise_log_density(eta, t))
+    np.testing.assert_allclose(exp_lk.gradient(eta, t), wei_lk.gradient(eta, t))
+
+
+def test_weibull_surv_density_and_cdf_match_scipy():
+    from scipy.stats import weibull_min
+    from pylgm import WeibullSurv
+
+    alpha = 1.7
+    t = np.array([0.5, 1.2, 2.0])
+    eta = np.array([0.2, -0.3, 0.6])
+    delta = np.ones_like(t)               # all events -> full log density = log f(t)
+    lk = WeibullSurv("d", shape=alpha).materialize({}).for_observations(
+        {"event": delta, "entry": None}
+    )
+    scale = np.exp(-eta / alpha)          # S(t)=exp(-(t/scale)^alpha)
+    np.testing.assert_allclose(lk.pointwise_log_density(eta, t),
+                               weibull_min.logpdf(t, alpha, scale=scale), atol=1e-10)
+    np.testing.assert_allclose(lk.cdf(eta, t),
+                               weibull_min.cdf(t, alpha, scale=scale), atol=1e-10)
+    # response_mean is E[T] = scale * Gamma(1 + 1/alpha)
+    from scipy.special import gamma as gamma_fn
+    np.testing.assert_allclose(lk.response_mean(eta), scale * gamma_fn(1.0 + 1.0 / alpha))
+
+
+def test_weibull_surv_gradient_third_derivative_finite_difference():
+    from pylgm import WeibullSurv
+
+    alpha = 1.4
+    t = np.array([0.7, 1.3, 2.1])
+    delta = np.array([1.0, 0.0, 1.0])
+    eta = np.array([0.2, -0.6, 0.4])
+    lk = WeibullSurv("d", shape=alpha).materialize({}).for_observations(
+        {"event": delta, "entry": None}
+    )
+    h = 1e-5
+    num_g = (lk.log_likelihood(eta + h, t) - lk.log_likelihood(eta - h, t)) / (2 * h)
+    np.testing.assert_allclose(lk.gradient(eta, t).sum(), num_g, atol=1e-5)
+
+    def obs_second(e):
+        return (lk.gradient(e + h, t) - lk.gradient(e - h, t)) / (2 * h)
+
+    fd3 = (obs_second(eta + h) - obs_second(eta - h)) / (2 * h)
+    np.testing.assert_allclose(lk.third_derivative(eta, t), fd3, atol=1e-3)
+
+
+def test_survival_rejects_bad_response_and_construction():
+    import pytest
+    from pylgm import ExponentialSurv, WeibullSurv
+
+    with pytest.raises(DataContractError, match="positive"):
+        WeibullSurv("d").materialize({}).validate_response(np.array([1.0, 0.0]))
+    with pytest.raises(ValueError, match="event"):
+        WeibullSurv("")                    # empty event column name
+    with pytest.raises(ValueError, match="shape"):
+        WeibullSurv("d", shape=0.0)        # non-positive fixed shape
+    with pytest.raises(ValueError, match="entry"):
+        ExponentialSurv("d", entry="")     # empty entry column name
