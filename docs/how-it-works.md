@@ -84,12 +84,24 @@ solved, and the per-node marginals are mixed by posterior weight — this is wha
 propagates hyperparameter uncertainty into the latent marginals
 ([INLA integration](inla.md)).
 
-!!! warning "Check whether an estimate pinned at its bound"
+!!! warning "An estimate pinned at its bound is reported for you"
     A `Hyperparameter`'s default bounds are derived from `initial`
-    (`initial × 1e-3` to `initial × 1e3`). If the reported estimate sits at one
-    of them, the optimizer wanted to go further and the fit is being shaped by
-    the bound, not the data. Compare `result.hyperparameters[name]` against the
-    declared `lower`/`upper` and widen them if it is pinned.
+    (`initial × 1e-3` to `initial × 1e3`). If an estimate lands on one of them,
+    the optimizer wanted to go further and the fit is being shaped by the bound,
+    not the data. Empirical Bayes now detects this, **warns**, and records the
+    names:
+
+    ```python
+    result.diagnostics["hyperparameters_at_bound"]   # "trend.precision" or ""
+    ```
+
+    Widen `lower`/`upper` on those hyperparameters and refit. Closeness is
+    judged on the transform's own scale, so a precision of 9999.98 against an
+    upper bound of 10000 counts as pinned — which it is, in every sense that
+    matters — even though it is 0.02 away in natural units.
+
+    A precision driven to its upper bound usually means that effect is being
+    estimated away: the data prefers no such term at all.
 
 ### 6. What comes back
 
@@ -171,7 +183,8 @@ forecast_dynamic_spatial_panel(result, effect, {5: graph_t5, 6: graph_t6})
 
 It propagates \(\hat{x}_{t+1} = A_{t+1}^{-1} B_{t+1} \hat{x}_t\) forward,
 carrying marginal variances with it, and returns a tidy frame of
-`unit, time, mean, variance`. See
+`unit, time, latent_mean, latent_variance` — the SDPD field alone, so add the
+fixed-effect contribution for a response-scale forecast. See
 [spatial effects](spatial-effects.md#dynamic-spatial-panel-sdpd).
 
 ## Where time goes

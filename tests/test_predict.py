@@ -165,6 +165,8 @@ def test_integrated_nonlinear_link_fitted_mean_is_a_documented_approximation():
     assert np.allclose(prediction.fitted_mean, result.fitted_mean, rtol=5e-3)
 
 
+# sigma is meant to move far from its 3.0 starting guess here.
+@pytest.mark.filterwarnings("ignore:empirical-Bayes estimate")
 def test_predict_uses_the_fitted_sigma_not_its_initial_value():
     # The context's likelihood comes from compile_lgm, which resolves a
     # Hyperparameter sigma to .initial. On the optimise/integrate paths that is

@@ -34,7 +34,7 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
 
 def load_config(path: Path) -> RunConfig:
     try:
-        payload = yaml.load(path.read_text(), Loader=_UniqueKeySafeLoader)
+        payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeySafeLoader)
         return RunConfig.model_validate(payload)
     except (OSError, yaml.YAMLError, ValidationError, TypeError) as exc:
         raise ConfigurationError(str(exc)) from exc
@@ -42,7 +42,7 @@ def load_config(path: Path) -> RunConfig:
 
 def load_experiment_config(path: Path) -> ExperimentConfig:
     try:
-        payload = yaml.load(path.read_text(), Loader=_UniqueKeySafeLoader)
+        payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeySafeLoader)
         config = ExperimentConfig.model_validate(payload)
         resolve_candidates(config)
         return config

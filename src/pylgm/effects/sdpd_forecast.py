@@ -75,20 +75,21 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
 
     ``result`` is the fit output, ``effect`` the ``DynamicSpatialPanel`` spec,
     ``future_graphs`` a ``{time: directed_graph}`` mapping for the periods to
-    forecast. Returns a frame with columns ``unit, time, mean, variance``.
+    forecast. Returns a frame with columns
+    ``unit, time, latent_mean, latent_variance``.
 
-    **These are the marginals of the latent SDPD field alone.** They do not
-    include the fixed effects, so they are not on the response scale: comparing
-    ``mean`` directly against observed responses is a mistake, and a model with
-    an intercept will look wrong by roughly the response's mean level. To get a
-    response-scale forecast, add the fixed-effect contribution for those
-    periods, which only the caller knows the covariates for::
+    The columns are named for what they are: **the marginals of the latent SDPD
+    field alone**, excluding the fixed effects, so they are not on the response
+    scale. To get a response-scale forecast, add the fixed-effect contribution
+    for those periods, which only the caller knows the covariates for::
 
         beta = dict(zip(result.labels, result.mean))
-        forecast["response"] = forecast["mean"] + beta["fixed:Intercept"]
+        forecast["response"] = forecast["latent_mean"] + beta["fixed:Intercept"]
 
-    The field is excluded rather than added here because future covariate
-    values are an input this function is not given.
+    The fixed part is excluded rather than added here because future covariate
+    values are an input this function is not given. (Before 0.6 these columns
+    were ``mean``/``variance``, which read as a response-scale forecast and
+    silently produced errors the size of the response's mean level.)
     """
 
     def _value(param):
@@ -114,5 +115,6 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
     records = []
     for t, (mean, var) in zip(future_times, steps):
         for unit, mean_i, var_i in zip(units, mean, var):
-            records.append({"unit": unit, "time": t, "mean": mean_i, "variance": var_i})
+            records.append({"unit": unit, "time": t,
+                            "latent_mean": mean_i, "latent_variance": var_i})
     return pd.DataFrame.from_records(records)

@@ -71,21 +71,69 @@ capability. Runnable examples live at
 ## Bounded hyperparameters
 
 Hyperparameter inference runs on an unconstrained internal scale chosen per
-parameter by its `transform`:
+parameter by its `transform`. Both the empirical-Bayes optimizer and the INLA
+grid work in that internal space, and the INLA importance weights carry the
+corresponding Jacobian `Σ log|dθ/du|`.
 
-| `transform` | Natural domain | Used for |
-| --- | --- | --- |
-| `"log"` (default) | `θ > 0` | `sigma`, effect precisions (τ) |
-| `"logit"` | a bounded interval `(a, b)` | `ProperCAR` `rho`, `BYM2` `phi` |
-| `"identity"` | `θ > 0` | accepted, but **not** wired into inference (treated as `log`) |
+### Choosing a transform
 
-Both the empirical-Bayes optimizer and the INLA grid work in this internal
-space, and the INLA importance weights carry the corresponding Jacobian
-`Σ log|dθ/du|`. For log-scale parameters this is exactly the previous
-behaviour, so existing models are unaffected; the abstraction is what makes a
-bounded parameter such as ρ estimable at all.
+| `transform` | Natural domain | Internal scale | Use it for |
+| --- | --- | --- | --- |
+| `"log"` (default) | `θ > 0` | `u = log θ` | `sigma`, every effect **precision** `τ`, the `phi` of NegativeBinomial/Gamma/Beta, the Weibull `shape` |
+| `"logit"` | a bounded interval `(a, b)` | logit on that interval | `AR1` `rho`, `ProperCAR` `rho`, `SAR` `rho`, `DynamicSpatialPanel` `rho`, `BYM2` `phi` |
+| `"identity"` | the whole real line | `u = θ` | `MIDASParametric` `shape1`/`shape2`, `DynamicSpatialPanel` `gamma` and `eta` |
 
-A `"logit"` hyperparameter may declare any finite `initial` (zero or negative
-included) and may leave `lower`/`upper` as `None`, letting the effect supply
-the interval — which is how `ProperCAR` passes its graph-derived range for ρ.
+The rule of thumb is the parameter's **domain**, not its typical value:
 
+- **Strictly positive and unbounded above** → `"log"`. This is the default, so
+  precisions need nothing declared.
+- **Confined to an interval** → `"logit"`. Any correlation-like parameter is
+  here. Under `"logit"` the `initial` may be any finite real — including `0.0`
+  or a negative value — and `lower`/`upper` may be left `None` for the effect to
+  supply, which is how `ProperCAR` passes its graph-derived range for ρ.
+- **Real line** → `"identity"`. Requires finite `lower`/`upper`; they default to
+  a symmetric window around `initial`.
+
+!!! tip "The most common first error"
+    Declaring a correlation with the default transform:
+
+    ```python
+    Hyperparameter("a.rho", initial=0.0)          # ValueError
+    Hyperparameter("a.rho", initial=0.0, transform="logit")   # correct
+    ```
+
+    `initial=0.0` is the natural starting guess for a correlation but is
+    invalid under `"log"`, whose domain is `θ > 0`. The error says so and names
+    the fix.
+
+### When an estimate hits its bound
+
+An estimate that lands on the edge of its interval is being set by **the bound,
+not the data** — the optimizer wanted to keep going. Empirical Bayes detects
+this, warns, and records it:
+
+```python
+result.diagnostics["hyperparameters_at_bound"]   # "trend.precision", or "" if none
+```
+
+This matters because `Hyperparameter` **derives its bounds from `initial`** when
+you do not give them: `initial × 1e-3` to `initial × 1e3`. An `initial` chosen
+casually therefore silently constrains the fit. Widen `lower`/`upper` and refit:
+
+```python
+Hyperparameter("trend.precision", initial=10.0, lower=1e-4, upper=1e9)
+```
+
+Closeness is judged on the transform's own scale, which is where the optimizer
+works — a precision of `9999.98` against an upper bound of `10000` counts as
+pinned, which it is in every sense that matters, even though it is `0.02` away
+in natural units.
+
+A precision driven to its **upper** bound usually has a specific meaning: that
+effect is being estimated away. An infinite precision is a zero-variance field,
+i.e. "the data prefers no such term at all". Widening the bound will not change
+that conclusion — it will just let the estimate run further. The fix there is to
+drop the term or accept it, not to loosen the interval.
+
+Under `hyperparameters="integrate"` the bounds define the grid rather than a
+search region, so this diagnostic is reported for the empirical-Bayes path only.

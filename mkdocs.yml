@@ -36,9 +36,12 @@ nav:
       - Empirical Bayes and priors: empirical-bayes.md
       - INLA integration: inla.md
       - Prediction: prediction.md
+      - Model comparison and backtesting: model-comparison.md
       - Spark: spark.md
   - Examples:
       - All examples: examples.md
+      - "Case study: Anselin (1988)": examples-columbus.md
+      - "Case study: dynamic networks": examples-dynamic-network.md
       - Disease mapping (spatial): examples-disease-mapping.md
       - Count regression: examples-count-regression.md
   - Comparison: comparison.md

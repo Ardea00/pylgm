@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import pandas as pd
 
 from pylgm import Fixed, Gaussian, Hyperparameter, LGM, MIDAS
@@ -89,6 +90,9 @@ def _second_difference_energy(curve):
     return float(second @ second)
 
 
+# A genuinely smooth kernel drives the smoothness precision up to its bound;
+# that is the behaviour under test, not a misconfiguration.
+@pytest.mark.filterwarnings("ignore:empirical-Bayes estimate")
 def test_penalised_lag_curve_recovers_smooth_kernel():
     # Simulate y = sum_k w_k * x_{t-k} + noise from a smooth decaying kernel over
     # 12 lags; the RW2-penalised MIDAS curve should recover the kernel and be far

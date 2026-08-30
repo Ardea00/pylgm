@@ -54,6 +54,7 @@ print(result.fitted_mean.round(3).tolist())
 | [Empirical Bayes and priors](empirical-bayes.md) | Type-II ML, MAP-II priors, bounded hyperparameters |
 | [INLA integration](inla.md) | Grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT |
 | [Prediction](prediction.md) | Fit-row and out-of-sample prediction, and forecasting new levels |
+| [Model comparison](model-comparison.md) | Rolling-origin backtests, candidate selection, calibration metrics, artifacts |
 | [Spark](spark.md) | Spark / Databricks data boundary |
 | [Comparison](comparison.md) | Measured against a GLM, XGBoost and a Metropolis sampler — including where pyLGM loses |
 | [Theory](theory.md) | The LGM class, Laplace/INLA inference, every structured effect, with references |
@@ -67,7 +68,8 @@ print(result.fitted_mean.round(3).tolist())
 |---|---|
 | [Disease mapping](examples-disease-mapping.md) | `Besag` spatial smoothing on Scotland lip cancer — fit to observed counts jumps 0.63 → 0.96 vs a non-spatial GLM |
 | [Count regression](examples-count-regression.md) | Horseshoe-crab Poisson GLM matching `statsmodels`, plus estimated overdispersion for honest uncertainty |
+| [Anselin (1988) reproduction](examples-columbus.md) | The reference Columbus crime result, reproduced on real contiguity data |
+| [Dynamic networks](examples-dynamic-network.md) | One network per year across 48 US states, filling panel gaps 5× better than the baselines |
 | [Method comparison](comparison.md) | pyLGM vs GLM vs XGBoost vs Metropolis, on problems chosen so each one wins somewhere |
-| [Anselin (1988) reproduction](comparison.md#on-real-data-against-a-published-result) | The reference Columbus crime result, reproduced on real contiguity data |
 
 The [examples gallery](examples.md) indexes all 21 runnable scripts.

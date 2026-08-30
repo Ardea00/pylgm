@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import pandas as pd
 
 from pylgm import LGM, Fixed, Gaussian, Hyperparameter
@@ -15,6 +16,9 @@ def _frame(n, seed=0):
     return pd.DataFrame({"region": [str(i) for i in range(n)], "y": rng.standard_normal(n)})
 
 
+# The SAR precision runs to its bound on this synthetic ring; the test is a
+# scale smoke test past the dense guard, not an estimation check.
+@pytest.mark.filterwarnings("ignore:empirical-Bayes estimate")
 def test_large_sar_fits_past_dense_guard():
     # Past the dense guard with headroom (latent dim = n + 1 intercept); derived
     # from the constant so it cannot drift, and kept just past it because the

@@ -36,8 +36,28 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
     }
 
     assert expected.issubset(set(pylgm.__all__))
-    assert pylgm.__version__ == "0.5.0"
+    assert pylgm.__version__ == "0.6.0"
     assert metadata["project"]["version"] == pylgm.__version__
+
+
+def test_docs_do_not_claim_a_different_version_than_the_package() -> None:
+    """The roadmap's version claims must track pyproject/__version__.
+
+    These drifted a full minor apart once already -- the code said 0.4.0 while
+    every doc page said 0.5 -- because nothing checked them together.
+    """
+    import re
+
+    root = Path(__file__).parents[1]
+    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.6.0" -> "0.6"
+    roadmap = (root / "docs" / "roadmap.md").read_text(encoding="utf-8")
+
+    claimed = set(re.findall(r"(?:pyLGM|Shipped in) (\d+\.\d+)", roadmap))
+    assert claimed, "roadmap no longer states a version; update this guard"
+    assert claimed == {series}, (
+        f"docs/roadmap.md claims version(s) {sorted(claimed)} but the package is "
+        f"{pylgm.__version__} (series {series}); bump them together"
+    )
 
 
 def test_spark_extra_is_optional_and_declared() -> None:
