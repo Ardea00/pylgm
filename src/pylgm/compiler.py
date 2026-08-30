@@ -600,13 +600,18 @@ def _log_bounds(hp: Hyperparameter) -> OptimizationBounds:
     return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=LogTransform())
 
 
-def _real_bounds(hp: Hyperparameter) -> OptimizationBounds:
-    """Bounds for a real-line (identity-transform) hyperparameter, e.g. an
-    exp-Almon MIDAS weight shape. The Hyperparameter already carries finite
-    lower/upper (defaulted symmetrically) under transform='identity'."""
+def _real_bounds(hp: Hyperparameter, label: str = "real-line parameter") -> OptimizationBounds:
+    """Bounds for a real-line (identity-transform) hyperparameter.
+
+    Shared by the exp-Almon MIDAS weight shapes and the SDPD temporal/diffusion
+    coefficients, so the caller names the parameter -- the message used to say
+    "exp-Almon MIDAS shape" whatever it was handed. The Hyperparameter already
+    carries finite lower/upper (defaulted symmetrically) under
+    transform='identity'.
+    """
     if hp.transform != "identity":
         raise CompilationError(
-            f"exp-Almon MIDAS shape {hp.name!r} must be declared transform='identity'; "
+            f"{label} {hp.name!r} must be declared transform='identity'; "
             f"got transform={hp.transform!r}"
         )
     return OptimizationBounds(hp.initial, hp.lower, hp.upper, transform=IdentityTransform())
@@ -727,7 +732,8 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             for shape in estimated:
                 parameter_names.append(shape.name)
                 parameter_bounds[shape.name] = (
-                    _log_bounds(shape) if shape.transform == "log" else _real_bounds(shape)
+                    _log_bounds(shape) if shape.transform == "log"
+                    else _real_bounds(shape, "exp-Almon MIDAS shape")
                 )
                 if shape.prior is not None:
                     parameter_priors[shape.name] = shape.prior
@@ -1025,10 +1031,10 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 )
             if gamma_name:
                 parameter_names.append(gamma_name)
-                parameter_bounds[gamma_name] = _real_bounds(effect.gamma)
+                parameter_bounds[gamma_name] = _real_bounds(effect.gamma, "SDPD gamma")
             if eta_name:
                 parameter_names.append(eta_name)
-                parameter_bounds[eta_name] = _real_bounds(effect.eta)
+                parameter_bounds[eta_name] = _real_bounds(effect.eta, "SDPD eta")
             if optimized:
                 parameter_names.append(precision.name)
                 parameter_bounds[precision.name] = _log_bounds(precision)
