@@ -124,12 +124,12 @@ def main() -> dict:
     first, last = graphs[FIT_YEARS[0]], graphs[FIT_YEARS[-1]]
     drift = float(np.mean([abs(first[s][o] - last[s][o]) for s in first for o in first[s]]))
 
-    # Forecast the held-out years from the same fit. The returned mean is the
-    # LATENT field, so add the fixed part to reach the response scale.
+    # Forecast the held-out years from the same fit. The result is the LATENT
+    # field, so add the fixed part to reach the response scale.
     future = {y: _network_for(y, log_income, adjacency) for y in FORECAST_YEARS}
     forecast = forecast_dynamic_spatial_panel(result, effect, future)
     beta = dict(zip(result.labels, result.mean))
-    forecast["predicted"] = forecast["mean"] + beta["fixed:Intercept"]
+    forecast["predicted"] = forecast["latent_mean"] + beta["fixed:Intercept"]
     forecast["actual"] = [log_income[r.unit][r.time] for r in forecast.itertuples()]
     forecast_rmse = {
         y: float(np.sqrt(np.mean(

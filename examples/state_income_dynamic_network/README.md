@@ -57,13 +57,13 @@ that hid this would be worth less than one that shows it.
 
 ## Note on the forecast helper
 
-`forecast_dynamic_spatial_panel` returns the marginals of the **latent field**,
-not the response scale. Add the fixed-effect contribution before comparing with
-observations:
+`forecast_dynamic_spatial_panel` returns `latent_mean` / `latent_variance` —
+the marginals of the **latent field**, not the response scale. Add the
+fixed-effect contribution before comparing with observations:
 
 ```python
 beta = dict(zip(result.labels, result.mean))
-forecast["predicted"] = forecast["mean"] + beta["fixed:Intercept"]
+forecast["predicted"] = forecast["latent_mean"] + beta["fixed:Intercept"]
 ```
 
 ## Cost

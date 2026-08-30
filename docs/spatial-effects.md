@@ -459,8 +459,8 @@ effect, future_graphs)` propagates the fitted last-period latent mean and
 marginal variance forward through new periods' networks via the SDPD forward
 recursion `x̂_{t+1} = A_{t+1}⁻¹B_{t+1}x̂_t`, with the matching variance
 propagation carried diagonal-only (marginal, consistent with the gaussian
-latent strategy). It returns a frame with columns `unit, time, mean,
-variance` for the requested future periods:
+latent strategy). It returns a frame with columns `unit, time, latent_mean,
+latent_variance` for the requested future periods:
 
 ```python
 from pylgm import forecast_dynamic_spatial_panel
@@ -468,6 +468,11 @@ from pylgm import forecast_dynamic_spatial_panel
 forecast = forecast_dynamic_spatial_panel(
     result, model.predictor.effects[-1], {"2024": graph_2024, "2025": graph_2025}
 )
+
+# latent_mean is the SDPD field alone. Add the fixed part for a
+# response-scale forecast -- the helper is not given future covariates.
+beta = dict(zip(result.labels, result.mean))
+forecast["response"] = forecast["latent_mean"] + beta["fixed:Intercept"]
 ```
 
 **Sparse (E-sparse) scale.** Both `SAR` and `DynamicSpatialPanel` fit past the

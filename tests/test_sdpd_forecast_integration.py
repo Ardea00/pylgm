@@ -30,8 +30,8 @@ def test_forecast_returns_future_grid():
     # predictor to get the frozen spec the model actually holds.
     fitted_effect = model.predictor.effects[1]
     forecast = forecast_dynamic_spatial_panel(result, fitted_effect, {"4": _ring(n)})
-    assert set(forecast.columns) == {"unit", "time", "mean", "variance"}
+    assert set(forecast.columns) == {"unit", "time", "latent_mean", "latent_variance"}
     assert len(forecast) == n
     assert (forecast["time"] == "4").all()
-    assert np.isfinite(forecast["mean"]).all()
-    assert (forecast["variance"] > 0).all()
+    assert np.isfinite(forecast["latent_mean"]).all()
+    assert (forecast["latent_variance"] > 0).all()

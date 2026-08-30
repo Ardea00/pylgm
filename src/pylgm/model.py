@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -235,6 +236,40 @@ def _align_predictions_with_source_rows(
     return _rebuild_result(result, caller_order=np.argsort(source_positions))
 
 
+def _parameters_at_bound(
+    values: dict[str, float], bounds: Mapping[str, object], rtol: float = 1e-3
+) -> tuple[str, ...]:
+    """Names whose estimate landed on the edge of its declared interval.
+
+    A pinned estimate means the optimizer wanted to keep going and the bound,
+    not the data, is setting the value -- so the fit is shaped by a default the
+    caller probably never chose (``Hyperparameter`` derives its bounds from
+    ``initial`` when they are not given).
+
+    Closeness is measured on the transform's own scale, which is where the
+    optimizer works: a precision of 9999.98 against an upper bound of 10000 is
+    pinned for every practical purpose, but is nowhere near it in natural units.
+    """
+    pinned = []
+    for name, bound in bounds.items():
+        value = values.get(name)
+        if value is None:
+            continue
+        to_internal = bound.transform.to_internal
+        try:
+            scaled = to_internal(value)
+            low, high = to_internal(float(bound.lower)), to_internal(float(bound.upper))
+        except (ValueError, FloatingPointError, OverflowError):
+            continue
+        span = high - low
+        if not span > 0.0 or not np.isfinite(span):
+            continue
+        tolerance = span * rtol
+        if scaled <= low + tolerance or scaled >= high - tolerance:
+            pinned.append(name)
+    return tuple(sorted(pinned))
+
+
 def _attach_estimates(
     result: GaussianResult | LaplaceResult,
     hyperparameters: Mapping[str, float],
@@ -398,6 +433,18 @@ class LGM:
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
         diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
         diagnostics["hyperparameter_penalized"] = penalty is not None
+        pinned = _parameters_at_bound(dict(eb.parameters), bounds)
+        # Stored as a string: diagnostics values must be immutable scalars.
+        diagnostics["hyperparameters_at_bound"] = ", ".join(pinned)
+        if pinned:
+            warnings.warn(
+                f"empirical-Bayes estimate(s) {list(pinned)} landed on the edge of "
+                "the declared interval, so the bound rather than the data is "
+                "setting the value. Widen lower/upper on those Hyperparameters "
+                "(the defaults are initial*1e-3 to initial*1e3) and refit.",
+                UserWarning,
+                stacklevel=3,
+            )
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
     def _run_inla(self, family, engine: str, latent_strategy: str = "gaussian") -> INLAResult:

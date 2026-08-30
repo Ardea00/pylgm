@@ -1,11 +1,11 @@
 # Roadmap
 
-pyLGM 0.5 is a bounded, correct-by-construction foundation. This page is the
+pyLGM 0.6 is a bounded, correct-by-construction foundation. This page is the
 honest map of what's shipped, what's next, and what's deliberately deferred.
 For the precise semantics of each shipped feature, follow the links into the
 [guide](index.md).
 
-## Shipped in 0.5
+## Shipped in 0.6
 
 - **Likelihoods** — Gaussian (exact engine), Poisson, Bernoulli, Binomial
   (counts `n·p` with a per-row trials column), NegativeBinomial (overdispersed
@@ -73,6 +73,19 @@ For the precise semantics of each shipped feature, follow the links into the
   (`forecast_dynamic_spatial_panel`) for future periods' networks, and `SAR`
   is declarable from YAML (`type: sar`). See [spatial effects](spatial-effects.md)
   and [`examples/directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar).
+- **Diagnostics** — an empirical-Bayes estimate that lands on the edge of its
+  declared interval is now reported in
+  `result.diagnostics["hyperparameters_at_bound"]` and warned about, because a
+  pinned estimate means the bound (often a default derived from `initial`)
+  rather than the data is setting the value.
+
+## Breaking changes in 0.6
+
+- `forecast_dynamic_spatial_panel` returns **`latent_mean` / `latent_variance`**
+  instead of `mean` / `variance`. The values are unchanged; the old names read
+  as a response-scale forecast, but they exclude the fixed effects, so
+  comparing them with observations was wrong by the response's mean level. See
+  [spatial effects](spatial-effects.md#dynamic-spatial-panel-sdpd).
 
 ## Next
 
