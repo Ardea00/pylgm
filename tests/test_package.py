@@ -2,6 +2,7 @@ from importlib.metadata import entry_points
 import os
 from pathlib import Path
 import shutil
+import runpy
 import subprocess
 import sys
 import tomllib
@@ -201,3 +202,38 @@ def test_method_comparison_example_reproduces_its_documented_numbers():
     assert "pyLGM (Besag)" in out and "XGBoost" in out
     assert "95% interval coverage" in out
     assert "Metropolis" in out
+
+def test_columbus_example_reproduces_published_anselin_values():
+    """The credibility anchor: OLS must match Anselin (1988) Table 12.1 exactly,
+    and pyLGM's SAR must land near the published ML spatial-error estimates."""
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/columbus_spatial_econometrics/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    ns = runpy.run_path(str(root / "examples/columbus_spatial_econometrics/run.py"))
+    out = ns["main"]()
+    ols, published = out["OLS (pyLGM repo)"], out["published OLS"]
+    for key in ("const", "INC", "HOVAL"):
+        assert ols[key] == pytest.approx(published[key], abs=1e-3), key
+    sar, ml = out["pyLGM SAR"], out["published ML spatial error"]
+    assert sar["HOVAL"] == pytest.approx(ml["HOVAL"], abs=0.02)
+    assert sar["const"] == pytest.approx(ml["const"], abs=2.0)
+    # the headline: spatial dependence roughly halves the apparent income effect
+    assert abs(sar["INC"]) < 0.7 * abs(ols["INC"])
+    assert 0.4 < sar["rho"] < 0.8
+
+
+def test_dynamic_network_example_beats_baselines_on_missing_cells():
+    """Guards the numbers quoted in the SDPD example README and the docs."""
+    root = Path(__file__).parents[1]
+    ns = runpy.run_path(str(root / "examples/state_income_dynamic_network/run.py"))
+    out = ns["main"]()
+    recovery = out["recovery_rmse"]
+    assert recovery["SDPD (dynamic network)"] < 0.5 * min(
+        v for k, v in recovery.items() if k != "SDPD (dynamic network)"
+    )
+    assert out["network_weight_drift"] > 0.0  # the graph really is time-varying
+    assert out["hyperparameters"]["dyn.gamma"] > 0.8  # near-unit-root persistence

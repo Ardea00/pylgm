@@ -53,6 +53,54 @@ This is the regime the method exists for: small-area estimation, disease
 mapping, sparse panels, any setting where the per-unit sample is thin but the
 units are related.
 
+## On real data, against a published result
+
+Simulations are a fair test of a smoothing method but a weak one for
+credibility, so
+[`examples/columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics)
+reproduces the reference result of spatial econometrics: Anselin (1988),
+Table 12.1 — 49 Columbus, OH neighbourhoods, crime on income and housing value.
+
+| model | const | INC | HOVAL | ρ / λ |
+|---|---|---|---|---|
+| published OLS | 68.619 | −1.5973 | −0.2739 | — |
+| **OLS, recomputed here** | **68.619** | **−1.5973** | **−0.2739** | — |
+| published ML spatial error | 60.279 | −0.9573 | −0.3046 | 0.5468 |
+| **pyLGM `SAR`** | **59.543** | **−0.9057** | **−0.3058** | **0.5946** |
+
+The OLS row matching the published values *exactly* is what verifies the data
+and specification. pyLGM's `SAR` then lands next to the published ML
+spatial-error estimates, and the economic conclusion reproduces cleanly:
+ignoring spatial correlation **overstates the income effect by 1.76×**.
+
+pyLGM is not re-implementing ML estimation — it is Bayesian, and carries a
+nugget the ML spatial-error model does not — so exact agreement would be
+suspicious rather than reassuring. The residual gap shows up in ρ (0.595 vs
+0.547).
+
+### Where the structure earns its keep
+
+[`examples/state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network)
+fits 48 US states over 1997–2007 with **a different network every year** —
+contiguity weighted by the previous year's income similarity — then knocks 20%
+of the panel cells out and asks each method to restore them:
+
+| method | RMSE ↓ (log income) |
+|---|---|
+| **pyLGM `DynamicSpatialPanel`** | **0.0246** |
+| state mean | 0.1214 |
+| year mean | 0.1484 |
+| grand mean | 0.1786 |
+
+About **5× closer**, because a missing cell is reconstructed from both its own
+history and its neighbours' current values. Panel gaps are the ordinary case,
+not a contrived one.
+
+That example also reports where it **loses**: on a plain level forecast a
+last-value benchmark wins (0.029 vs 0.040). That is not a defect — the fitted
+γ ≈ 1.005 says log income is near a random walk, and for a random walk the last
+observed value *is* the optimal forecast.
+
 ## Versus gradient boosting
 
 Boosted trees are excellent at exactly what LGMs are bad at: discovering
@@ -153,5 +201,14 @@ pip install scikit-learn xgboost     # not pyLGM dependencies
 PYTHONPATH=src python examples/method_comparison/run.py
 ```
 
-The script prints exactly the tables above. It is excluded from the CI example
-suite so that pyLGM itself keeps no dependency on scikit-learn or xgboost.
+The script prints exactly the tables above; a CI test runs it when those
+packages are installed and skips otherwise, so pyLGM itself keeps no dependency
+on scikit-learn or xgboost.
+
+The two real-data examples need nothing beyond pyLGM, and both are checked in
+CI:
+
+```bash
+PYTHONPATH=src python examples/columbus_spatial_econometrics/run.py
+PYTHONPATH=src python examples/state_income_dynamic_network/run.py   # ~40s
+```

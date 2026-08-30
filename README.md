@@ -80,6 +80,40 @@ print("fitted_mean:", result.fitted_mean.round(3).tolist())
 
 The same model can be declared in YAML and loaded with `pylgm.config.load_model`.
 
+## Reproducing a published result
+
+[`examples/columbus_spatial_econometrics`](examples/columbus_spatial_econometrics)
+reproduces the reference result of spatial econometrics — Anselin (1988),
+Table 12.1, 49 Columbus OH neighbourhoods:
+
+| model | const | INC | HOVAL | ρ / λ |
+|---|---|---|---|---|
+| published OLS | 68.619 | −1.5973 | −0.2739 | — |
+| **OLS, recomputed** | **68.619** | **−1.5973** | **−0.2739** | — |
+| published ML spatial error | 60.279 | −0.9573 | −0.3046 | 0.5468 |
+| **pyLGM `SAR`** | **59.543** | **−0.9057** | **−0.3058** | **0.5946** |
+
+OLS matching the published numbers exactly verifies the data and spec; the
+`SAR` fit then lands next to the published ML spatial-error estimates, and
+recovers the finding that ignoring spatial correlation **overstates the income
+effect by 1.76×**.
+
+## A network that changes every year
+
+[`examples/state_income_dynamic_network`](examples/state_income_dynamic_network)
+fits 48 US states over 1997–2007 with **one network per year**, then knocks out
+20% of the panel and restores it:
+
+| method | RMSE ↓ (log income) |
+|---|---|
+| **`DynamicSpatialPanel`** | **0.0246** |
+| state mean | 0.1214 |
+| year mean | 0.1484 |
+
+~5× closer than the obvious baselines. The same example reports where it loses
+— a last-value forecast beats it on level forecasts, because the fitted γ ≈ 1
+says log income is near a random walk.
+
 ## Why not just use XGBoost?
 
 Often you should — and the [comparison page](https://ardea00.github.io/pylgm/comparison/)
@@ -119,7 +153,7 @@ Full docs: **https://ardea00.github.io/pylgm/**
 - [How it works](https://ardea00.github.io/pylgm/how-it-works/) — one `fit()` call end to end, then prediction and forecasting
 - [Comparison](https://ardea00.github.io/pylgm/comparison/) — against regression, gradient boosting and MCMC, including where pyLGM loses
 - [Theory](https://ardea00.github.io/pylgm/theory/) — the model class and every structured effect, with references
-- [Examples](https://ardea00.github.io/pylgm/examples/) — 19 runnable scripts
+- [Examples](https://ardea00.github.io/pylgm/examples/) — 21 runnable scripts
 
 ## Roadmap
 

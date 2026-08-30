@@ -76,6 +76,19 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
     ``result`` is the fit output, ``effect`` the ``DynamicSpatialPanel`` spec,
     ``future_graphs`` a ``{time: directed_graph}`` mapping for the periods to
     forecast. Returns a frame with columns ``unit, time, mean, variance``.
+
+    **These are the marginals of the latent SDPD field alone.** They do not
+    include the fixed effects, so they are not on the response scale: comparing
+    ``mean`` directly against observed responses is a mistake, and a model with
+    an intercept will look wrong by roughly the response's mean level. To get a
+    response-scale forecast, add the fixed-effect contribution for those
+    periods, which only the caller knows the covariates for::
+
+        beta = dict(zip(result.labels, result.mean))
+        forecast["response"] = forecast["mean"] + beta["fixed:Intercept"]
+
+    The field is excluded rather than added here because future covariate
+    values are an input this function is not given.
     """
 
     def _value(param):

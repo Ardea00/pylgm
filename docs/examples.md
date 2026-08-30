@@ -12,6 +12,13 @@ PYTHONPATH=src python examples/<name>/run.py
 Most are covered by the CI suite, so the numbers in their READMEs are checked
 rather than remembered.
 
+## Reproducing published results
+
+| Example | Shows |
+|---|---|
+| [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | **Anselin (1988), Table 12.1** — the reference dataset of spatial econometrics. OLS reproduces the published values exactly; pyLGM's `SAR` lands next to the published ML spatial-error estimates, halving the apparent income effect |
+| [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | A **network that changes every year** — real US state income and contiguity, recovering knocked-out panel cells ~5× better than the obvious baselines |
+
 ## Start here
 
 | Example | Shows |
@@ -27,6 +34,8 @@ rather than remembered.
 | [`disease_mapping`](https://github.com/Ardea00/pylgm/tree/main/examples/disease_mapping) | `Besag` spatial smoothing on Scotland lip cancer; fit to observed counts goes 0.63 → 0.96 against a non-spatial GLM. Walkthrough: [disease mapping](examples-disease-mapping.md) |
 | [`weighted_network`](https://github.com/Ardea00/pylgm/tree/main/examples/weighted_network) | `BYM2` on a **weighted** firm-exposure graph — the CAR family on an economic network, not a map |
 | [`directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar) | `SAR` on a directed interbank-exposure network, estimating contagion strength ρ |
+| [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | `SAR` reproducing Anselin's published Columbus results on real contiguity data |
+| [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | `DynamicSpatialPanel` with one network per year, on 48 US states |
 
 ## Time, frequency and forecasting
 
