@@ -3,6 +3,7 @@ import pandas as pd
 
 from pylgm import LGM, Fixed, Gaussian, Hyperparameter
 from pylgm.effects.spec import SAR
+from pylgm.inference.gaussian import _MAX_DENSE_LATENT_DIMENSION
 
 
 def _ring(n):
@@ -15,7 +16,10 @@ def _frame(n, seed=0):
 
 
 def test_large_sar_fits_past_dense_guard():
-    n = 5000  # above _MAX_DENSE_LATENT_DIMENSION (4096); latent dim = n + 1 intercept
+    # Past the dense guard with headroom (latent dim = n + 1 intercept); derived
+    # from the constant so it cannot drift, and kept just past it because the
+    # sparse cost grows superlinearly in n.
+    n = _MAX_DENSE_LATENT_DIMENSION + 100
     model = LGM(
         response="y",
         predictor=Fixed("1") + SAR("s", "region", _ring(n), rho=0.5,

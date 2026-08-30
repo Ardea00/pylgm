@@ -21,7 +21,9 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: ruff check src tests
-      - run: pytest -q
+      # -n auto: the suite is xdist-clean and dominated by a few
+      # large sparse fits, so wall time roughly halves.
+      - run: pytest -q -n auto
 
   release-gate:
     # Non-editable install exercises the real hatchling build and the console

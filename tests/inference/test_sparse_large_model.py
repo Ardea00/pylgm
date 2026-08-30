@@ -4,12 +4,15 @@ import pytest
 
 from pylgm import Besag, Fixed, Gaussian, Hyperparameter, LGM
 from pylgm.exceptions import DenseReferenceLimitError
+from pylgm.inference.gaussian import _MAX_DENSE_LATENT_DIMENSION
 from pylgm.priors import PCPrecision
 
 # A connected ring over N regions -> intrinsic Besag (single sum-to-zero
-# constraint). N chosen so latent dim = N + 1 (intercept) crosses
-# _MAX_DENSE_LATENT_DIMENSION (4096), forcing the sparse route.
-_N = 5000
+# constraint). N is derived from the guard so latent dim = N + 1 (intercept)
+# crosses it with headroom, forcing the sparse route: the point is to be past
+# the threshold, not far past it, and the sparse cost grows superlinearly
+# (N=5000 cost ~40% more than this for no extra coverage).
+_N = _MAX_DENSE_LATENT_DIMENSION + 100
 
 
 @pytest.fixture

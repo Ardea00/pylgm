@@ -61,6 +61,16 @@ class Hyperparameter:
         if self.prior is not None and not callable(getattr(self.prior, "logpdf", None)):
             raise ValueError("prior must provide a logpdf method")
         if self.transform == "log":
+            if type(self.initial) in (int, float) and math.isfinite(self.initial) and self.initial <= 0:
+                # The common first mistake: a bounded parameter (a correlation
+                # rho, a mixing phi) declared without transform="logit", where
+                # an initial of 0 or a negative value is perfectly sensible.
+                raise ValueError(
+                    f"initial must be positive under the default transform='log', got "
+                    f"{self.initial}; a parameter confined to an interval (such as an "
+                    "AR1/SAR/CAR rho or a BYM2 phi) needs transform='logit', which "
+                    "accepts any finite initial"
+                )
             object.__setattr__(self, "initial", _positive_real(self.initial, "initial"))
             lower = self.initial * 1e-3 if self.lower is None else _positive_real(self.lower, "lower")
             upper = self.initial * 1e3 if self.upper is None else _positive_real(self.upper, "upper")

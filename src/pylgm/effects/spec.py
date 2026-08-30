@@ -467,29 +467,13 @@ class Predictor:
             effects = tuple(self.effects)
         except TypeError as error:
             raise TypeError("effects must be an iterable of effect specifications") from error
-        if any(
-            not isinstance(
-                effect,
-                (
-                    Fixed,
-                    IID,
-                    RW1,
-                    RW2,
-                    AR1,
-                    Seasonal,
-                    Besag,
-                    ProperCAR,
-                    SAR,
-                    DynamicSpatialPanel,
-                    BYM2,
-                    MIDAS,
-                    MIDASParametric,
-                    SpaceTime,
-                ),
+        if any(not isinstance(effect, _ComposableEffect) for effect in effects):
+            offenders = sorted(
+                {type(e).__name__ for e in effects if not isinstance(e, _ComposableEffect)}
             )
-            for effect in effects
-        ):
-            raise TypeError("effects must contain only effect specifications")
+            raise TypeError(
+                f"effects must contain only effect specifications; got {offenders}"
+            )
         names = [effect.name for effect in effects]
         if len(names) != len(set(names)):
             raise ValueError("effect names must be unique")
@@ -498,25 +482,7 @@ class Predictor:
     def __add__(self, other: object) -> "Predictor":
         if isinstance(other, Predictor):
             return Predictor(self.effects + other.effects)
-        if isinstance(
-            other,
-            (
-                Fixed,
-                IID,
-                RW1,
-                RW2,
-                AR1,
-                Seasonal,
-                Besag,
-                ProperCAR,
-                SAR,
-                DynamicSpatialPanel,
-                BYM2,
-                MIDAS,
-                MIDASParametric,
-                SpaceTime,
-            ),
-        ):
+        if isinstance(other, _ComposableEffect):
             return Predictor(self.effects + (other,))
         return NotImplemented
 

@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "ruff>=0.9"]
+dev = ["pytest>=8.3", "pytest-xdist>=3.6", "ruff>=0.9"]
 docs = ["mkdocs-material>=9.5"]
 spark = ["pyspark>=3.5"]
 

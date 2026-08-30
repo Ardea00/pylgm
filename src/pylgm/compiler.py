@@ -145,6 +145,23 @@ def _structured_blocks(
     return blocks
 
 
+def _effect_failure_detail(error: Exception, frame) -> str:
+    """Render a builder failure for humans.
+
+    A missing column surfaces as a bare ``KeyError`` whose ``str`` is just the
+    quoted column name, which reads as noise ("failed to compile effect 'a':
+    'tt'"). Name what was looked up and what is actually there instead.
+    """
+    if isinstance(error, KeyError) and len(error.args) == 1:
+        available = ", ".join(
+            str(c) for c in frame.columns if not str(c).startswith("__pylgm")
+        )
+        return (
+            f"column {error.args[0]!r} is not in the data; available columns: {available}"
+        )
+    return str(error)
+
+
 def _qualified_labels(blocks: list[LatentBlock]) -> tuple[str, ...]:
     labels = tuple(f"{block.name}:{label}" for block in blocks for label in block.labels)
     if len(labels) != len(set(labels)):
@@ -445,7 +462,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             ValueError,
         ) as error:
             raise CompilationError(
-                f"failed to compile effect {effect.name!r}: {error}"
+                f"failed to compile effect {effect.name!r}: "
+                f"{_effect_failure_detail(error, frame)}"
             ) from error
         blocks.append(block)
 

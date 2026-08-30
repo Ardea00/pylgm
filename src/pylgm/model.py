@@ -8,7 +8,8 @@ import pandas as pd
 
 from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
-from pylgm.effects import Fixed, IID, Predictor, RW1, RW2
+from pylgm.effects import Predictor
+from pylgm.effects.spec import EffectSpec, _ComposableEffect
 from pylgm.exceptions import DataContractError, UnsupportedEngineError
 from pylgm.inference import GaussianResult, INLAResult, LaplaceResult, fit_gaussian, fit_laplace
 from pylgm.likelihoods import Gaussian
@@ -248,7 +249,7 @@ class LGM:
 
     response: str
     likelihood: object
-    predictor: Predictor | Fixed | IID | RW1 | RW2
+    predictor: Predictor | EffectSpec
     panel: tuple[str, ...] = ()
     time: str | None = None
     offset: str | None = None
@@ -270,8 +271,14 @@ class LGM:
         if not isinstance(self.response, str) or not self.response:
             raise ValueError("response must be a non-empty string")
         if not isinstance(self.predictor, Predictor):
-            if not isinstance(self.predictor, (Fixed, IID, RW1, RW2)):
-                raise TypeError("predictor must contain declarative effects")
+            # Any single effect is a one-term predictor. Checked against the
+            # shared base rather than a listed tuple, which silently went stale
+            # as effects were added and rejected bare AR1/Besag/MIDAS/... .
+            if not isinstance(self.predictor, _ComposableEffect):
+                raise TypeError(
+                    "predictor must be an effect or a sum of effects, got "
+                    f"{type(self.predictor).__name__}"
+                )
             object.__setattr__(self, "predictor", Predictor((self.predictor,)))
         try:
             panel = tuple(self.panel)
