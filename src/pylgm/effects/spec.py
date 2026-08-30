@@ -137,6 +137,38 @@ class AR1(_ComposableEffect):
 
 
 @dataclass(frozen=True)
+class Seasonal(_ComposableEffect):
+    """A slowly-drifting seasonal effect of the declared ``period``.
+
+    ``precision`` penalizes drift away from a repeating pattern; the fixed
+    patterns themselves are the signal and stay unpenalized by it, held only by
+    the fixed ``ridge`` that keeps the block positive definite. Raise ``ridge``
+    to shrink the seasonal amplitude toward zero, lower it to free it further.
+    """
+
+    name: str
+    index: str
+    period: int
+    precision: float | Hyperparameter = 1.0
+    ridge: float = 1e-6
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if isinstance(self.period, bool) or not isinstance(self.period, int):
+            raise TypeError("period must be an integer")
+        if self.period < 2:
+            raise ValueError("period must be at least 2")
+        object.__setattr__(
+            self, "precision", _positive_precision(self.precision, "precision")
+        )
+        ridge = _finite_real(self.ridge, "ridge")
+        if ridge <= 0.0:
+            raise ValueError("ridge must be finite and > 0")
+        object.__setattr__(self, "ridge", ridge)
+
+
+@dataclass(frozen=True)
 class Besag(_ComposableEffect):
     """A Besag / intrinsic CAR (ICAR) spatial latent effect."""
 
@@ -412,6 +444,7 @@ EffectSpec: TypeAlias = (
     | RW1
     | RW2
     | AR1
+    | Seasonal
     | Besag
     | ProperCAR
     | SAR
@@ -443,6 +476,7 @@ class Predictor:
                     RW1,
                     RW2,
                     AR1,
+                    Seasonal,
                     Besag,
                     ProperCAR,
                     SAR,
@@ -472,6 +506,7 @@ class Predictor:
                 RW1,
                 RW2,
                 AR1,
+                Seasonal,
                 Besag,
                 ProperCAR,
                 SAR,
@@ -488,6 +523,7 @@ class Predictor:
 
 __all__ = [
     "AR1",
+    "Seasonal",
     "Besag",
     "BYM2",
     "DynamicSpatialPanel",

@@ -14,7 +14,7 @@ For the precise semantics of each shipped feature, follow the links into the
   [likelihoods](likelihoods.md).
 - **Effects** — `Fixed`, `IID`, `RW1`/`RW2`, stationary `AR1` (optionally
   **group-wise**: one independent series per panel unit, sharing `ρ` and
-  `precision`), the `MIDAS`
+  `precision`), the drifting `Seasonal` pattern, the `MIDAS`
   mixed-frequency smooth-lag effect and its restricted (parametric)
   `MIDASParametric` counterpart (exp-Almon / Beta lag kernels), and the
   Knorr-Held `SpaceTime` interaction (Types I–IV). See [effects](effects.md).

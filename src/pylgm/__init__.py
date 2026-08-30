@@ -14,6 +14,7 @@ from pylgm.effects import (
     RW1,
     RW2,
     SAR,
+    Seasonal,
     SpaceTime,
     load_graph_file,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "RW1",
     "RW2",
     "SAR",
+    "Seasonal",
     "SpaceTime",
     "WeibullSurv",
     "__version__",
