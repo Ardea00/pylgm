@@ -197,7 +197,7 @@ def _build_model(config: _StandaloneModelConfig, base_dir: Path) -> LGM:
 def load_model(path: Path) -> LGM:
     """Load a standalone declarative :class:`LGM` YAML document."""
     try:
-        payload = yaml.load(path.read_text(), Loader=_UniqueKeySafeLoader)
+        payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeySafeLoader)
         return _build_model(_StandaloneModelConfig.model_validate(payload), path.parent)
     except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as exc:
         raise ConfigurationError(str(exc)) from exc

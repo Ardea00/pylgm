@@ -96,3 +96,30 @@ def test_fixed_hyperparameters_do_not_warn():
         warnings.simplefilter("always")
         model.fit(_series())
     assert not [w for w in caught if "landed on the edge" in str(w.message)]
+
+
+def test_yaml_config_with_non_ascii_labels_loads(tmp_path):
+    """Config files are read as UTF-8, not the platform's locale encoding.
+
+    Region names with accents are ordinary in spatial models. Reading them
+    with the default encoding raises UnicodeDecodeError on Windows (cp1252),
+    which is how this was found.
+    """
+    from pylgm.config import load_model
+
+    path = tmp_path / "model.yaml"
+    path.write_text(
+        "response: y\n"
+        "likelihood:\n  family: gaussian\n  sigma: 1.0\n"
+        "data:\n  panel: [region]\n"
+        "predictor:\n"
+        "  fixed: '1'\n"
+        "  effects:\n"
+        "    - {name: region, type: besag, index: region, precision: 1.0,\n"
+        "       graph: {Zürich: [Genève], Genève: [Zürich]}}\n",
+        encoding="utf-8",
+    )
+    model = load_model(path)
+    assert model.response == "y"
+    labels = dict(model.predictor.effects[1].graph)
+    assert "Zürich" in labels and "Genève" in labels
