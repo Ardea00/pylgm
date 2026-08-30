@@ -23,6 +23,7 @@ from pylgm.effects import (
     RW1,
     RW2,
     SAR,
+    Seasonal,
     SpaceTime,
     build_ar1,
     build_besag,
@@ -34,9 +35,11 @@ from pylgm.effects import (
     build_proper_car,
     build_random_walk,
     build_sar,
+    build_seasonal,
     build_spacetime,
     midas_penalty,
     midas_weights,
+    seasonal_penalty,
     normalize_graph,
 )
 from pylgm.effects.ar1 import ar1_structure
@@ -400,6 +403,12 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
                 order = 1 if isinstance(effect, RW1) else 2
                 block = build_random_walk(
                     frame, effect.name, effect.index, precision, order
+                )
+                precisions[effect.name] = precision
+            elif isinstance(effect, Seasonal):
+                precision = _resolved_precision(effect.precision)
+                block = build_seasonal(
+                    frame, effect.name, effect.index, precision, effect.period, effect.ridge
                 )
                 precisions[effect.name] = precision
             elif isinstance(effect, MIDAS):
@@ -1005,6 +1014,35 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             if optimized:
                 parameter_names.append(precision.name)
                 parameter_bounds[precision.name] = _log_bounds(precision)
+            continue
+        if isinstance(effect, Seasonal):
+            # Q(tau) = tau * StS + delta * P0, exactly like MIDAS below: the
+            # delta * P0 term holds the fixed seasonal patterns and does not
+            # scale with tau, so an estimated tau needs a ParametricBlock.
+            level_count = len(ordered_observed_levels(frame[effect.index]))
+            sts, projector = seasonal_penalty(level_count, effect.period)
+            delta = effect.ridge
+            if not optimized:
+                block = _compiled_block(
+                    effect.name, build_seasonal,
+                    frame, effect.name, effect.index, value, effect.period, delta,
+                )
+                scalable.append(ScalableBlock(block, None, 1.0))
+                continue
+            tau_name = precision.name
+            template = _compiled_block(
+                effect.name, build_seasonal,
+                frame, effect.name, effect.index, float(precision.initial),
+                effect.period, delta,
+            )
+
+            def build(values, sts=sts, projector=projector, delta=delta,
+                      tau_name=tau_name) -> csr_matrix:
+                return csr_matrix(values[tau_name] * sts + delta * projector)
+
+            scalable.append(ParametricBlock(template, (tau_name,), build))
+            parameter_names.append(tau_name)
+            parameter_bounds[tau_name] = _log_bounds(precision)
             continue
         if isinstance(effect, MIDAS):
             # Q(tau) = tau * DtD + delta * P0. The delta * P0 term does not scale

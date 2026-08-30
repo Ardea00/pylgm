@@ -92,7 +92,7 @@ but should count as a step, include it as a row with a `NaN` response at
 and restores regular spacing, exactly like the future-period rows in
 ["Predicting new rows"](prediction.md#predicting-new-rows) above. **Not shipped**:
 irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type, and
-AR(p)/seasonal effects.
+AR(p) effects.
 
 ### Group-wise AR1
 
@@ -129,6 +129,56 @@ future rows above. `result.predict(new_data)` scores grouped rows; an unseen
 
 **Regular spacing is assumed within each group**, for the same reason it is for
 the ungrouped effect.
+
+## Seasonal effect
+
+`Seasonal(name, index, period, precision=1.0, ridge=1e-6)` declares a
+**slowly-drifting seasonal pattern** of the declared `period` (4 for quarterly
+data, 12 for monthly). With `RW1`/`RW2` for trend it gives the classic
+trend + seasonal + irregular decomposition:
+
+```python
+model = LGM(
+    response="y",
+    predictor=Fixed("1")
+    + RW1("trend", index="t", precision=Hyperparameter("trend.precision", initial=10.0))
+    + Seasonal("seas", index="t", period=4,
+               precision=Hyperparameter("seas.precision", initial=10.0)),
+    likelihood=Gaussian(sigma=0.25),
+)
+result = model.fit(frame)
+result.latent_marginals("seas").mean   # the seasonal component
+```
+
+The penalty sums every `period` consecutive levels and shrinks that sum toward
+zero, so `precision` controls **how fast the seasonal pattern may drift**, not
+its size: a pattern that repeats exactly is unpenalized by `precision`, and a
+large `precision` means "the shape is nearly fixed from cycle to cycle".
+
+**Why there is a `ridge` and no constraint.** The directions `precision` leaves
+unpenalized are exactly the fixed seasonal patterns — the signal, not a
+nuisance. This is the opposite of `RW1`/`RW2`, whose unpenalized level and
+slope *are* nuisances absorbed by the intercept, and so are removed by
+sum-to-zero constraints. Constraining them away here would annihilate a stable
+seasonal pattern entirely. Instead, as in
+[`MIDAS`](#midas-smooth-lag-effect), those directions carry a fixed,
+`precision`-independent `ridge` on their orthogonal projector: the pattern
+stays estimable, the block stays positive definite, and the effect declares no
+constraints. Raise `ridge` to shrink the seasonal amplitude toward zero; lower
+it to free the pattern further.
+
+This differs from R-INLA's `seasonal`, which leaves the model rank-deficient
+and applies a single sum-to-zero constraint for intercept confounding. The
+ridge reaches the same place — a weakly-identified fixed pattern — while
+keeping the conditioned precision positive definite, which is what the engines
+here require.
+
+**Regular spacing is assumed**, as for `RW1`/`RW2`/`AR1`: the effect relates
+*consecutive* ordered levels and has no notion of the gap between them. A
+missing period should enter as a `NaN`-response row so the grid stays regular.
+Future periods included that way also receive an extrapolated seasonal
+posterior, so the pattern projects forward — see
+["Predicting new rows"](prediction.md#predicting-new-rows).
 
 ## MIDAS smooth-lag effect
 

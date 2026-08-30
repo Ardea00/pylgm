@@ -1,4 +1,5 @@
 from pylgm.effects.ar1 import build_ar1
+from pylgm.effects.seasonal import build_seasonal, seasonal_penalty
 from pylgm.effects.besag import build_besag
 from pylgm.effects.bym2 import build_bym2
 from pylgm.effects.fixed import build_fixed
@@ -12,6 +13,7 @@ from pylgm.effects.sdpd_forecast import forecast_dynamic_spatial_panel
 from pylgm.effects.spacetime import build_spacetime
 from pylgm.effects.spec import (
     AR1,
+    Seasonal,
     Besag,
     BYM2,
     DynamicSpatialPanel,
@@ -29,6 +31,7 @@ from pylgm.effects.spec import (
 
 __all__ = [
     "AR1",
+    "Seasonal",
     "Besag",
     "BYM2",
     "DynamicSpatialPanel",
@@ -43,6 +46,8 @@ __all__ = [
     "SAR",
     "SpaceTime",
     "build_ar1",
+    "build_seasonal",
+    "seasonal_penalty",
     "build_besag",
     "build_bym2",
     "build_fixed",
