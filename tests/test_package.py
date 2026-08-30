@@ -178,3 +178,26 @@ def test_installed_console_entrypoint_loads_and_reports_help() -> None:
     assert completed.returncode == 0
     assert "fit" in completed.stdout
     assert "compare" in completed.stdout
+
+
+def test_method_comparison_example_reproduces_its_documented_numbers():
+    """Guards the figures quoted in docs/comparison.md and the README.
+
+    scikit-learn and xgboost are deliberately NOT pyLGM dependencies, so this
+    skips rather than failing when they are absent.
+    """
+    pytest.importorskip("sklearn")
+    pytest.importorskip("xgboost")
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/method_comparison/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    out = completed.stdout
+    # The claim the comparison page rests on: the structured model is closest to
+    # the truth on the small-area problem, and boosting wins on the nonlinear one.
+    assert "pyLGM (Besag)" in out and "XGBoost" in out
+    assert "95% interval coverage" in out
+    assert "Metropolis" in out
