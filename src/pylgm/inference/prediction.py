@@ -235,7 +235,9 @@ def _prediction_likelihood(context: PredictionContext, new_data: pd.DataFrame) -
         raise ValueError(
             f"predict() new_data is missing the trials column {context.trials!r}"
         )
-    return context.likelihood.for_observations(np.asarray(new_data[context.trials], dtype=float))
+    return context.likelihood.for_observations(
+        {"trials": np.asarray(new_data[context.trials], dtype=float)}
+    )
 
 
 def _require_finite(name: str, value: np.ndarray) -> None:

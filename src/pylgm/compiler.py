@@ -62,10 +62,12 @@ from pylgm.likelihoods import (
     Beta,
     Binomial,
     CompiledGaussian,
+    ExponentialSurv,
     Gamma,
     Gaussian,
     NegativeBinomial,
     Poisson,
+    WeibullSurv,
 )
 from pylgm.optimization.empirical_bayes import OptimizationBounds
 from pylgm.optimization.transforms import IdentityTransform, LogitTransform, LogTransform
@@ -268,21 +270,58 @@ def _warn_missing_spacetime_main_effects(effects) -> None:
             )
 
 
-def _binomial_trials(model: "LGM", frame: object) -> "np.ndarray | None":
-    """Extract and validate the per-row trials vector for a Binomial likelihood.
+def _likelihood_columns(model: "LGM", frame: object) -> "dict | None":
+    """Extract and validate the per-row auxiliary data a likelihood binds.
 
-    Returns ``None`` for every other likelihood, so binding it via
-    ``for_observations`` is a no-op (the trials hook defaults to ``return self``).
+    Returns ``{"trials": ...}`` for Binomial and ``None`` for every family that
+    binds no per-row data (its ``for_observations`` hook is then a no-op).
     """
-    if not isinstance(model.likelihood, Binomial):
+    like = model.likelihood
+    if isinstance(like, Binomial):
+        column = like.trials
+        if column not in frame.columns:
+            raise DataContractError(f"trials column not found: {column!r}")
+        trials = frame[column].to_numpy(dtype=float)
+        if not np.all(np.isfinite(trials)) or np.any(trials < 1.0) or np.any(trials != np.floor(trials)):
+            raise CompilationError("binomial trials column must be positive integers")
+        return {"trials": trials}
+    if isinstance(like, (WeibullSurv, ExponentialSurv)):
+        if not np.all(np.isfinite(frame[model.response].to_numpy(dtype=float))):
+            raise DataContractError(
+                f"survival response {model.response!r} (follow-up time) must be observed for every row"
+            )
+        if like.event not in frame.columns:
+            raise DataContractError(f"event column not found: {like.event!r}")
+        event = frame[like.event].to_numpy(dtype=float)
+        if not np.all(np.isin(event, (0.0, 1.0))):
+            raise DataContractError("survival event indicator must be 0 or 1")
+        aux: dict = {"event": event, "entry": None}
+        if like.entry is not None:
+            if like.entry not in frame.columns:
+                raise DataContractError(f"entry column not found: {like.entry!r}")
+            entry = frame[like.entry].to_numpy(dtype=float)
+            t = frame[model.response].to_numpy(dtype=float)
+            if not np.all(np.isfinite(entry)) or np.any(entry < 0.0) or np.any(entry >= t):
+                raise DataContractError("survival entry time must satisfy 0 <= entry < time")
+            aux["entry"] = entry
+        return aux
+    return None
+
+
+def _estimable_scalar(likelihood: object) -> "Hyperparameter | None":
+    """The likelihood's optimisable scalar (dispersion phi or Weibull shape), if any."""
+    for attr in ("phi", "shape"):
+        value = getattr(likelihood, attr, None)
+        if isinstance(value, Hyperparameter):
+            return value
+    return None
+
+
+def _slice_aux(aux: "dict | None", observed: "np.ndarray") -> "dict | None":
+    """Slice each bound vector to the observed rows (None entries stay None)."""
+    if aux is None:
         return None
-    column = model.likelihood.trials
-    if column not in frame.columns:
-        raise DataContractError(f"trials column not found: {column!r}")
-    trials = frame[column].to_numpy(dtype=float)
-    if not np.all(np.isfinite(trials)) or np.any(trials < 1.0) or np.any(trials != np.floor(trials)):
-        raise CompilationError("binomial trials column must be positive integers")
-    return trials
+    return {k: (v[observed] if v is not None else None) for k, v in aux.items()}
 
 
 def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
@@ -415,18 +454,19 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
         except (TypeError, ValueError) as error:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
-    if isinstance(model.likelihood, (Poisson, Bernoulli, Binomial, NegativeBinomial, Gamma, Beta)):
-        # A phi-family with an optimisable phi compiles here at its initial value
-        # (the EB/INLA fit refines it); a fixed-phi family ignores the mapping.
-        phi = getattr(model.likelihood, "phi", None)
-        values = {phi.name: phi.initial} if isinstance(phi, Hyperparameter) else {}
+    if isinstance(model.likelihood, (Poisson, Bernoulli, Binomial, NegativeBinomial,
+                                     Gamma, Beta, WeibullSurv, ExponentialSurv)):
+        # A phi/shape-family with an optimisable scalar compiles here at its
+        # initial value (the EB/INLA fit refines it); a fixed-scalar family
+        # ignores the mapping.
+        scalar = _estimable_scalar(model.likelihood)
+        values = {scalar.name: scalar.initial} if scalar is not None else {}
         compiled_likelihood = model.likelihood.materialize(values)
         observed = panel.observed
         # Binomial carries a per-row trials vector; binding is a no-op otherwise.
-        trials = _binomial_trials(model, frame)
-        obs_trials = trials[observed] if trials is not None else None
-        compiled_likelihood.for_observations(obs_trials).validate_response(y[observed])
-        compiled_likelihood = compiled_likelihood.for_observations(trials)
+        aux = _likelihood_columns(model, frame)
+        compiled_likelihood.for_observations(_slice_aux(aux, observed)).validate_response(y[observed])
+        compiled_likelihood = compiled_likelihood.for_observations(aux)
         if not blocks:
             raise CompilationError("model must contain at least one latent effect")
         width = sum(block.design.shape[1] for block in blocks)
@@ -463,6 +503,9 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
     phi = getattr(model.likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
     if isinstance(phi, Hyperparameter):
         found.append(("phi", phi))
+    shape = getattr(model.likelihood, "shape", None)  # Weibull survival shape
+    if isinstance(shape, Hyperparameter):
+        found.append(("shape", shape))
     for effect in model.predictor.effects:
         precision = getattr(effect, "precision", None)
         if isinstance(precision, Hyperparameter):
@@ -883,18 +926,19 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
                 return CompiledGaussian(sigma)
     else:
         likelihood = model.likelihood
-        phi = getattr(likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
-        if isinstance(phi, Hyperparameter):
-            parameter_names.append(phi.name)
-            parameter_bounds[phi.name] = _log_bounds(phi)
+        scalar = _estimable_scalar(likelihood)  # NB/Gamma/Beta phi or Weibull shape
+        if scalar is not None:
+            parameter_names.append(scalar.name)
+            parameter_bounds[scalar.name] = _log_bounds(scalar)
 
-        # materialize is lenient (picks phi out of the joint mapping); a phi-less
-        # family (Poisson/Bernoulli) ignores `resolved` and returns unchanged.
-        # Binomial's trials vector is data, bound onto the compiled likelihood.
-        trials = _binomial_trials(model, frame)
+        # materialize is lenient (picks the scalar out of the joint mapping); a
+        # scalar-less family (Poisson/Bernoulli) ignores `resolved` and returns
+        # unchanged. Binomial's trials vector is data, bound onto the compiled
+        # likelihood.
+        aux = _likelihood_columns(model, frame)
 
-        def factory(resolved: dict, likelihood: object = likelihood, trials=trials) -> object:
-            return likelihood.materialize(resolved).for_observations(trials)
+        def factory(resolved: dict, likelihood: object = likelihood, aux=aux) -> object:
+            return likelihood.materialize(resolved).for_observations(aux)
 
     constraint_labels = _qualified_labels([item.block for item in scalable])
     extra_constraints, extra_constraint_rhs = resolve_constraints(

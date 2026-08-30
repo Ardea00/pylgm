@@ -79,28 +79,38 @@ def _context_with_fitted_likelihood(context, result, model):
     """
     from dataclasses import replace
 
-    from pylgm.likelihoods import CompiledGaussian, Gaussian
+    from pylgm.likelihoods import CompiledGaussian, Gaussian, WeibullSurv
     from pylgm.parameters import Hyperparameter
 
-    if not isinstance(model.likelihood, Gaussian):
-        return context
-    if not isinstance(model.likelihood.sigma, Hyperparameter):
-        return context
-    name = model.likelihood.sigma.name
+    if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
+        name = model.likelihood.sigma.name
 
-    marginals = getattr(result, "hyperparameter_marginals", None)
-    if callable(marginals):
-        table = marginals() or {}
-        if name in table:
-            # The integrated fit-row variance mixes per-theta sigma^2, so the
-            # matching plug-in is sqrt(E[sigma^2]) = sqrt(mean^2 + variance).
-            entry = table[name]
-            second = float(entry.mean[0]) ** 2 + float(entry.variance[0])
-            return replace(context, likelihood=CompiledGaussian(float(np.sqrt(second))))
+        marginals = getattr(result, "hyperparameter_marginals", None)
+        if callable(marginals):
+            table = marginals() or {}
+            if name in table:
+                # The integrated fit-row variance mixes per-theta sigma^2, so the
+                # matching plug-in is sqrt(E[sigma^2]) = sqrt(mean^2 + variance).
+                entry = table[name]
+                second = float(entry.mean[0]) ** 2 + float(entry.variance[0])
+                return replace(context, likelihood=CompiledGaussian(float(np.sqrt(second))))
 
-    fitted = result.hyperparameters
-    if fitted and name in fitted:
-        return replace(context, likelihood=CompiledGaussian(float(fitted[name])))
+        fitted = result.hyperparameters
+        if fitted and name in fitted:
+            return replace(context, likelihood=CompiledGaussian(float(fitted[name])))
+        return context
+
+    if isinstance(model.likelihood, WeibullSurv) and isinstance(model.likelihood.shape, Hyperparameter):
+        name = model.likelihood.shape.name
+        marginals = getattr(result, "hyperparameter_marginals", None)
+        if callable(marginals):
+            table = marginals() or {}
+            if name in table:
+                fitted_shape = float(table[name].mean[0])
+                return replace(context, likelihood=model.likelihood.materialize({name: fitted_shape}))
+        fitted = getattr(result, "hyperparameters", None) or {}
+        if name in fitted:
+            return replace(context, likelihood=model.likelihood.materialize({name: float(fitted[name])}))
     return context
 
 
