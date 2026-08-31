@@ -480,6 +480,23 @@ float or a `Hyperparameter`; `rho` should be declared `transform="logit"`
 (bounded to `(-1, 1)`) and `gamma`/`eta` `transform="identity"` (unbounded).
 Like `SAR`, `DynamicSpatialPanel`'s precision is full-rank and unconstrained.
 
+**From YAML:** the standalone frontend declares `type: dynamicspatialpanel`,
+indexed by a `unit`+`time` pair. Its per-period networks come from an inline
+`graphs` mapping (`{period: neighbour dict}`) **or** a `graph_files` mapping
+(`{period: filename}`, each an R-INLA `.graph` or `.json`), exactly one of the
+two. `rho` is required; `gamma`, `eta`, and `precision` are optional fixed
+floats (defaults `0.0`, `0.0`, `1.0`). Estimating any coefficient stays
+Python-API-only. A single-period mapping reduces to `sar`.
+
+```yaml
+predictor:
+  effects:
+    - {name: sdpd, type: dynamicspatialpanel, unit: firm, time: year, rho: 0.3, gamma: 0.1, eta: 0.05,
+       graphs: {2020: {a: [b], b: [a]}, 2021: {a: [b], b: [a]}}}
+    # or per-period files:
+    # graph_files: {2020: nb2020.graph, 2021: nb2021.graph}
+```
+
 **Forecasting future periods.** `forecast_dynamic_spatial_panel(result,
 effect, future_graphs)` propagates the fitted last-period latent mean and
 marginal variance forward through new periods' networks via the SDPD forward
