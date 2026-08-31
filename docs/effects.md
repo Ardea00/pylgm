@@ -172,8 +172,18 @@ but should count as a step, include it as a row with a `NaN` response at
 `fit` time: it contributes no likelihood but still creates its latent column
 and restores regular spacing, exactly like the future-period rows in
 ["Predicting new rows"](prediction.md#predicting-new-rows) above. **Not shipped**:
-irregular-spacing support (`ρ^Δt`), a config-file `ar1` effect type, and
-AR(p) effects.
+irregular-spacing support (`ρ^Δt`) and AR(p) effects.
+
+**From YAML:** the standalone `load_model` frontend declares `type: ar1`,
+indexed by a single `index`, with optional fixed `rho` (default `0.5`),
+`precision` (default `1.0`), and a `group` column for the group-wise variant.
+Estimating `rho`/`precision` from YAML stays Python-API-only.
+
+```yaml
+predictor:
+  effects:
+    - {name: trend, type: ar1, index: period, rho: 0.5, precision: 1.0, group: unit}
+```
 
 ### Group-wise AR1
 
@@ -261,6 +271,18 @@ Future periods included that way also receive an extrapolated seasonal
 posterior, so the pattern projects forward — see
 ["Predicting new rows"](prediction.md#predicting-new-rows).
 
+**From YAML:** the standalone `load_model` frontend declares `type: seasonal`,
+indexed by a single `index`, with a **required** `period` and optional fixed
+`precision` (default `1.0`) and `ridge` (default `1e-6`). Estimating `precision`
+from YAML stays Python-API-only. Write floats in full YAML form (`1.0e-6`, not
+`1e-6`, which YAML reads as a string).
+
+```yaml
+predictor:
+  effects:
+    - {name: seas, type: seasonal, index: month, period: 12, precision: 1.0, ridge: 1.0e-6}
+```
+
 ## MIDAS smooth-lag effect
 
 `MIDAS(name, columns, precision=1.0, order=2, ridge=1e-6)` declares a
@@ -318,8 +340,18 @@ prep. See [`examples/midas_nowcast`](https://github.com/Ardea00/pylgm/tree/main/
 for an end-to-end nowcasting run that recovers a known decaying kernel.
 Parametric lag kernels (exp-Almon / Beta weight functions) are now shipped —
 see [Restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) below.
-**Not shipped**: a hybrid HF/LF nowcasting frontend and a config-file `midas`
-effect type.
+
+**From YAML:** the standalone `load_model` frontend declares `type: midas`,
+indexed by the HF lag `columns` (in place of a single `index`), with optional
+fixed `precision`, `order` (`1` or `2`), and `ridge`. Estimating `precision`
+from YAML stays Python-API-only. Write floats in full YAML form (`1.0e-6`, not
+`1e-6`, which YAML reads as a string).
+
+```yaml
+predictor:
+  effects:
+    - {name: lag, type: midas, columns: [x0, x1, x2, x3], precision: 1.0, order: 2, ridge: 1.0e-6}
+```
 
 ## SpaceTime effect (Knorr-Held interaction)
 
@@ -369,6 +401,20 @@ and temporal main effects, since the constraints assume those absorb the
 marginals. The latent field is dense `S·T`, so the >4096-dim preflight guard
 bites at large grids — real economic scale is gated on the sparse backend.
 
+**From YAML:** the standalone `load_model` frontend declares `type: spacetime`,
+indexed by **two** columns — `space` and `time` (both required) — instead of a
+single `index`. `graph` (inline) or `graph_file` (an R-INLA `.graph` or `.json`
+neighbour dict) supplies the spatial neighbours, at most one and required for
+`interaction: III`/`IV`. `interaction` (default `IV`), `order` (`1`/`2`, default
+`1`), fixed `precision` (default `1.0`), and `scale` (default `true`) are
+optional. Estimating `precision` from YAML stays Python-API-only.
+
+```yaml
+predictor:
+  effects:
+    - {name: st, type: spacetime, space: area, time: t, graph: {a: [b], b: [a]}, interaction: IV, order: 1, precision: 1.0}
+```
+
 ## Restricted MIDAS effect (parametric lag weights)
 
 `MIDASParametric(name, columns, kernel="beta", shape1=None, shape2=None, prior_precision=1e-6)`
@@ -402,6 +448,17 @@ model = LGM(
 )
 result = model.fit(frame)
 result.hyperparameters["m.shape1"]  # estimated Beta a
+```
+
+**From YAML:** the frontend declares `type: midas_parametric`, indexed by the
+lag `columns` with an optional `kernel` (`beta` or `exp_almon`, default `beta`).
+The kernel shapes are estimated — the effect's default — and fixed shape
+overrides stay Python-API-only.
+
+```yaml
+predictor:
+  effects:
+    - {name: m, type: midas_parametric, columns: [x0, x1, x2, x3], kernel: exp_almon}
 ```
 
 ## Linear constraints (`extraconstr`)

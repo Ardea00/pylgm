@@ -40,10 +40,17 @@ For the precise semantics of each shipped feature, follow the links into the
   [prediction](prediction.md).
 - **Data boundary** — Pandas, or Spark / Databricks input. See [Spark](spark.md).
 - **Declarative frontend** — models expressible in YAML via
-  `pylgm.config.load_model`, including the spatial `besag`/`proper_car`/`bym2`
-  families with an inline or file graph (`graph_file` accepts an R-INLA
-  `.graph` or a `.json` neighbour dict). See
-  [spatial effects](spatial-effects.md).
+  `pylgm.config.load_model`, including the temporal `ar1` (optionally group-wise)
+  and `seasonal` effects, the spatial `besag`/`proper_car`/`bym2` families with
+  an inline or file graph (`graph_file` accepts an R-INLA `.graph` or a `.json`
+  neighbour dict), the Knorr-Held `spacetime` interaction (types I–IV, indexed by
+  a `space`+`time` pair), the directed `sar` and its time-varying
+  `dynamicspatialpanel` (SDPD, indexed by a `unit`+`time` pair with per-period
+  inline `graphs` or a `graph_files` mapping), and the mixed-frequency `midas`
+  (smooth-lag) and `midas_parametric` (exp-Almon / Beta kernel) effects, indexed
+  by their HF lag `columns`. **Every effect is now reachable from YAML** — no
+  Python-only effects remain. See [spatial effects](spatial-effects.md) and
+  [effects](effects.md#midas-smooth-lag-effect).
 - **Sparse large-graph scaling (E-sparse)** — network and space-time models
   whose latent dimension exceeds the dense reference regime now fit past the
   dense guard through a sparse constrained-Gaussian solver, delivering posterior
@@ -70,8 +77,9 @@ For the precise semantics of each shipped feature, follow the links into the
   temporal `γ`, spatio-temporal-diffusion `η` over a balanced `unit x time`
   grid, `T=1` reducing exactly to `SAR`). Both fit past the dense guard
   through the E-sparse solver, support forward forecasting
-  (`forecast_dynamic_spatial_panel`) for future periods' networks, and `SAR`
-  is declarable from YAML (`type: sar`). See [spatial effects](spatial-effects.md)
+  (`forecast_dynamic_spatial_panel`) for future periods' networks, and both are
+  declarable from YAML (`type: sar` / `type: dynamicspatialpanel`). See
+  [spatial effects](spatial-effects.md)
   and [`examples/directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar).
 - **Diagnostics** — an empirical-Bayes estimate that lands on the edge of its
   declared interval is now reported in
@@ -92,9 +100,10 @@ For the precise semantics of each shipped feature, follow the links into the
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
 1. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-2. **Hybrid HF/LF nowcasting frontend & config-file `midas` type** — a
-   mixed-frequency nowcasting frontend and a YAML `midas` effect type, building
-   on the now-shipped `MIDASParametric` exp-Almon / Beta lag kernels.
+2. **Hybrid HF/LF nowcasting frontend** — a higher-level mixed-frequency
+   nowcasting API that handles the HF→LF lag alignment (still the caller's job
+   today). The underlying effects ship both in the Python API and as the
+   declarative `midas` / `midas_parametric` YAML types.
 
 ## Deferred (not planned for the near term)
 
