@@ -155,11 +155,12 @@ class Joint:
         """Compile and fit this joint model. Only ``engine='laplace'`` is supported."""
         import pandas as pd
 
-        from pylgm.compiler import compile_joint, compile_joint_family
+        from pylgm.compiler import compile_joint, compile_joint_family, build_joint_prediction_contexts
         from pylgm.config.schema import DataConfig
         from pylgm.data.panel import CanonicalPanel
         from pylgm.exceptions import DataContractError, UnsupportedEngineError
         from pylgm.inference.laplace import fit_laplace
+        from pylgm.model import _rebuild_result
 
         if engine != "laplace":
             raise UnsupportedEngineError(
@@ -187,15 +188,16 @@ class Joint:
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
             result = self._run_inla(family, latent_strategy)
+            compiled = compile_joint(self, panels)
         elif family is None:
-            result = fit_laplace(compile_joint(self, panels))
+            compiled = compile_joint(self, panels)
+            result = fit_laplace(compiled)
         else:
             result = self._run_empirical_bayes(family)
+            compiled = compile_joint(self, panels)
 
-        # Task 8 wires the prediction context in via
-        # build_joint_prediction_contexts (not implemented yet); until then the
-        # fit result is returned as-is, unlike LGM.fit which attaches one here.
-        return result
+        contexts = build_joint_prediction_contexts(self, panels, compiled, result)
+        return _rebuild_result(result, prediction_context=contexts)
 
     def _family_optimization_inputs(self, family):
         """Bounds, initial values and the prior penalty for this joint's hyperparameters.

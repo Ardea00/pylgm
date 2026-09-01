@@ -26,6 +26,7 @@ as is ``fitted_mean`` for the identity link and for all plug-in and
 empirical-Bayes fits.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import warnings
 
@@ -47,7 +48,9 @@ class PredictionContext:
     ``("midas", (block_name, columns_tuple))``,
     ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
     ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
-    or ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``.
+    ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``,
+    or ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
+    models only -- a shared field's predict-time design is ``scale * incidence``).
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -62,6 +65,17 @@ class PredictionContext:
     every single-response model. A joint model's per-outcome context sets this
     because its entries occupy scattered spans of the stacked latent.
     """
+
+
+@dataclass(frozen=True)
+class JointPredictionContext:
+    """Per-outcome prediction contexts for a joint model."""
+
+    contexts: Mapping[str, PredictionContext]
+
+    @property
+    def outcomes(self) -> tuple[str, ...]:
+        return tuple(self.contexts)
 
 
 def _fixed_block(spec: ModelSpec, new_data: pd.DataFrame) -> np.ndarray:
@@ -241,6 +255,28 @@ def _grouped_structured_block(
     )
 
 
+def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """Rebuild a shared field's design for one outcome: scale_k * incidence.
+
+    Named to distinguish it from ``compiler._shared_block``, which builds the
+    fit-time LatentBlock; this one rebuilds the dense predict-time design.
+    """
+    name, index, labels, scale_spec, fitted = entry
+    if index not in new_data.columns:
+        raise ValueError(f"predict() new_data is missing the index column {index!r}")
+    position_of = {label: i for i, label in enumerate(labels)}
+    block = np.zeros((len(new_data), len(labels)))
+    scale = fitted if isinstance(scale_spec, str) else float(scale_spec)
+    for row, value in enumerate(new_data[index].astype(str)):
+        if value not in position_of:
+            raise ValueError(
+                f"predict() new_data has an unseen level {value!r} in {index!r} "
+                f"for shared effect {name!r}"
+            )
+        block[row, position_of[value]] = scale
+    return block
+
+
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
     if not isinstance(new_data, pd.DataFrame) or new_data.empty:
         raise ValueError("predict() new_data must be a non-empty pandas DataFrame")
@@ -260,6 +296,8 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_dynamic_spatial_panel_block(payload, new_data))
         elif kind == "grouped_structured":
             blocks.append(_grouped_structured_block(payload, new_data))
+        elif kind == "shared":
+            blocks.append(_shared_design_block(payload, new_data))
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
     if context.column_slices:

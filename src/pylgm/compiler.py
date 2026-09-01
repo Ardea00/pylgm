@@ -67,7 +67,7 @@ from pylgm.ir import (
     ParametricDesignBlock,
     ScalableBlock,
 )
-from pylgm.inference.prediction import PredictionContext
+from pylgm.inference.prediction import JointPredictionContext, PredictionContext
 from pylgm.ir.model import LatentBlock, _block_constraints
 from pylgm.joint import Joint, _pad_block_rows
 from pylgm.likelihoods import (
@@ -742,7 +742,19 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
     for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
         mask = np.zeros(total, dtype=bool)
         mask[starts[position] : starts[position] + sizes[position]] = True
-        scalar = _estimable_scalar(model.likelihood)
+        # Gaussian's estimable scalar is `sigma`, not `phi`/`shape`, so it needs
+        # the same special case every other dispatch site in this module gives
+        # it (compile_lgm, compile_joint_family's likelihood_factory) --
+        # _estimable_scalar only ever resolves phi/shape and would otherwise
+        # leave an estimated sigma unresolved, crashing materialize().
+        if isinstance(model.likelihood, Gaussian):
+            scalar = (
+                model.likelihood.sigma
+                if isinstance(model.likelihood.sigma, Hyperparameter)
+                else None
+            )
+        else:
+            scalar = _estimable_scalar(model.likelihood)
         values = {scalar.name: scalar.initial} if scalar is not None else {}
         compiled = model.likelihood.materialize(values)
         aux = _likelihood_columns(model, frame)
@@ -1371,6 +1383,50 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     )
 
 
+def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: LatentBlock):
+    """The predict-time descriptor for one effect.
+
+    Extracted out of ``build_prediction_context`` so ``build_joint_prediction_contexts``
+    shares the exact same effect-to-entry dispatch -- the same de-duplication
+    Task 4 did for ``_build_effect_block``.
+    """
+    if isinstance(effect, Fixed):
+        spec = model_matrix(effect.formula, panel.frame).model_spec
+        return ("fixed", spec)
+    if isinstance(effect, MIDAS):
+        # No index/one-hot: the design is the raw lag columns, rebuilt directly.
+        return ("midas", (effect.name, effect.columns))
+    if isinstance(effect, MIDASParametric):
+        theta_spec = tuple(
+            s.name if isinstance(s, Hyperparameter) else float(s)
+            for s in (effect.shape1, effect.shape2)
+        )
+        return ("midas_parametric", (effect.name, effect.columns, effect.kernel, theta_spec))
+    if isinstance(effect, SpaceTime):
+        area_labels = tuple(label.split("|", 1)[0] for label in block.labels)
+        time_labels = tuple(label.split("|", 1)[1] for label in block.labels)
+        return (
+            "spacetime",
+            (effect.name, effect.space, effect.time,
+             tuple(dict.fromkeys(area_labels)), tuple(dict.fromkeys(time_labels))),
+        )
+    if isinstance(effect, DynamicSpatialPanel):
+        unit_labels = tuple(dict.fromkeys(label.split("@", 1)[0] for label in block.labels))
+        time_labels = tuple(dict.fromkeys(label.split("@", 1)[1] for label in block.labels))
+        return (
+            "dynamic_spatial_panel",
+            (effect.name, effect.unit, effect.time, unit_labels, time_labels),
+        )
+    if isinstance(effect, AR1) and effect.group is not None:
+        group_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
+        level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
+        return (
+            "grouped_structured",
+            (effect.name, effect.group, effect.index, group_labels, level_labels),
+        )
+    return ("structured", (effect.name, effect.index, block.labels))
+
+
 def build_prediction_context(
     model: "LGM", panel: CanonicalPanel, compiled: CompiledLGM
 ) -> PredictionContext:
@@ -1386,42 +1442,7 @@ def build_prediction_context(
     implied_labels: list[str] = []
     for effect in model.predictor.effects:
         block = blocks[effect.name]
-        if isinstance(effect, Fixed):
-            spec = model_matrix(effect.formula, panel.frame).model_spec
-            entries.append(("fixed", spec))
-        elif isinstance(effect, MIDAS):
-            # No index/one-hot: the design is the raw lag columns, rebuilt directly.
-            entries.append(("midas", (effect.name, effect.columns)))
-        elif isinstance(effect, MIDASParametric):
-            theta_spec = tuple(
-                s.name if isinstance(s, Hyperparameter) else float(s)
-                for s in (effect.shape1, effect.shape2)
-            )
-            entries.append(("midas_parametric", (effect.name, effect.columns, effect.kernel, theta_spec)))
-        elif isinstance(effect, SpaceTime):
-            area_labels = tuple(label.split("|", 1)[0] for label in block.labels)
-            time_labels = tuple(label.split("|", 1)[1] for label in block.labels)
-            entries.append(
-                ("spacetime", (effect.name, effect.space, effect.time,
-                               tuple(dict.fromkeys(area_labels)),
-                               tuple(dict.fromkeys(time_labels))))
-            )
-        elif isinstance(effect, DynamicSpatialPanel):
-            unit_labels = tuple(dict.fromkeys(label.split("@", 1)[0] for label in block.labels))
-            time_labels = tuple(dict.fromkeys(label.split("@", 1)[1] for label in block.labels))
-            entries.append(
-                ("dynamic_spatial_panel",
-                 (effect.name, effect.unit, effect.time, unit_labels, time_labels))
-            )
-        elif isinstance(effect, AR1) and effect.group is not None:
-            group_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
-            level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
-            entries.append(
-                ("grouped_structured",
-                 (effect.name, effect.group, effect.index, group_labels, level_labels))
-            )
-        else:
-            entries.append(("structured", (effect.name, effect.index, block.labels)))
+        entries.append(_prediction_entry(effect, model, panel, block))
         implied_labels.extend(f"{block.name}:{label}" for label in block.labels)
     if tuple(implied_labels) != compiled.labels:
         raise CompilationError(
@@ -1435,6 +1456,101 @@ def build_prediction_context(
         trials=model.likelihood.trials if isinstance(model.likelihood, Binomial) else None,
         width=compiled.design.shape[1],
     )
+
+
+def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLGM, result):
+    """One PredictionContext per outcome, each spanning the full stacked latent.
+
+    Block order is fixed by compile_joint: every sub-model's private blocks in
+    declaration order, then the shared blocks. The column span of each block is
+    read back off `compiled.blocks` so the two cannot drift apart silently.
+    """
+    spans, cursor = {}, 0
+    for block in compiled.blocks:
+        width = block.design.shape[1]
+        spans[block.name] = (cursor, cursor + width)
+        cursor += width
+
+    fitted = dict(result.hyperparameters or {})
+    contexts = {}
+    for outcome, model in zip(joint.outcomes, joint.submodels):
+        panel = panels[outcome]
+        entries, slices, used_blocks = [], [], []
+
+        for effect in model.predictor.effects:
+            block = next(
+                b for b in compiled.blocks if b.name == f"{outcome}:{effect.name}"
+            )
+            entries.append(_prediction_entry(effect, model, panel, block))
+            slices.append(spans[block.name])
+            used_blocks.append(block.name)
+
+        for entry in joint.shared:
+            block = next(b for b in compiled.blocks if b.name == entry.name)
+            scales = entry.scales_for(len(joint.submodels))
+            scale = scales[joint.outcomes.index(outcome)]
+            if isinstance(scale, Hyperparameter):
+                spec, value = scale.name, float(fitted.get(scale.name, scale.initial))
+            elif isinstance(scale, tuple):            # ("<name>", "inverse")
+                name, _ = scale
+                spec, value = name, 1.0 / float(fitted.get(name, 1.0))
+            else:
+                spec, value = float(scale), float(scale)
+            entries.append(
+                ("shared", (entry.name, entry.effect.index, block.labels, spec, value))
+            )
+            slices.append(spans[block.name])
+            used_blocks.append(block.name)
+
+        # Cross-check against compiled.blocks independently of how `used_blocks`
+        # was assembled: every block compiled for this outcome (its own
+        # `outcome:`-prefixed private blocks, plus every shared block) must be
+        # referenced exactly once. A predictor effect silently missing its
+        # block -- or a compiled block never picked up by any effect -- would
+        # otherwise leave a column span untouched (implicitly zero) in the
+        # design with nothing else to flag it.
+        expected_blocks = {b.name for b in compiled.blocks if b.name.startswith(f"{outcome}:")}
+        expected_blocks |= {entry.name for entry in joint.shared}
+        if set(used_blocks) != expected_blocks or len(used_blocks) != len(expected_blocks):
+            raise CompilationError(
+                f"joint prediction context for outcome {outcome!r} does not match "
+                "the compiled blocks for that outcome; this would silently misalign "
+                "predict()"
+            )
+
+        contexts[outcome] = PredictionContext(
+            entries=tuple(entries),
+            likelihood=_submodel_likelihood(model, panel, fitted),
+            offset=model.offset,
+            trials=model.likelihood.trials if isinstance(model.likelihood, Binomial) else None,
+            width=compiled.design.shape[1],
+            column_slices=tuple(slices),
+        )
+    return JointPredictionContext(contexts)
+
+
+def _submodel_likelihood(model: "LGM", panel: CanonicalPanel, fitted: dict):
+    """That sub-model's own compiled likelihood at the fitted scalar.
+
+    Per-outcome prediction never uses the mixture: new_data is homogeneous, so
+    response_prediction, trials and survival aux behave exactly as they do for a
+    single-response model.
+    """
+    # Gaussian's estimable scalar is `sigma`, not `phi`/`shape`, so it needs the
+    # same special case every dispatch site in this module gives it (compile_lgm,
+    # compile_joint_family's likelihood_factory) -- _estimable_scalar only ever
+    # resolves phi/shape and would otherwise leave an estimated sigma unresolved,
+    # crashing materialize().
+    if isinstance(model.likelihood, Gaussian):
+        scalar = model.likelihood.sigma if isinstance(model.likelihood.sigma, Hyperparameter) else None
+    else:
+        scalar = _estimable_scalar(model.likelihood)
+    values = (
+        {scalar.name: float(fitted[scalar.name])}
+        if scalar is not None and scalar.name in fitted
+        else ({scalar.name: scalar.initial} if scalar is not None else {})
+    )
+    return model.likelihood.materialize(values)
 
 
 def _restack_family_block(item, outcome: str, before: int, after: int):
