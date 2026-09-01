@@ -8,7 +8,7 @@ import numpy as np
 from scipy.special import gammaln, erf, gammaincc, gammainc, betainc, digamma, polygamma, gamma as gamma_fn
 
 from pylgm.links import IdentityLink, LogLink, LogitLink
-from pylgm.exceptions import DataContractError
+from pylgm.exceptions import DataContractError, ModelValidationError
 from pylgm.parameters import Hyperparameter
 
 
@@ -42,6 +42,15 @@ class _CompiledLikelihood:
     """
 
     def for_observations(self, aux: "Mapping[str, np.ndarray] | None") -> "_CompiledLikelihood":
+        return self
+
+    def restrict(self, observed: np.ndarray) -> "_CompiledLikelihood":
+        """Re-index any row-indexed internal state into the observed-row subspace.
+
+        Default is a no-op: ordinary likelihoods carry no row masks, and their
+        per-row aux vectors are bound by ``for_observations`` instead. Only
+        :class:`CompiledMixture` overrides this.
+        """
         return self
 
 
@@ -531,6 +540,106 @@ class CompiledWeibullSurv(_CompiledLikelihood):
         y = np.asarray(y, dtype=float)
         if not np.all(np.isfinite(y)) or np.any(y <= 0.0):
             raise DataContractError("survival response (follow-up time) must be positive")
+
+
+@dataclass(frozen=True, init=False)
+class CompiledMixture(_CompiledLikelihood):
+    """A likelihood that dispatches per row to one of several sub-likelihoods.
+
+    ``parts`` pairs a boolean row mask with the likelihood governing those rows.
+    The masks must be disjoint and together cover every row: an overlap would
+    double-count an observation and a gap would silently drop one from the
+    likelihood, both of which produce a plausible-looking wrong answer.
+
+    Every method of the likelihood interface is row-separable, so this is a
+    scatter over the parts and needs no change to the inference engines.
+    """
+
+    parts: tuple[tuple[np.ndarray, object], ...]
+    n_rows: int
+
+    def __init__(self, parts, n_rows: int) -> None:
+        parts = tuple((np.asarray(mask, dtype=bool), lk) for mask, lk in parts)
+        if not parts:
+            raise ModelValidationError("mixture must have at least one part")
+        n_rows = int(n_rows)
+        for mask, _ in parts:
+            if mask.ndim != 1 or mask.size != n_rows:
+                raise ModelValidationError(
+                    f"mixture masks must be 1-D boolean arrays of length {n_rows}"
+                )
+        counts = np.sum([mask.astype(np.int64) for mask, _ in parts], axis=0)
+        if np.any(counts > 1):
+            raise ModelValidationError("mixture masks must be disjoint")
+        if np.any(counts < 1):
+            raise ModelValidationError("mixture masks must cover every row")
+        object.__setattr__(self, "parts", parts)
+        object.__setattr__(self, "n_rows", n_rows)
+
+    def restrict(self, observed: np.ndarray) -> "CompiledMixture":
+        observed = np.asarray(observed, dtype=bool)
+        return CompiledMixture(
+            tuple((mask[observed], lk) for mask, lk in self.parts), int(observed.sum())
+        )
+
+    def for_observations(self, aux) -> "CompiledMixture":
+        if aux is None:
+            return self
+        return CompiledMixture(
+            tuple(
+                (mask, lk.for_observations(_mask_aux(aux, mask))) for mask, lk in self.parts
+            ),
+            self.n_rows,
+        )
+
+    def _scatter(self, method: str, *arrays: np.ndarray) -> np.ndarray:
+        out = np.zeros(self.n_rows, dtype=float)
+        for mask, likelihood in self.parts:
+            out[mask] = getattr(likelihood, method)(*(a[mask] for a in arrays))
+        return out
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(
+            sum(lk.log_likelihood(eta[mask], y[mask]) for mask, lk in self.parts)
+        )
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._scatter("gradient", eta, y)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._scatter("working_weights", eta, y)
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._scatter("third_derivative", eta, y)
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._scatter("pointwise_log_density", eta, y)
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return self._scatter("cdf", eta, y)
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return self._scatter("response_mean", eta)
+
+    def response_prediction(
+        self, eta_mean: np.ndarray, eta_variance: np.ndarray
+    ) -> np.ndarray:
+        return self._scatter("response_prediction", eta_mean, eta_variance)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        for mask, likelihood in self.parts:
+            likelihood.validate_response(y[mask])
+
+
+def _mask_aux(aux, mask: np.ndarray):
+    """Slice each aux vector down to one part's rows; ``None`` entries pass through."""
+    if aux is None:
+        return None
+    sliced = {
+        key: (None if value is None else np.asarray(value)[mask])
+        for key, value in aux.items()
+    }
+    return sliced if any(v is not None for v in sliced.values()) else None
 
 
 @dataclass(frozen=True)
