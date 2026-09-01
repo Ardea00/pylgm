@@ -677,12 +677,11 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
         total += size
 
     blocks: list[LatentBlock] = []
-    precisions: dict[str, float] = {}
     for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
         before, after = starts[position], total - starts[position] - sizes[position]
         for effect in model.predictor.effects:
             try:
-                block, precision = _build_effect_block(effect, frame)
+                block, _precision = _build_effect_block(effect, frame)
             except CompilationError as error:
                 raise CompilationError(f"{error} for outcome {outcome!r}") from error
             named = LatentBlock(
@@ -690,8 +689,6 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
                 block.precision, block.constraints,
             )
             blocks.append(_pad_block_rows(named, before, after))
-            if precision is not None:
-                precisions[f"{outcome}:{effect.name}"] = precision
 
     for entry in joint.shared:
         blocks.append(
@@ -713,6 +710,13 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
         values = {scalar.name: scalar.initial} if scalar is not None else {}
         compiled = model.likelihood.materialize(values)
         aux = _likelihood_columns(model, frame)
+        sub_observed = observed[mask]
+        try:
+            compiled.for_observations(_slice_aux(aux, sub_observed)).validate_response(
+                y[mask][sub_observed]
+            )
+        except DataContractError as error:
+            raise DataContractError(f"{error} for outcome {outcome!r}") from error
         parts.append((mask, compiled.for_observations(aux)))
     likelihood = CompiledMixture(tuple(parts), total)
 

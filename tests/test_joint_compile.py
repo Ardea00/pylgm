@@ -3,10 +3,11 @@ import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm import Fixed, IID, LGM, Poisson
+from pylgm import Beta, Fixed, IID, LGM, Poisson
 from pylgm.compiler import compile_joint, compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
+from pylgm.exceptions import DataContractError
 from pylgm.ir.model import LatentBlock
 from pylgm.joint import Joint, Shared, _pad_block_rows
 
@@ -101,6 +102,49 @@ def test_shared_effect_with_fixed_scales_enters_both_slices():
     assert dense.shape == (6, 3)
     assert dense[:3].sum() == pytest.approx(3.0)   # scale 1.0 on three oral rows
     assert dense[3:].sum() == pytest.approx(6.0)   # scale 2.0 on three larynx rows
+
+
+def test_response_validation_rejects_a_bad_response_and_names_the_outcome():
+    # oral's response violates Poisson's domain (negative count); larynx is fine.
+    # The compile must fail at compile time, not silently produce NaNs later,
+    # and the message must name which sub-model's outcome is at fault.
+    frame = _frame()
+    frame.loc[0, "oral"] = -1.0
+    panels = {"oral": _panel(frame, "oral"), "larynx": _panel(frame, "larynx")}
+    joint = Joint([
+        LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
+        LGM(response="larynx", likelihood=Poisson(), predictor=Fixed("1")),
+    ])
+
+    with pytest.raises(DataContractError, match="oral"):
+        compile_joint(joint, panels)
+
+
+def test_response_validation_is_scoped_to_each_submodels_observed_rows():
+    # The Beta domain is the open unit interval, so the 0.0 fillna sentinel used
+    # for unobserved rows is itself invalid; if validation ran over every row
+    # (observed or not) this would raise. It must not: unobserved rows are
+    # excluded from validation, exactly as compile_lgm does.
+    frame = pd.DataFrame({
+        "prop": [0.4, 0.6, 0.5, None, None, None],
+        "count": [1.0, 2.0, 3.0, 4.0, 1.0, 6.0],
+        "row": range(6),
+    })
+    prop_panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="prop", panel=())
+    )
+    count_panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="count", panel=())
+    )
+    assert prop_panel.observed.tolist() == [True, True, True, False, False, False]
+
+    joint = Joint([
+        LGM(response="prop", likelihood=Beta(), predictor=Fixed("1")),
+        LGM(response="count", likelihood=Poisson(), predictor=Fixed("1")),
+    ])
+    compiled = compile_joint(joint, {"prop": prop_panel, "count": count_panel})
+
+    assert compiled.design.shape[0] == 12
 
 
 def test_shared_block_columns_stay_aligned_when_first_seen_order_is_not_alphabetical():
