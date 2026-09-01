@@ -630,8 +630,44 @@ def _resolve_scale(scale, resolved: "dict[str, float]") -> float:
     return float(scale)
 
 
+def _effect_hyperparameters(effect) -> list[Hyperparameter]:
+    """Every Hyperparameter declared directly on one effect spec.
+
+    Covers ``precision`` (every effect) plus the effect-specific bounded/real
+    parameters (``rho``, ``phi``, ``gamma``, ``eta``, the MIDASParametric
+    shapes). Shared by ``_model_hyperparameters`` and the shared-effect guard
+    in ``_shared_block``, so both stay in sync with which fields can carry one.
+    """
+    found: list[Hyperparameter] = []
+    precision = getattr(effect, "precision", None)
+    if isinstance(precision, Hyperparameter):
+        found.append(precision)
+    if isinstance(effect, (ProperCAR, SAR, AR1)) and isinstance(effect.rho, Hyperparameter):
+        found.append(effect.rho)
+    if isinstance(effect, BYM2) and isinstance(effect.phi, Hyperparameter):
+        found.append(effect.phi)
+    if isinstance(effect, DynamicSpatialPanel):
+        for coeff in (effect.rho, effect.gamma, effect.eta):
+            if isinstance(coeff, Hyperparameter):
+                found.append(coeff)
+    if isinstance(effect, MIDASParametric):
+        for shape in (effect.shape1, effect.shape2):
+            if isinstance(shape, Hyperparameter):
+                found.append(shape)
+    return found
+
+
 def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> LatentBlock:
     """Build the shared latent block: design = sum_k scale_k * A_k over the union index."""
+    own_hyperparameters = _effect_hyperparameters(entry.effect)
+    if own_hyperparameters:
+        names = ", ".join(sorted({hp.name for hp in own_hyperparameters}))
+        raise CompilationError(
+            f"shared effect {entry.name!r} declares Hyperparameter(s) {names} on its own "
+            "precision/rho/phi/gamma/eta/shape -- estimating a shared effect's own "
+            "structural parameters is not supported yet. Pass a fixed value for "
+            "that field for now; only the Shared `scale` may be a Hyperparameter."
+        )
     levels, incidences = _shared_incidences(
         entry, frames, starts, sizes, total, joint.outcomes
     )
@@ -747,25 +783,7 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
     if isinstance(shape, Hyperparameter):
         found.append(("shape", shape))
     for effect in model.predictor.effects:
-        precision = getattr(effect, "precision", None)
-        if isinstance(precision, Hyperparameter):
-            found.append((effect.name, precision))
-        if isinstance(effect, ProperCAR) and isinstance(effect.rho, Hyperparameter):
-            found.append((effect.name, effect.rho))
-        if isinstance(effect, BYM2) and isinstance(effect.phi, Hyperparameter):
-            found.append((effect.name, effect.phi))
-        if isinstance(effect, AR1) and isinstance(effect.rho, Hyperparameter):
-            found.append((effect.name, effect.rho))
-        if isinstance(effect, SAR) and isinstance(effect.rho, Hyperparameter):
-            found.append((effect.name, effect.rho))
-        if isinstance(effect, DynamicSpatialPanel):
-            for coeff in (effect.rho, effect.gamma, effect.eta):
-                if isinstance(coeff, Hyperparameter):
-                    found.append((effect.name, coeff))
-        if isinstance(effect, MIDASParametric):
-            for shape in (effect.shape1, effect.shape2):
-                if isinstance(shape, Hyperparameter):
-                    found.append((effect.name, shape))
+        found.extend((effect.name, hp) for hp in _effect_hyperparameters(effect))
     return found
 
 
@@ -1468,6 +1486,12 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
     parameter_names: list[str] = []
     parameter_bounds: dict[str, OptimizationBounds] = {}
     parameter_priors: dict[str, object] = {}
+    # Tracks, per registered name, the exact Hyperparameter declaration that
+    # claimed it -- the same object reused across two Shared entries (the
+    # (delta, delta^-1) shorthand, or an explicit tuple) dedups; a *different*
+    # declaration reusing the name (a sub-model hyperparameter and an unrelated
+    # shared scale, say) is a collision and must raise, not silently alias.
+    registered: dict[str, Hyperparameter] = {}
 
     # Reuse compile_family per sub-model rather than duplicating its 130-line
     # effect chain, then pad and rename what it produced. A sub-model with no
@@ -1489,6 +1513,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         for item in sub_family.blocks:
             scalable.append(_restack_family_block(item, outcome, before, after))
 
+        sub_hyperparameters = {hp.name: hp for _, hp in _model_hyperparameters(model)}
         for name in sub_family.parameter_names:
             if name in parameter_names:
                 raise CompilationError(
@@ -1497,6 +1522,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
                     "so give each its own name (e.g. 'tau_oral', 'tau_larynx')."
                 )
             parameter_names.append(name)
+            registered[name] = sub_hyperparameters[name]
             if name in sub_family.parameter_bounds:
                 parameter_bounds[name] = sub_family.parameter_bounds[name]
             if name in sub_family.parameter_priors:
@@ -1532,8 +1558,17 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         names = tuple(dict.fromkeys(s.name for s in estimated))
         scalable.append(ParametricDesignBlock(template, names, build))
         for hyper in estimated:
-            if hyper.name in parameter_names:
-                continue
+            existing = registered.get(hyper.name)
+            if existing is not None:
+                if existing is hyper:
+                    continue
+                raise CompilationError(
+                    f"hyperparameter name {hyper.name!r} is declared by more than one "
+                    "sub-model/shared entry, with a different Hyperparameter object "
+                    "for each. Joint hyperparameters share one namespace, so give "
+                    "each its own name (e.g. 'tau_oral', 'tau_larynx')."
+                )
+            registered[hyper.name] = hyper
             parameter_names.append(hyper.name)
             parameter_bounds[hyper.name] = _log_bounds(hyper)
             if hyper.prior is not None:
@@ -1566,7 +1601,15 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         """
         parts = []
         for mask, model, frame in zip(masks, submodels, frames):
-            scalar = _estimable_scalar(model.likelihood)
+            # Gaussian's estimable scalar is `sigma`, not `phi`/`shape`, so it
+            # needs the same special case every other dispatch site in this
+            # module gives it (compile_lgm, compile_family) -- _estimable_scalar
+            # only ever resolves phi/shape and would otherwise leave an
+            # estimated sigma unresolved, crashing materialize().
+            if isinstance(model.likelihood, Gaussian):
+                scalar = model.likelihood.sigma if isinstance(model.likelihood.sigma, Hyperparameter) else None
+            else:
+                scalar = _estimable_scalar(model.likelihood)
             resolved = (
                 {scalar.name: float(values[scalar.name])}
                 if scalar is not None and scalar.name in values

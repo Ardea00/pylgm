@@ -140,8 +140,16 @@ block is renamed `"oral:fixed"`, giving the qualified label
 their bare name, giving `"u:district_1"`. Required because `CompiledLGM` demands
 globally unique labels and both sub-models have a `fixed` effect.
 
-Hyperparameter names are prefixed the same way, so two Gaussian sub-models get
-distinct `sigma` entries. Shared-scale hyperparameters keep the user's name.
+Hyperparameter names are **not** namespaced the way block/label names are: every
+sub-model and every `Shared` scale draws from one flat name space, and the
+compiler rejects a collision with `CompilationError` instead of prefixing
+around it. Two Gaussian sub-models must therefore be given distinct `sigma`
+names explicitly (e.g. `Gaussian(sigma=Hyperparameter("sigma_oral", ...))`), and
+a `Shared` scale's name must not collide with any sub-model hyperparameter's
+name. The one exception is deliberate reuse: the same `Hyperparameter` object
+passed to more than one `Shared` entry (or produced by the `(delta,
+delta^-1)` scalar shorthand) dedups rather than raising, since it is the same
+declaration, not a collision.
 
 ## Data flow
 
@@ -250,6 +258,13 @@ meaningful.
 - **`replicate`** — conditionally independent copies sharing hyperparameters.
 - **Latent fields in the likelihood's scale or precision** (atlas Theme 02 /
   A8). Effects still sum into the mean's linear predictor only.
+- **A `Hyperparameter` on a `Shared` effect's own structural fields**
+  (`precision`, `rho`, `phi`, `gamma`, `eta`, the MIDASParametric shapes).
+  `ParametricDesignBlock` is a design-only mechanism; combining a
+  Hyperparameter-driven precision with a Hyperparameter-driven design on one
+  block is a genuine extension. The compiler rejects it with
+  `CompilationError` at compile time -- only the `Shared.scale` may be a
+  `Hyperparameter` today, and the effect's own fields must be fixed values.
 - **YAML frontend for `Joint`.** The Python API lands first; the declarative
   surface follows once the shape is settled.
 - **Mixed-outcome `predict` in a single call.**
