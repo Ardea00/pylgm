@@ -176,3 +176,29 @@ def test_shared_block_columns_stay_aligned_when_first_seen_order_is_not_alphabet
     assert dense[3].tolist() == [2.0, 0.0, 0.0]
     assert dense[4].tolist() == [0.0, 2.0, 0.0]
     assert dense[5].tolist() == [0.0, 0.0, 2.0]
+
+
+def test_unshared_joint_factorises_into_the_separate_fits(shared_component_frame):
+    frame, _ = shared_component_frame()
+    joint = Joint([
+        LGM(response="oral", likelihood=Poisson(),
+            predictor=Fixed("1") + IID("d", index="district", precision=1.0)),
+        LGM(response="larynx", likelihood=Poisson(),
+            predictor=Fixed("1") + IID("d", index="district", precision=1.0)),
+    ])
+    together = joint.fit(frame, engine="laplace")
+
+    separate = []
+    for response in ("oral", "larynx"):
+        sub = frame[frame[response].notna()].reset_index(drop=True)
+        separate.append(
+            LGM(response=response, likelihood=Poisson(),
+                predictor=Fixed("1") + IID("d", index="district", precision=1.0)
+                ).fit(sub, engine="laplace")
+        )
+
+    assert together.log_marginal_likelihood == pytest.approx(
+        separate[0].log_marginal_likelihood + separate[1].log_marginal_likelihood, rel=1e-8
+    )
+    joint_oral = together.mean[[i for i, la in enumerate(together.labels) if la.startswith("oral:")]]
+    assert joint_oral == pytest.approx(separate[0].mean, rel=1e-6, abs=1e-8)
