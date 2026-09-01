@@ -260,3 +260,16 @@ is the same declaration, not a collision.
   surface is a natural follow-on once the shape is settled.
 - **Mixed-outcome `predict` in a single call.** `outcome=` selects exactly one
   sub-model per call.
+- **NaN-response hold-out.** `LGM.fit` keeps NaN-response rows as *unobserved*
+  (excluded from the likelihood, but still assigned fitted values on the
+  predictor). `Joint.fit` instead drops NaN-response rows per sub-model before
+  compiling, so the same hold-out idiom that works on a plain `LGM` does
+  nothing on a `Joint` sub-model — those rows are simply gone, not fitted.
+- **A shared spatial effect's graph must contain exactly the observed
+  regions.** `Besag`/`ProperCAR`/`SAR`/`BYM2` take their latent domain from
+  the graph, not the data; a node in the graph with no observed row for the
+  shared index (a common case when a graph ships from a shapefile with more
+  regions than the data covers) raises `CompilationError` rather than
+  silently padding in an unobserved region.
+- **Spark input.** `LGM.fit` accepts a Spark DataFrame as well as pandas;
+  `Joint.fit` accepts only a pandas DataFrame.

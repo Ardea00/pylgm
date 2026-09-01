@@ -575,26 +575,47 @@ def _shared_incidences(entry, frames, starts, sizes, total, outcomes=()):
     gets a latent entry -- it is simply informed by fewer rows. That is
     legitimate for genuinely ragged data and a data bug otherwise, so it is
     reported rather than silently absorbed.
+
+    Levels are kept in the column's *original* dtype (not stringified): builders
+    that key their natural order off the index (RW1/RW2, Seasonal, AR1,
+    SpaceTime's time axis, via ``ordered_observed_levels``) need the real
+    int/float/ordered-categorical values to sort or order correctly -- a string
+    column sorts lexicographically, silently reordering the latent. Every
+    sub-model must agree on that dtype; a genuine mismatch is a data bug, not
+    something to coerce silently.
     """
     index = entry.effect.index
-    per_frame: list[set] = []
-    levels: list[str] = []
+    columns = []
     for frame in frames:
         if index not in frame.columns:
             raise CompilationError(
                 f"shared effect {entry.name!r} indexes column {index!r}, "
                 "which is missing from at least one sub-model's frame"
             )
-        seen = set()
-        for value in frame[index].astype(str):
-            seen.add(value)
-            if value not in levels:
+        columns.append(frame[index])
+    for column in columns[1:]:
+        if column.dtype != columns[0].dtype:
+            raise CompilationError(
+                f"shared effect {entry.name!r} indexes column {index!r} with "
+                f"inconsistent dtypes across sub-models ({columns[0].dtype!r} vs "
+                f"{column.dtype!r}). Align the column's dtype in every sub-model's "
+                "frame before sharing it."
+            )
+
+    per_frame: list[set] = []
+    levels: list = []
+    seen_overall = set()
+    for column in columns:
+        seen = set(column.tolist())
+        for value in column.tolist():
+            if value not in seen_overall:
+                seen_overall.add(value)
                 levels.append(value)
         per_frame.append(seen)
 
     union = set(levels)
     ragged = {
-        (outcomes[i] if i < len(outcomes) else str(i)): sorted(union - seen)
+        (outcomes[i] if i < len(outcomes) else str(i)): sorted(union - seen, key=str)
         for i, seen in enumerate(per_frame)
         if union - seen
     }
@@ -613,20 +634,27 @@ def _shared_incidences(entry, frames, starts, sizes, total, outcomes=()):
     incidences = []
     for start, size, frame in zip(starts, sizes, frames):
         rows = np.arange(start, start + size)
-        cols = np.array([position_of[v] for v in frame[index].astype(str)])
+        cols = np.array([position_of[v] for v in frame[index].tolist()])
         incidences.append(
             csr_matrix((np.ones(size), (rows, cols)), shape=(total, len(levels)))
         )
     return tuple(levels), incidences
 
 
-def _resolve_scale(scale, resolved: "dict[str, float]") -> float:
-    """Turn a scale entry into a number, given current hyperparameter values."""
+def _resolve_scale(scale, resolved: "dict[str, float]", default: float = 1.0) -> float:
+    """Turn a scale entry into a number, given current hyperparameter values.
+
+    ``default`` is the pre-fit fallback for the ("<name>", "inverse") sentinel --
+    callers pass the named hyperparameter's own ``initial`` so the sentinel's
+    fallback (1/initial) matches the Hyperparameter branch's fallback
+    (``scale.initial``) for the same (delta, delta^-1) pairing, instead of a
+    bare 1.0 that only happens to agree when initial == 1.0.
+    """
     if isinstance(scale, Hyperparameter):
         return float(resolved.get(scale.name, scale.initial))
     if isinstance(scale, tuple):          # the ("<name>", "inverse") sentinel
         name, _ = scale
-        return 1.0 / float(resolved.get(name, 1.0))
+        return 1.0 / float(resolved.get(name, default))
     return float(scale)
 
 
@@ -657,6 +685,37 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
     return found
 
 
+def _realign_shared_incidences(entry, levels, template, incidences) -> list:
+    """Realign incidence columns to the effect builder's label order.
+
+    The builder is free to reorder/restrict levels (``build_iid`` sorts them
+    alphabetically; ``Besag``/``ProperCAR``/``SAR``/``BYM2`` ignore the data
+    entirely and take their labels from the graph), but the incidence columns
+    above were built off the observed union. Labels are always strings
+    (``str(level)``), so compare on that -- comparing raw-dtype ``levels``
+    against ``template.labels`` would never match once levels are ints/floats.
+
+    A graph node with no observed row for this shared index (finding I1) is
+    ambiguous which column to route it to: raise a clear error rather than
+    let ``.index()`` crash with a bare ``ValueError``.
+    """
+    label_strings = tuple(str(level) for level in levels)
+    if template.labels == label_strings:
+        return incidences
+    missing = [label for label in template.labels if label not in label_strings]
+    if missing:
+        shown = missing[:5]
+        raise CompilationError(
+            f"shared effect {entry.name!r} over index {entry.effect.index!r}: its "
+            f"latent domain includes {shown}{'...' if len(missing) > 5 else ''}, "
+            "which no sub-model observes in that column. A shared spatial effect's "
+            "graph must contain exactly the observed levels -- drop the extra "
+            "node(s) from the graph, or add rows for them to the data."
+        )
+    reorder = [label_strings.index(label) for label in template.labels]
+    return [incidence[:, reorder] for incidence in incidences]
+
+
 def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> LatentBlock:
     """Build the shared latent block: design = sum_k scale_k * A_k over the union index."""
     own_hyperparameters = _effect_hyperparameters(entry.effect)
@@ -671,20 +730,15 @@ def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> Laten
     levels, incidences = _shared_incidences(
         entry, frames, starts, sizes, total, joint.outcomes
     )
-    template, _ = _build_effect_block(entry.effect, _levels_frame(entry.effect.index, levels))
-    if template.labels != levels:
-        # The effect builder is free to reorder levels (build_iid sorts them
-        # alphabetically, independent of the row order we handed it), but the
-        # incidence columns above were built in first-seen order. Realign them
-        # to the builder's order so design columns and template.precision /
-        # template.labels index the same level -- otherwise column i of the
-        # design would carry level `levels[i]` while precision/labels claim it
-        # is `template.labels[i]`, a silent latent mislabeling.
-        reorder = [levels.index(label) for label in template.labels]
-        incidences = [incidence[:, reorder] for incidence in incidences]
+    dtype = frames[0][entry.effect.index].dtype
+    template, _ = _build_effect_block(
+        entry.effect, _levels_frame(entry.effect.index, levels, dtype)
+    )
+    incidences = _realign_shared_incidences(entry, levels, template, incidences)
     scales = entry.scales_for(len(joint.submodels))
+    default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
     design = sum(
-        _resolve_scale(scale, resolved) * incidence
+        _resolve_scale(scale, resolved, default) * incidence
         for scale, incidence in zip(scales, incidences)
     ).tocsr()
     return LatentBlock(
@@ -692,9 +746,16 @@ def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> Laten
     )
 
 
-def _levels_frame(index: str, levels: "tuple[str, ...]") -> "pd.DataFrame":
-    """A one-row-per-level frame, so the effect builder produces the union-index block."""
-    return pd.DataFrame({index: list(levels)})
+def _levels_frame(index: str, levels: tuple, dtype=None) -> "pd.DataFrame":
+    """A one-row-per-level frame, so the effect builder produces the union-index block.
+
+    ``dtype`` carries the shared column's original dtype (int/float/ordered
+    categorical/...) so a builder that orders by the index's natural order
+    (``ordered_observed_levels``) sees that order instead of Python's default
+    inference, which for an explicit ``list`` of scalars would still be right
+    for plain numeric dtypes but would silently drop declared category order.
+    """
+    return pd.DataFrame({index: pd.Series(list(levels), dtype=dtype)})
 
 
 def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledLGM:
@@ -1493,7 +1554,8 @@ def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLG
                 spec, value = scale.name, float(fitted.get(scale.name, scale.initial))
             elif isinstance(scale, tuple):            # ("<name>", "inverse")
                 name, _ = scale
-                spec, value = name, 1.0 / float(fitted.get(name, 1.0))
+                default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
+                spec, value = name, 1.0 / float(fitted.get(name, default))
             else:
                 spec, value = float(scale), float(scale)
             entries.append(
@@ -1655,19 +1717,13 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         levels, incidences = _shared_incidences(
             entry, frames, starts, sizes, total, joint.outcomes
         )
-        if template.labels != levels:
-            # Same realignment _shared_block applies internally: the effect
-            # builder is free to reorder levels (build_iid sorts them), but
-            # these incidences are built in first-seen order. Without this,
-            # column i of the rebuilt design would carry level `levels[i]`
-            # while template.precision/labels claim it is `template.labels[i]`
-            # -- a silent latent mislabeling, not a crash.
-            reorder = [levels.index(label) for label in template.labels]
-            incidences = [incidence[:, reorder] for incidence in incidences]
+        # Same realignment _shared_block applies internally.
+        incidences = _realign_shared_incidences(entry, levels, template, incidences)
+        default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
 
-        def build(values, scales=scales, incidences=incidences):
+        def build(values, scales=scales, incidences=incidences, default=default):
             return sum(
-                _resolve_scale(scale, values) * incidence
+                _resolve_scale(scale, values, default) * incidence
                 for scale, incidence in zip(scales, incidences)
             ).tocsr()
 

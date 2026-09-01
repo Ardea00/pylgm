@@ -3,11 +3,11 @@ import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm import Beta, Fixed, IID, LGM, Poisson
+from pylgm import Beta, Besag, Fixed, IID, LGM, Poisson, RW1
 from pylgm.compiler import compile_joint, compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
-from pylgm.exceptions import DataContractError
+from pylgm.exceptions import CompilationError, DataContractError
 from pylgm.ir.model import LatentBlock
 from pylgm.joint import Joint, Shared, _pad_block_rows
 
@@ -35,9 +35,13 @@ def test_pad_block_rows_zero_pads_design_and_preserves_everything_else():
 
 
 def test_pad_block_rows_with_no_padding_is_an_identity_on_the_design():
+    # The actual contract is the early-return itself -- no padding means no new
+    # sparse blocks/vstack, the same object comes back. Comparing arrays would
+    # pass even if the function rebuilt an equal-but-different object, which is
+    # not what this is guarding.
     block = _block()
     padded = _pad_block_rows(block, before=0, after=0)
-    assert np.allclose(padded.design.toarray(), block.design.toarray())
+    assert padded is block
 
 
 def _frame():
@@ -202,3 +206,77 @@ def test_unshared_joint_factorises_into_the_separate_fits(shared_component_frame
     )
     joint_oral = together.mean[[i for i, la in enumerate(together.labels) if la.startswith("oral:")]]
     assert joint_oral == pytest.approx(separate[0].mean, rel=1e-6, abs=1e-8)
+
+
+def _rw1_labels_match_private(index_values):
+    # Finding C1: a shared RW1's levels used to route through str(...), so an
+    # int/float index sorted lexicographically ('1','10','11',...) instead of
+    # numerically -- silently smoothing the wrong neighbours. A private RW1
+    # over the same column is ground truth for the correct order.
+    n = len(index_values)
+    counts = [float(i % 4) for i in range(n)]  # Poisson-valid response, independent of the index
+    frame = pd.DataFrame({
+        "period": index_values * 2,
+        "oral": counts + [None] * n,
+        "larynx": [None] * n + counts,
+        "row": range(2 * n),
+    })
+    oral_panel = _panel(frame, "oral")
+    larynx_panel = _panel(frame, "larynx")
+
+    private_model = LGM(
+        response="oral", likelihood=Poisson(), predictor=RW1("period_effect", index="period")
+    )
+    private_compiled = compile_lgm(private_model, oral_panel)
+    private_labels = next(
+        b for b in private_compiled.blocks if b.name == "period_effect"
+    ).labels
+
+    joint = Joint(
+        [LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
+         LGM(response="larynx", likelihood=Poisson(), predictor=Fixed("1"))],
+        shared=[Shared(RW1("period_effect", index="period"))],
+    )
+    joint_compiled = compile_joint(joint, {"oral": oral_panel, "larynx": larynx_panel})
+    shared_labels = next(
+        b for b in joint_compiled.blocks if b.name == "period_effect"
+    ).labels
+
+    return private_labels, shared_labels
+
+
+def test_shared_rw1_over_integer_index_matches_the_private_labels():
+    years = list(range(1, 13))  # 1..12: lexicographic order would scramble this
+    private_labels, shared_labels = _rw1_labels_match_private(years)
+    assert shared_labels == private_labels
+    assert shared_labels == tuple(str(y) for y in years)
+
+
+def test_shared_rw1_over_float_index_matches_the_private_labels():
+    values = [1.5, 2.5, 3.5, 10.5, 11.5, 12.5]
+    private_labels, shared_labels = _rw1_labels_match_private(values)
+    assert shared_labels == private_labels
+    assert shared_labels == tuple(str(v) for v in values)
+
+
+def test_shared_spatial_effect_with_an_unobserved_graph_node_raises_clearly():
+    # Finding I1: Besag/ProperCAR/SAR/BYM2 take their latent domain from the
+    # graph, not the data. A graph node with no observed row for the shared
+    # index used to blow up inside `tuple.index(x)` with no mention of the
+    # shared effect or the missing node -- a normal situation whenever a graph
+    # ships with more regions than the data (e.g. from a shapefile).
+    frame = _frame()  # districts a, b, c
+    panels = {"oral": _panel(frame, "oral"), "larynx": _panel(frame, "larynx")}
+    graph = {
+        "a": ["b"], "b": ["a", "c"], "c": ["b", "d"], "d": ["c"],  # "d" unobserved
+    }
+    joint = Joint(
+        [LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
+         LGM(response="larynx", likelihood=Poisson(), predictor=Fixed("1"))],
+        shared=[Shared(Besag("region", index="district", graph=graph))],
+    )
+
+    with pytest.raises(CompilationError, match="region") as excinfo:
+        compile_joint(joint, panels)
+    assert "district" in str(excinfo.value)
+    assert "d" in str(excinfo.value)

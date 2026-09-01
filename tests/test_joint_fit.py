@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from pylgm import Fixed, Gaussian, IID, LGM, Poisson
-from pylgm.exceptions import CompilationError
+from pylgm.exceptions import CompilationError, UnsupportedEngineError
 from pylgm.joint import Joint, Shared
 from pylgm.parameters import Hyperparameter
 
@@ -45,7 +45,7 @@ def test_joint_rejects_the_exact_gaussian_engine(shared_component_frame):
         LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
         LGM(response="larynx", likelihood=Poisson(), predictor=Fixed("1")),
     ])
-    with pytest.raises(Exception, match="exact_gaussian"):
+    with pytest.raises(UnsupportedEngineError, match="exact_gaussian"):
         joint.fit(frame, engine="exact_gaussian")
 
 

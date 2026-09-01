@@ -92,9 +92,12 @@ For the precise semantics of each shipped feature, follow the links into the
   under a per-sub-model scaling, including the Knorr-Held & Best `(delta,
   delta⁻¹)` shared-component pairing for exactly two sub-models. Fits by
   `engine="laplace"` only; per-outcome prediction via
-  `result.predict(new_data, outcome=...)`. This covers R-INLA's `copy` for the
-  shared-field-with-estimated-scale case, but **not** off-block-diagonal
-  precision coupling (coregionalization) or `copy`/`replicate` within a single
+  `result.predict(new_data, outcome=...)`. This covers the *scaling* half of
+  R-INLA's `copy` — a shared field entering another sub-model under an
+  estimated multiplicative scale — but the copied field's own hyperparameters
+  (precision, rho, phi, ...) must stay fixed, unlike `copy`, which estimates
+  those too. It also does **not** cover off-block-diagonal precision coupling
+  (coregionalization) or `copy`/`replicate` within a single
   sub-model — see [joint models](joint-models.md#not-supported-yet).
 
 ## Breaking changes in 0.6

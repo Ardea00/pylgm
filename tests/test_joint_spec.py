@@ -1,7 +1,12 @@
+import pandas as pd
 import pytest
 
 from pylgm import Fixed, Gaussian, IID, LGM, Poisson
+from pylgm.compiler import compile_joint
+from pylgm.config.schema import DataConfig
+from pylgm.data.panel import CanonicalPanel
 from pylgm.joint import Joint, Shared
+from pylgm.likelihoods import CompiledGaussian, CompiledMixture, CompiledPoisson
 from pylgm.parameters import Hyperparameter
 
 
@@ -59,9 +64,39 @@ def test_allow_ragged_defaults_to_false_and_must_be_a_bool():
         Shared(IID("u", index="district"), allow_ragged="yes")
 
 
+def test_shared_rejects_an_effect_with_no_index_at_declaration_time():
+    # Finding I2: Fixed (and MIDAS/MIDASParametric/SpaceTime/
+    # DynamicSpatialPanel) pass the __post_init__ `hasattr(effect, "name")`
+    # check but have no `.index` -- Shared(Fixed("1")) used to construct fine
+    # and only die later, at fit time, with an unrelated AttributeError.
+    with pytest.raises(TypeError, match="index"):
+        Shared(Fixed("1"))
+
+
 def test_mixed_likelihoods_are_allowed():
+    # A Joint duplicating test_joint_exposes_outcomes_in_declaration_order's
+    # assertion would prove nothing about "mixed": this one actually compiles a
+    # Gaussian + Poisson joint and checks the resulting CompiledMixture really
+    # dispatches two different likelihood types, not just two outcome names.
     joint = Joint([
         LGM(response="cd4", likelihood=Gaussian(sigma=1.0), predictor=Fixed("1")),
         LGM(response="event", likelihood=Poisson(), predictor=Fixed("1")),
     ])
     assert joint.outcomes == ("cd4", "event")
+
+    frame = pd.DataFrame({
+        "cd4": [1.0, 2.0, 3.0, None, None, None],
+        "event": [None, None, None, 1.0, 0.0, 2.0],
+        "row": range(6),
+    })
+
+    def panel(response):
+        sub = frame[frame[response].notna()].reset_index(drop=True)
+        return CanonicalPanel.from_frame(sub, DataConfig(time="row", response=response, panel=()))
+
+    panels = {"cd4": panel("cd4"), "event": panel("event")}
+    compiled = compile_joint(joint, panels)
+
+    assert isinstance(compiled.likelihood, CompiledMixture)
+    kinds = {type(part_likelihood) for _, part_likelihood in compiled.likelihood.parts}
+    assert kinds == {CompiledGaussian, CompiledPoisson}

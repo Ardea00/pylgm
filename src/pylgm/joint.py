@@ -71,6 +71,14 @@ class Shared:
     def __post_init__(self) -> None:
         if not hasattr(self.effect, "name"):
             raise TypeError("Shared effect must be a latent effect spec")
+        if not hasattr(self.effect, "index"):
+            raise TypeError(
+                f"Shared effect {self.effect!r} has no `index` -- a shared effect "
+                "must be indexed (IID, RW1/RW2, AR1, Seasonal, Besag, ProperCAR, "
+                "SAR, BYM2), so it can be summed across sub-models over a common "
+                "level set. Fixed/MIDAS/MIDASParametric/SpaceTime/"
+                "DynamicSpatialPanel effects cannot be shared."
+            )
         if not isinstance(self.allow_ragged, bool):
             raise TypeError("Shared allow_ragged must be a bool")
         scale = self.scale
