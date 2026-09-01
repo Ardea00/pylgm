@@ -28,9 +28,13 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     # rows, so bind their trials. For every other likelihood this returns self.
     # `restrict` re-indexes any row-indexed internal state (a mixture's masks)
     # into observed-row space first; it is a no-op for every other likelihood.
-    likelihood = likelihood.restrict(observed)
-    _trials = getattr(likelihood, "trials", None)
-    lk_obs = likelihood.for_observations({"trials": _trials[observed]} if _trials is not None else None)
+    # Bind the restricted likelihood to its own name: `likelihood` itself must
+    # stay full-row, since `response_prediction` below runs over every row.
+    observed_likelihood = likelihood.restrict(observed)
+    _trials = getattr(observed_likelihood, "trials", None)
+    lk_obs = observed_likelihood.for_observations(
+        {"trials": _trials[observed]} if _trials is not None else None
+    )
     lk_obs.validate_response(y_obs)
 
     basis = _constraint_null_space(model.constraints, latent_size)
@@ -167,7 +171,9 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
         fitted_mean=fitted_mean,
-        link_name=likelihood.link.name,
+        # A CompiledMixture has no single link -- its parts may use different
+        # ones -- so report a truthful "mixture" rather than borrowing one part's.
+        link_name=likelihood.link.name if hasattr(likelihood, "link") else "mixture",
         block_slices=_block_slices(model),
         diagnostics={
             "latent_dimension": int(latent_size),

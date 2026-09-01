@@ -1,7 +1,11 @@
 import numpy as np
+import pandas as pd
 import pytest
 
+from pylgm.effects.fixed import build_fixed
 from pylgm.exceptions import DataContractError, ModelValidationError
+from pylgm.inference.laplace import fit_laplace
+from pylgm.ir.model import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian, CompiledMixture, CompiledPoisson
 
 
@@ -66,3 +70,46 @@ def test_restrict_reindexes_masks_into_observed_space():
 def test_restrict_defaults_to_self_for_ordinary_likelihoods():
     likelihood = CompiledPoisson()
     assert likelihood.restrict(np.array([True, False])) is likelihood
+
+
+def _mixture_model_with_unobserved_row() -> CompiledLGM:
+    """A single-intercept model, one row unobserved, likelihood a CompiledMixture.
+
+    Rows 0-1 are Gaussian, rows 2-4 are Poisson; row 4 is unobserved. This is
+    the shape that trips Finding 1: `restrict` shrinks the mixture's masks to
+    the 4 observed rows, so if the Laplace engine ever indexed those shrunk
+    masks against the full 5-row `design`/`predictive_mean` arrays, `_scatter`
+    would raise an IndexError (or silently misalign, were the sizes to match).
+    """
+    n = 5
+    frame = pd.DataFrame({"y": [1.0, 2.0, 3.0, 5.0, np.nan]})
+    fixed_block = build_fixed(frame, "1", 1e-6)
+    mask_gaussian = np.array([True, True, False, False, False])
+    mask_poisson = ~mask_gaussian
+    likelihood = CompiledMixture(
+        ((mask_gaussian, CompiledGaussian(1.0)), (mask_poisson, CompiledPoisson())), n
+    )
+    return CompiledLGM(
+        y=frame["y"].to_numpy(dtype=float),
+        observed=np.array([True, True, True, True, False]),
+        offset=np.zeros(n),
+        design=fixed_block.design,
+        precision=fixed_block.precision,
+        constraints=fixed_block.constraints,
+        labels=tuple(f"{fixed_block.name}:{label}" for label in fixed_block.labels),
+        likelihood=likelihood,
+        blocks=(fixed_block,),
+    )
+
+
+def test_fit_laplace_completes_for_mixture_with_unobserved_row():
+    model = _mixture_model_with_unobserved_row()
+    result = fit_laplace(model)
+    assert result.predictive_mean.shape == (5,)
+    assert np.isfinite(result.predictive_mean).all()
+
+
+def test_fit_laplace_reports_mixture_link_name():
+    model = _mixture_model_with_unobserved_row()
+    result = fit_laplace(model)
+    assert result.link_name == "mixture"
