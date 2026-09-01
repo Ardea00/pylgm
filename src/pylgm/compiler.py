@@ -2,6 +2,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 from formulaic import model_matrix
 from formulaic.errors import FormulaicError
 from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity
@@ -68,11 +69,13 @@ from pylgm.ir import (
 )
 from pylgm.inference.prediction import PredictionContext
 from pylgm.ir.model import LatentBlock, _block_constraints
+from pylgm.joint import Joint, _pad_block_rows
 from pylgm.likelihoods import (
     Bernoulli,
     Beta,
     Binomial,
     CompiledGaussian,
+    CompiledMixture,
     ExponentialSurv,
     Gamma,
     Gaussian,
@@ -352,6 +355,109 @@ def _slice_aux(aux: "dict | None", observed: "np.ndarray") -> "dict | None":
     return {k: (v[observed] if v is not None else None) for k, v in aux.items()}
 
 
+def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
+    """Build one latent block from an effect spec. Shared by compile_lgm and compile_joint.
+
+    Returns ``(block, precision)`` where ``precision`` is the resolved precision
+    value to record under the effect's own name, or ``None`` for effects that
+    do not carry one (Fixed, MIDASParametric).
+    """
+    try:
+        if isinstance(effect, Fixed):
+            block = build_fixed(frame, effect.formula, effect.prior_precision)
+            precision = None
+        elif isinstance(effect, IID):
+            precision = _resolved_precision(effect.precision)
+            block = build_iid(frame, effect.name, effect.index, precision)
+        elif isinstance(effect, Besag):
+            precision = _resolved_precision(effect.precision)
+            block = build_besag(
+                frame, effect.name, effect.index, dict(effect.graph), precision, effect.scale
+            )
+        elif isinstance(effect, ProperCAR):
+            precision = _resolved_precision(effect.precision)
+            rho = _resolved_precision(effect.rho)
+            block = build_proper_car(
+                frame, effect.name, effect.index, dict(effect.graph), rho, precision
+            )
+        elif isinstance(effect, SAR):
+            precision = _resolved_precision(effect.precision)
+            rho = _resolved_precision(effect.rho)
+            block = build_sar(
+                frame, effect.name, effect.index, dict(effect.graph), rho, precision
+            )
+        elif isinstance(effect, DynamicSpatialPanel):
+            precision = _resolved_precision(effect.precision)
+            block = build_dynamic_spatial_panel(
+                frame, effect.name, effect.unit, effect.time,
+                {t: dict(g) for t, g in dict(effect.graphs).items()},
+                _resolved_precision(effect.rho),
+                _resolved_precision(effect.gamma),
+                _resolved_precision(effect.eta),
+                precision,
+            )
+        elif isinstance(effect, BYM2):
+            precision = _resolved_precision(effect.precision)
+            phi = _resolved_precision(effect.phi) if isinstance(effect.phi, Hyperparameter) else effect.phi
+            block = build_bym2(
+                frame, effect.name, effect.index, dict(effect.graph), precision, phi
+            )
+        elif isinstance(effect, AR1):
+            precision = _resolved_precision(effect.precision)
+            rho = _resolved_precision(effect.rho) if isinstance(effect.rho, Hyperparameter) else effect.rho
+            block = build_ar1(
+                frame, effect.name, effect.index, precision, rho, effect.group
+            )
+        elif isinstance(effect, (RW1, RW2)):
+            precision = _resolved_precision(effect.precision)
+            order = 1 if isinstance(effect, RW1) else 2
+            block = build_random_walk(
+                frame, effect.name, effect.index, precision, order
+            )
+        elif isinstance(effect, Seasonal):
+            precision = _resolved_precision(effect.precision)
+            block = build_seasonal(
+                frame, effect.name, effect.index, precision, effect.period, effect.ridge
+            )
+        elif isinstance(effect, MIDAS):
+            precision = _resolved_precision(effect.precision)
+            block = build_midas(
+                frame, effect.name, effect.columns, precision, effect.order, effect.ridge
+            )
+        elif isinstance(effect, MIDASParametric):
+            precision = None
+            theta = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
+            block = build_midas_parametric(
+                frame, effect.name, effect.columns, effect.kernel, theta, effect.prior_precision
+            )
+        elif isinstance(effect, SpaceTime):
+            precision = _resolved_precision(effect.precision)
+            block = build_spacetime(
+                frame, effect.name, effect.space, effect.time,
+                dict(effect.graph) if effect.graph is not None else None,
+                effect.interaction, effect.order, precision, effect.scale,
+            )
+        else:
+            # An unrecognized effect must not fall through to the random-walk
+            # builder: that silently mis-compiles it as an RW2.
+            raise CompilationError(
+                f"unsupported effect type: {type(effect).__name__}"
+            )
+    except (
+        DataContractError,
+        FormulaicError,
+        ModelValidationError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise CompilationError(
+            f"failed to compile effect {effect.name!r}: "
+            f"{_effect_failure_detail(error, frame)}"
+        ) from error
+    return block, precision
+
+
 def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     """Compile a declarative model through the existing sparse effect builders."""
     if panel.response != model.response:
@@ -363,108 +469,9 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     blocks: list[LatentBlock] = []
     precisions: dict[str, float] = {}
     for effect in model.predictor.effects:
-        try:
-            if isinstance(effect, Fixed):
-                block = build_fixed(frame, effect.formula, effect.prior_precision)
-            elif isinstance(effect, IID):
-                precision = _resolved_precision(effect.precision)
-                block = build_iid(frame, effect.name, effect.index, precision)
-                precisions[effect.name] = precision
-            elif isinstance(effect, Besag):
-                precision = _resolved_precision(effect.precision)
-                block = build_besag(
-                    frame, effect.name, effect.index, dict(effect.graph), precision, effect.scale
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, ProperCAR):
-                precision = _resolved_precision(effect.precision)
-                rho = _resolved_precision(effect.rho)
-                block = build_proper_car(
-                    frame, effect.name, effect.index, dict(effect.graph), rho, precision
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, SAR):
-                precision = _resolved_precision(effect.precision)
-                rho = _resolved_precision(effect.rho)
-                block = build_sar(
-                    frame, effect.name, effect.index, dict(effect.graph), rho, precision
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, DynamicSpatialPanel):
-                precision = _resolved_precision(effect.precision)
-                block = build_dynamic_spatial_panel(
-                    frame, effect.name, effect.unit, effect.time,
-                    {t: dict(g) for t, g in dict(effect.graphs).items()},
-                    _resolved_precision(effect.rho),
-                    _resolved_precision(effect.gamma),
-                    _resolved_precision(effect.eta),
-                    precision,
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, BYM2):
-                precision = _resolved_precision(effect.precision)
-                phi = _resolved_precision(effect.phi) if isinstance(effect.phi, Hyperparameter) else effect.phi
-                block = build_bym2(
-                    frame, effect.name, effect.index, dict(effect.graph), precision, phi
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, AR1):
-                precision = _resolved_precision(effect.precision)
-                rho = _resolved_precision(effect.rho) if isinstance(effect.rho, Hyperparameter) else effect.rho
-                block = build_ar1(
-                    frame, effect.name, effect.index, precision, rho, effect.group
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, (RW1, RW2)):
-                precision = _resolved_precision(effect.precision)
-                order = 1 if isinstance(effect, RW1) else 2
-                block = build_random_walk(
-                    frame, effect.name, effect.index, precision, order
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, Seasonal):
-                precision = _resolved_precision(effect.precision)
-                block = build_seasonal(
-                    frame, effect.name, effect.index, precision, effect.period, effect.ridge
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, MIDAS):
-                precision = _resolved_precision(effect.precision)
-                block = build_midas(
-                    frame, effect.name, effect.columns, precision, effect.order, effect.ridge
-                )
-                precisions[effect.name] = precision
-            elif isinstance(effect, MIDASParametric):
-                theta = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
-                block = build_midas_parametric(
-                    frame, effect.name, effect.columns, effect.kernel, theta, effect.prior_precision
-                )
-            elif isinstance(effect, SpaceTime):
-                precision = _resolved_precision(effect.precision)
-                block = build_spacetime(
-                    frame, effect.name, effect.space, effect.time,
-                    dict(effect.graph) if effect.graph is not None else None,
-                    effect.interaction, effect.order, precision, effect.scale,
-                )
-                precisions[effect.name] = precision
-            else:
-                # An unrecognized effect must not fall through to the random-walk
-                # builder: that silently mis-compiles it as an RW2.
-                raise CompilationError(
-                    f"unsupported effect type: {type(effect).__name__}"
-                )
-        except (
-            DataContractError,
-            FormulaicError,
-            ModelValidationError,
-            KeyError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise CompilationError(
-                f"failed to compile effect {effect.name!r}: "
-                f"{_effect_failure_detail(error, frame)}"
-            ) from error
+        block, precision = _build_effect_block(effect, frame)
+        if precision is not None:
+            precisions[effect.name] = precision
         blocks.append(block)
 
     _warn_missing_spacetime_main_effects(model.predictor.effects)
@@ -548,6 +555,180 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
     raise CompilationError("unsupported likelihood for declarative compilation")
+
+
+def _offset_vector(model: "LGM", frame) -> np.ndarray:
+    if model.offset is None:
+        return np.zeros(len(frame))
+    if model.offset not in frame.columns:
+        raise DataContractError(f"offset column not found: {model.offset!r}")
+    values = frame[model.offset].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise CompilationError(f"offset column {model.offset!r} must be finite")
+    return values
+
+
+def _shared_incidences(entry, frames, starts, sizes, total, outcomes=()):
+    """Per-slice incidence matrices A_k of the shared index over the union of levels.
+
+    The latent spans the union, so a level seen in only some sub-models still
+    gets a latent entry -- it is simply informed by fewer rows. That is
+    legitimate for genuinely ragged data and a data bug otherwise, so it is
+    reported rather than silently absorbed.
+    """
+    index = entry.effect.index
+    per_frame: list[set] = []
+    levels: list[str] = []
+    for frame in frames:
+        if index not in frame.columns:
+            raise CompilationError(
+                f"shared effect {entry.name!r} indexes column {index!r}, "
+                "which is missing from at least one sub-model's frame"
+            )
+        seen = set()
+        for value in frame[index].astype(str):
+            seen.add(value)
+            if value not in levels:
+                levels.append(value)
+        per_frame.append(seen)
+
+    union = set(levels)
+    ragged = {
+        (outcomes[i] if i < len(outcomes) else str(i)): sorted(union - seen)
+        for i, seen in enumerate(per_frame)
+        if union - seen
+    }
+    if ragged and not entry.allow_ragged:
+        detail = "; ".join(
+            f"{outcome} is missing {missing[:5]}{'...' if len(missing) > 5 else ''}"
+            for outcome, missing in ragged.items()
+        )
+        raise CompilationError(
+            f"shared effect {entry.name!r} has a ragged index {index!r}: {detail}. "
+            "The latent spans the union of levels, so this is supported, but it is "
+            "reported because an unintended mismatch silently weakens the shared "
+            "field. Pass allow_ragged=True on the Shared to accept it."
+        )
+    position_of = {level: i for i, level in enumerate(levels)}
+    incidences = []
+    for start, size, frame in zip(starts, sizes, frames):
+        rows = np.arange(start, start + size)
+        cols = np.array([position_of[v] for v in frame[index].astype(str)])
+        incidences.append(
+            csr_matrix((np.ones(size), (rows, cols)), shape=(total, len(levels)))
+        )
+    return tuple(levels), incidences
+
+
+def _resolve_scale(scale, resolved: "dict[str, float]") -> float:
+    """Turn a scale entry into a number, given current hyperparameter values."""
+    if isinstance(scale, Hyperparameter):
+        return float(resolved.get(scale.name, scale.initial))
+    if isinstance(scale, tuple):          # the ("<name>", "inverse") sentinel
+        name, _ = scale
+        return 1.0 / float(resolved.get(name, 1.0))
+    return float(scale)
+
+
+def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> LatentBlock:
+    """Build the shared latent block: design = sum_k scale_k * A_k over the union index."""
+    levels, incidences = _shared_incidences(
+        entry, frames, starts, sizes, total, joint.outcomes
+    )
+    template, _ = _build_effect_block(entry.effect, _levels_frame(entry.effect.index, levels))
+    if template.labels != levels:
+        # The effect builder is free to reorder levels (build_iid sorts them
+        # alphabetically, independent of the row order we handed it), but the
+        # incidence columns above were built in first-seen order. Realign them
+        # to the builder's order so design columns and template.precision /
+        # template.labels index the same level -- otherwise column i of the
+        # design would carry level `levels[i]` while precision/labels claim it
+        # is `template.labels[i]`, a silent latent mislabeling.
+        reorder = [levels.index(label) for label in template.labels]
+        incidences = [incidence[:, reorder] for incidence in incidences]
+    scales = entry.scales_for(len(joint.submodels))
+    design = sum(
+        _resolve_scale(scale, resolved) * incidence
+        for scale, incidence in zip(scales, incidences)
+    ).tocsr()
+    return LatentBlock(
+        entry.name, template.labels, design, template.precision, template.constraints
+    )
+
+
+def _levels_frame(index: str, levels: "tuple[str, ...]") -> "pd.DataFrame":
+    """A one-row-per-level frame, so the effect builder produces the union-index block."""
+    return pd.DataFrame({index: list(levels)})
+
+
+def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledLGM:
+    """Compile a Joint into one stacked CompiledLGM.
+
+    Row slices follow sub-model declaration order. Block order is every
+    sub-model's private blocks in order, then the shared blocks -- fixed here
+    because the prediction contexts assert against it.
+    """
+    outcomes = joint.outcomes
+    frames = [panels[name].frame for name in outcomes]
+    sizes = [len(frame) for frame in frames]
+    starts, total = [], 0
+    for size in sizes:
+        starts.append(total)
+        total += size
+
+    blocks: list[LatentBlock] = []
+    precisions: dict[str, float] = {}
+    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
+        before, after = starts[position], total - starts[position] - sizes[position]
+        for effect in model.predictor.effects:
+            try:
+                block, precision = _build_effect_block(effect, frame)
+            except CompilationError as error:
+                raise CompilationError(f"{error} for outcome {outcome!r}") from error
+            named = LatentBlock(
+                f"{outcome}:{block.name}", block.labels, block.design,
+                block.precision, block.constraints,
+            )
+            blocks.append(_pad_block_rows(named, before, after))
+            if precision is not None:
+                precisions[f"{outcome}:{effect.name}"] = precision
+
+    for entry in joint.shared:
+        blocks.append(
+            _shared_block(entry, joint, frames, starts, sizes, total, resolved={})
+        )
+
+    y = np.concatenate([
+        frame[name].fillna(0.0).to_numpy(dtype=float)
+        for name, frame in zip(outcomes, frames)
+    ])
+    observed = np.concatenate([panels[name].observed for name in outcomes])
+    offset = np.concatenate([_offset_vector(model, frame) for model, frame in zip(joint.submodels, frames)])
+
+    parts = []
+    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
+        mask = np.zeros(total, dtype=bool)
+        mask[starts[position] : starts[position] + sizes[position]] = True
+        scalar = _estimable_scalar(model.likelihood)
+        values = {scalar.name: scalar.initial} if scalar is not None else {}
+        compiled = model.likelihood.materialize(values)
+        aux = _likelihood_columns(model, frame)
+        parts.append((mask, compiled.for_observations(aux)))
+    likelihood = CompiledMixture(tuple(parts), total)
+
+    width = sum(block.design.shape[1] for block in blocks)
+    design = hstack([block.design for block in blocks], format="csr")
+    precision = block_diag([block.precision for block in blocks], format="csr")
+    constraints = _block_constraints(tuple(blocks), width)
+    labels = _qualified_labels(blocks)
+    try:
+        return CompiledLGM(
+            y=y, observed=observed, offset=offset, design=design, precision=precision,
+            constraints=constraints, labels=labels, likelihood=likelihood,
+            blocks=tuple(blocks),
+        )
+    except (TypeError, ValueError, ModelValidationError) as error:
+        raise CompilationError(f"compiled joint model is invalid: {error}") from error
 
 
 def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:

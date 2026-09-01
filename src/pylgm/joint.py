@@ -141,3 +141,11 @@ class Joint:
     @property
     def outcomes(self) -> tuple[str, ...]:
         return tuple(model.response for model in self.submodels)
+
+    @classmethod
+    def _unchecked(cls, submodels, shared=()):
+        """Bypass the two-sub-model minimum. Test-only: used by the reduction test."""
+        obj = object.__new__(cls)
+        object.__setattr__(obj, "submodels", tuple(submodels))
+        object.__setattr__(obj, "shared", tuple(shared))
+        return obj
