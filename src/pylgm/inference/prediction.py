@@ -55,6 +55,13 @@ class PredictionContext:
     offset: str | None
     trials: str | None = None
     width: int = 0
+    column_slices: tuple[tuple[int, int], ...] = ()
+    """Per-entry ``(start, stop)`` column spans in the fitted latent.
+
+    Empty means the entries are contiguous and gapless from column 0, which is
+    every single-response model. A joint model's per-outcome context sets this
+    because its entries occupy scattered spans of the stacked latent.
+    """
 
 
 def _fixed_block(spec: ModelSpec, new_data: pd.DataFrame) -> np.ndarray:
@@ -255,7 +262,21 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
             blocks.append(_grouped_structured_block(payload, new_data))
         else:
             raise ValueError(f"predict() context has an unknown block kind {kind!r}")
-    design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))
+    if context.column_slices:
+        if len(context.column_slices) != len(blocks):
+            raise ValueError(
+                "predict() context column_slices must align one-to-one with entries"
+            )
+        design = np.zeros((len(new_data), context.width))
+        for block, (start, stop) in zip(blocks, context.column_slices):
+            if stop - start != block.shape[1]:
+                raise ValueError(
+                    f"predict() rebuilt a block of width {block.shape[1]} for a "
+                    f"column span of width {stop - start}"
+                )
+            design[:, start:stop] = block
+    else:
+        design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))
     # Defence in depth against a block silently losing rows: a length-1 design
     # would broadcast against the offset and fabricate a prediction for every
     # requested row.
