@@ -149,3 +149,122 @@ class Joint:
         object.__setattr__(obj, "submodels", tuple(submodels))
         object.__setattr__(obj, "shared", tuple(shared))
         return obj
+
+    def fit(self, frame, engine: str = "laplace", *, hyperparameters: str = "optimize",
+            latent_strategy: str = "gaussian"):
+        """Compile and fit this joint model. Only ``engine='laplace'`` is supported."""
+        import pandas as pd
+
+        from pylgm.compiler import compile_joint, compile_joint_family
+        from pylgm.config.schema import DataConfig
+        from pylgm.data.panel import CanonicalPanel
+        from pylgm.exceptions import DataContractError, UnsupportedEngineError
+        from pylgm.inference.laplace import fit_laplace
+
+        if engine != "laplace":
+            raise UnsupportedEngineError(
+                "Joint models require engine='laplace'; the exact_gaussian engine "
+                "needs a single CompiledGaussian likelihood, and a mixture is not one. "
+                "Laplace is exact for an all-Gaussian stack anyway."
+            )
+        if not isinstance(frame, pd.DataFrame):
+            raise DataContractError("frame must be a Pandas DataFrame")
+
+        panels = {}
+        for model in self.submodels:
+            sub = frame[frame[model.response].notna()].reset_index(drop=True)
+            time = model.time or "__pylgm_row__"
+            if model.time is None:
+                sub = sub.assign(**{time: range(len(sub))})
+            panels[model.response] = CanonicalPanel.from_frame(
+                sub, DataConfig(time=time, response=model.response, panel=model.panel)
+            )
+
+        family = compile_joint_family(self, panels)
+        if hyperparameters == "integrate":
+            if family is None:
+                raise ValueError(
+                    "hyperparameters='integrate' requires a declared Hyperparameter"
+                )
+            result = self._run_inla(family, latent_strategy)
+        elif family is None:
+            result = fit_laplace(compile_joint(self, panels))
+        else:
+            result = self._run_empirical_bayes(family)
+
+        # Task 8 wires the prediction context in via
+        # build_joint_prediction_contexts (not implemented yet); until then the
+        # fit result is returned as-is, unlike LGM.fit which attaches one here.
+        return result
+
+    def _family_optimization_inputs(self, family):
+        """Bounds, initial values and the prior penalty for this joint's hyperparameters.
+
+        Mirrors ``LGM._family_optimization_inputs`` (model.py:405-426) but reads
+        the declared Hyperparameters from every sub-model plus the shared scales,
+        which is where a joint's parameters actually live.
+        """
+        from pylgm.compiler import _model_hyperparameters
+        from pylgm.optimization.empirical_bayes import OptimizationBounds
+
+        declared = []
+        for model in self.submodels:
+            declared.extend(hp for _, hp in _model_hyperparameters(model))
+        for entry in self.shared:
+            for scale in entry.scales_for(len(self.submodels)):
+                if isinstance(scale, Hyperparameter):
+                    declared.append(scale)
+
+        bounds = (
+            dict(family.parameter_bounds)
+            if family.parameter_bounds
+            else {hp.name: OptimizationBounds(hp.initial, hp.lower, hp.upper) for hp in declared}
+        )
+        initial = {hp.name: hp.initial for hp in declared if hp.name in family.parameter_names}
+        family_priors = dict(getattr(family, "parameter_priors", {}) or {})
+        priored = [hp for hp in declared if hp.prior is not None]
+        penalty = None
+        if family_priors or priored:
+            def penalty(values, priored=priored):
+                return sum(float(hp.prior.logpdf(values[hp.name])) for hp in priored)
+        return bounds, initial, penalty
+
+    def _run_empirical_bayes(self, family):
+        """Type-II ML / MAP-II fit. Mirrors LGM._run_empirical_bayes (model.py:428)."""
+        import warnings
+
+        from pylgm.inference.laplace import fit_laplace
+        from pylgm.model import _attach_estimates, _parameters_at_bound
+        from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
+
+        bounds, initial, penalty = self._family_optimization_inputs(family)
+        eb = optimize_empirical_bayes(
+            family, bounds, initial=initial, fit=fit_laplace, penalty=penalty
+        )
+        diagnostics = dict(eb.fit.diagnostics)
+        diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
+        diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
+        diagnostics["hyperparameter_penalized"] = penalty is not None
+        pinned = _parameters_at_bound(dict(eb.parameters), bounds)
+        diagnostics["hyperparameters_at_bound"] = ", ".join(pinned)
+        if pinned:
+            warnings.warn(
+                f"empirical-Bayes estimate(s) {list(pinned)} landed on the edge of "
+                "the declared interval, so the bound rather than the data is "
+                "setting the value. Widen lower/upper on those Hyperparameters "
+                "and refit.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
+
+    def _run_inla(self, family, latent_strategy: str = "gaussian"):
+        """INLA grid integration. Mirrors LGM._run_inla (model.py:450)."""
+        from pylgm.inference.laplace import fit_laplace
+        from pylgm.optimization.inla import integrate_inla
+
+        bounds, initial, penalty = self._family_optimization_inputs(family)
+        return integrate_inla(
+            family, bounds, initial=initial, fit=fit_laplace, penalty=penalty,
+            latent_strategy=latent_strategy,
+        )

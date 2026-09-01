@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from formulaic import model_matrix
 from formulaic.errors import FormulaicError
-from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity
+from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity, vstack
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
@@ -1416,4 +1416,173 @@ def build_prediction_context(
         offset=model.offset,
         trials=model.likelihood.trials if isinstance(model.likelihood, Binomial) else None,
         width=compiled.design.shape[1],
+    )
+
+
+def _restack_family_block(item, outcome: str, before: int, after: int):
+    """Rename and row-pad one family block from a sub-model's CompiledFamily.
+
+    ScalableBlock and ParametricBlock vary only their *precision* with the
+    hyperparameters, which is row-independent, so padding the template is
+    enough. ParametricDesignBlock rebuilds a *design* over the sub-frame's rows,
+    so its build output must be padded on every draw too.
+    """
+    inner = item.block
+    named = LatentBlock(
+        f"{outcome}:{inner.name}", inner.labels, inner.design,
+        inner.precision, inner.constraints,
+    )
+    padded = _pad_block_rows(named, before, after)
+
+    if isinstance(item, ParametricDesignBlock):
+        def build(values, inner_build=item.build, before=before, after=after,
+                  width=inner.design.shape[1]):
+            design = inner_build(values)
+            pieces = []
+            if before:
+                pieces.append(csr_matrix((before, width)))
+            pieces.append(design)
+            if after:
+                pieces.append(csr_matrix((after, width)))
+            return vstack(pieces, format="csr") if len(pieces) > 1 else design
+
+        return ParametricDesignBlock(padded, item.parameters, build)
+
+    if isinstance(item, ParametricBlock):
+        return ParametricBlock(padded, item.parameters, item.build)
+
+    return ScalableBlock(padded, item.parameter, item.scale)
+
+
+def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledFamily | None:
+    """Family form of compile_joint: rebuild scale-dependent designs per draw."""
+    outcomes = joint.outcomes
+    frames = [panels[name].frame for name in outcomes]
+    sizes = [len(frame) for frame in frames]
+    starts, total = [], 0
+    for size in sizes:
+        starts.append(total)
+        total += size
+
+    scalable: list = []
+    parameter_names: list[str] = []
+    parameter_bounds: dict[str, OptimizationBounds] = {}
+    parameter_priors: dict[str, object] = {}
+
+    # Reuse compile_family per sub-model rather than duplicating its 130-line
+    # effect chain, then pad and rename what it produced. A sub-model with no
+    # declared Hyperparameter returns None, in which case its blocks are plain
+    # ScalableBlocks built from the compile_joint path.
+    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
+        before, after = starts[position], total - starts[position] - sizes[position]
+        sub_family = compile_family(model, panels[outcome])
+        if sub_family is None:
+            for effect in model.predictor.effects:
+                block, _ = _build_effect_block(effect, frame)
+                named = LatentBlock(
+                    f"{outcome}:{block.name}", block.labels, block.design,
+                    block.precision, block.constraints,
+                )
+                scalable.append(ScalableBlock(_pad_block_rows(named, before, after), None, 1.0))
+            continue
+
+        for item in sub_family.blocks:
+            scalable.append(_restack_family_block(item, outcome, before, after))
+
+        for name in sub_family.parameter_names:
+            if name in parameter_names:
+                raise CompilationError(
+                    f"hyperparameter name {name!r} is declared by more than one "
+                    "sub-model. Joint sub-models share one hyperparameter namespace, "
+                    "so give each its own name (e.g. 'tau_oral', 'tau_larynx')."
+                )
+            parameter_names.append(name)
+            if name in sub_family.parameter_bounds:
+                parameter_bounds[name] = sub_family.parameter_bounds[name]
+            if name in sub_family.parameter_priors:
+                parameter_priors[name] = sub_family.parameter_priors[name]
+
+    for entry in joint.shared:
+        scales = entry.scales_for(len(joint.submodels))
+        estimated = [s for s in scales if isinstance(s, Hyperparameter)]
+        template = _shared_block(entry, joint, frames, starts, sizes, total, resolved={})
+        if not estimated:
+            scalable.append(ScalableBlock(template, None, 1.0))
+            continue
+
+        levels, incidences = _shared_incidences(
+            entry, frames, starts, sizes, total, joint.outcomes
+        )
+        if template.labels != levels:
+            # Same realignment _shared_block applies internally: the effect
+            # builder is free to reorder levels (build_iid sorts them), but
+            # these incidences are built in first-seen order. Without this,
+            # column i of the rebuilt design would carry level `levels[i]`
+            # while template.precision/labels claim it is `template.labels[i]`
+            # -- a silent latent mislabeling, not a crash.
+            reorder = [levels.index(label) for label in template.labels]
+            incidences = [incidence[:, reorder] for incidence in incidences]
+
+        def build(values, scales=scales, incidences=incidences):
+            return sum(
+                _resolve_scale(scale, values) * incidence
+                for scale, incidence in zip(scales, incidences)
+            ).tocsr()
+
+        names = tuple(dict.fromkeys(s.name for s in estimated))
+        scalable.append(ParametricDesignBlock(template, names, build))
+        for hyper in estimated:
+            if hyper.name in parameter_names:
+                continue
+            parameter_names.append(hyper.name)
+            parameter_bounds[hyper.name] = _log_bounds(hyper)
+            if hyper.prior is not None:
+                parameter_priors[hyper.name] = hyper.prior
+
+    if not parameter_names:
+        return None
+
+    y = np.concatenate([
+        frame[name].fillna(0.0).to_numpy(dtype=float)
+        for name, frame in zip(outcomes, frames)
+    ])
+    observed = np.concatenate([panels[name].observed for name in outcomes])
+    offset = np.concatenate([
+        _offset_vector(model, frame) for model, frame in zip(joint.submodels, frames)
+    ])
+
+    masks = []
+    for position in range(len(outcomes)):
+        mask = np.zeros(total, dtype=bool)
+        mask[starts[position] : starts[position] + sizes[position]] = True
+        masks.append(mask)
+
+    def likelihood_factory(values, masks=masks, submodels=joint.submodels, frames=frames):
+        """Rebuild the mixture at the current hyperparameter values.
+
+        Each sub-model's estimable scalar (Gaussian sigma, NegBin/Gamma/Beta phi,
+        Weibull alpha) is resolved from `values` if it is optimised, else left at
+        its fixed value -- the same resolution compile_lgm does at its initial.
+        """
+        parts = []
+        for mask, model, frame in zip(masks, submodels, frames):
+            scalar = _estimable_scalar(model.likelihood)
+            resolved = (
+                {scalar.name: float(values[scalar.name])}
+                if scalar is not None and scalar.name in values
+                else ({scalar.name: scalar.initial} if scalar is not None else {})
+            )
+            compiled = model.likelihood.materialize(resolved)
+            parts.append((mask, compiled.for_observations(_likelihood_columns(model, frame))))
+        return CompiledMixture(tuple(parts), total)
+
+    return CompiledFamily(
+        y=y,
+        observed=observed,
+        offset=offset,
+        blocks=tuple(scalable),
+        parameter_names=tuple(parameter_names),
+        likelihood_factory=likelihood_factory,
+        parameter_bounds=parameter_bounds,
+        parameter_priors=parameter_priors,
     )
