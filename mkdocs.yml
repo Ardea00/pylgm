@@ -33,6 +33,7 @@ nav:
       - Likelihoods: likelihoods.md
       - Effects: effects.md
       - Spatial effects: spatial-effects.md
+      - Joint multi-likelihood models: joint-models.md
       - Empirical Bayes and priors: empirical-bayes.md
       - INLA integration: inla.md
       - Prediction: prediction.md

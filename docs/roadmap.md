@@ -86,6 +86,16 @@ For the precise semantics of each shipped feature, follow the links into the
   `result.diagnostics["hyperparameters_at_bound"]` and warned about, because a
   pinned estimate means the bound (often a default derived from `initial`)
   rather than the data is setting the value.
+- **Joint multi-likelihood models** — `Joint` stacks several `LGM` sub-models
+  (each with its own response, likelihood, offset, and predictor) into one
+  fit, with `Shared` letting one latent field enter more than one sub-model
+  under a per-sub-model scaling, including the Knorr-Held & Best `(delta,
+  delta⁻¹)` shared-component pairing for exactly two sub-models. Fits by
+  `engine="laplace"` only; per-outcome prediction via
+  `result.predict(new_data, outcome=...)`. This covers R-INLA's `copy` for the
+  shared-field-with-estimated-scale case, but **not** off-block-diagonal
+  precision coupling (coregionalization) or `copy`/`replicate` within a single
+  sub-model — see [joint models](joint-models.md#not-supported-yet).
 
 ## Breaking changes in 0.6
 

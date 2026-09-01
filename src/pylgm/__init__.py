@@ -19,6 +19,7 @@ from pylgm.effects import (
     load_graph_file,
 )
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
+from pylgm.joint import Joint, Shared
 from pylgm.likelihoods import (
     Bernoulli,
     Beta,
@@ -57,6 +58,7 @@ __all__ = [
     "GaussianPrior",
     "Hyperparameter",
     "IID",
+    "Joint",
     "LGM",
     "MIDAS",
     "MIDASParametric",
@@ -71,6 +73,7 @@ __all__ = [
     "RW2",
     "SAR",
     "Seasonal",
+    "Shared",
     "SpaceTime",
     "WeibullSurv",
     "__version__",
