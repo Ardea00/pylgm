@@ -379,18 +379,27 @@ hyperparameter, re-formed on every draw during optimisation, and the fitted
 value is reported under its own name in `result.hyperparameters` exactly like
 any other estimated parameter.
 
+**An estimated `scale` defaults to `transform="log"`, so it cannot be
+negative or zero unless declared with `transform="identity"`.** This is
+`Hyperparameter`'s own default, not something `Copy` adds, but it means a
+*fixed* `scale` can be negative while an estimated one cannot without an
+explicit `Hyperparameter(..., transform="identity")`. R-INLA's copy beta is
+unbounded by default; match that behaviour by declaring the transform
+explicitly.
+
 **The copy's index values must already be levels of the target.** A copy
 reuses an existing latent field — it has no mechanism to create a level in
 it — so an `index` column containing a value the target was never declared
 over is a `CompilationError` at compile time, not a silently-added level.
 
-**`Weighted(Copy(...))` and `Copy` inside a `Joint` are both rejected.** A
-copy is a term referencing another effect's block, not an indexed effect with
-a design of its own, so wrapping it in `Weighted` raises `TypeError` at
-construction — weight the target effect instead. A `Joint` sub-model
-containing a `Copy` fails to compile with a `CompilationError`, because
-`Joint` compiles each sub-model's effects independently and has no target
-block, from an earlier sub-model or the same one, for the copy to fold into.
+**`Weighted(Copy(...))`, `Shared(Copy(...))`, and `Copy` inside a `Joint` are
+all rejected.** A copy is a term referencing another effect's block, not an
+indexed effect with a design of its own, so wrapping it in `Weighted` or
+`Shared` raises `TypeError` at construction — weight or share the target
+effect instead. A `Joint` sub-model containing a bare `Copy` fails to compile
+with a `CompilationError`, because `Joint` compiles each sub-model's effects
+independently and has no target block, from an earlier sub-model or the same
+one, for the copy to fold into.
 
 ## MIDAS smooth-lag effect
 

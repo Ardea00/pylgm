@@ -3,13 +3,15 @@ import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm import Beta, Besag, Fixed, IID, LGM, Poisson, RW1
-from pylgm.compiler import compile_joint, compile_lgm
+from pylgm import Beta, Besag, Copy, Fixed, IID, LGM, Poisson, RW1
+from pylgm.compiler import _restack_family_block, compile_family, compile_joint, compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
 from pylgm.exceptions import CompilationError, DataContractError
+from pylgm.ir.family import ParametricDesignBlock
 from pylgm.ir.model import LatentBlock
 from pylgm.joint import Joint, Shared, _pad_block_rows
+from pylgm.parameters import Hyperparameter
 
 
 def _block():
@@ -56,6 +58,36 @@ def _frame():
 def _panel(frame, response):
     sub = frame[frame[response].notna()].reset_index(drop=True)
     return CanonicalPanel.from_frame(sub, DataConfig(time="row", response=response, panel=()))
+
+
+def test_restack_family_block_carries_parameter_and_scale_for_a_copied_block():
+    # Final-slice minor: _restack_family_block's ParametricDesignBlock branch
+    # used to drop item.parameter/item.scale, silently defaulting to
+    # (None, 1.0) -- the same gap that was Critical in _copied_family_block.
+    # An IID target with an estimated precision, copied with an estimated
+    # scale, produces exactly this shape of item (a ParametricDesignBlock
+    # whose .parameter is the target's own precision hyperparameter name).
+    frame = pd.DataFrame({
+        "i": ["a", "b", "c", "a", "b", "c"],
+        "j": ["b", "c", "a", "c", "a", "b"],
+        "y": [3.0, 5.0, 2.0, 4.0, 1.0, 6.0],
+        "row": range(6),
+    })
+    panel = CanonicalPanel.from_frame(frame, DataConfig(time="row", response="y", panel=()))
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1")
+        + IID("u", index="i", precision=Hyperparameter("tau", initial=1.0))
+        + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
+    )
+    family = compile_family(model, panel)
+    item = next(item for item in family.blocks if item.block.name == "u")
+    assert isinstance(item, ParametricDesignBlock)
+    assert item.parameter == "tau"  # sanity: this is the shape under test
+
+    restacked = _restack_family_block(item, "outcome", before=2, after=1)
+    assert restacked.parameter == item.parameter
+    assert restacked.scale == item.scale
 
 
 def test_single_submodel_joint_matches_the_equivalent_lgm():

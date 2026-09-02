@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from pylgm import Fixed, Gaussian, IID, LGM, Poisson, Weighted
+from pylgm import Copy, Fixed, Gaussian, IID, LGM, Poisson, Weighted
 from pylgm.compiler import compile_joint
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
@@ -81,6 +81,17 @@ def test_shared_rejects_a_weighted_effect_naming_the_wrapper():
     # since the base model (IID here) is in fact a valid Shared effect.
     with pytest.raises(TypeError, match="Weighted"):
         Shared(Weighted(IID("u", index="district"), by="z"))
+
+
+def test_shared_rejects_a_copy_at_construction_time():
+    # Final-slice finding M3: Copy has both `.name` and `.index` (they proxy
+    # its target), so it used to pass the __post_init__ checks above and only
+    # fail at compile time -- asymmetric with Weighted(Copy(...)), which is a
+    # TypeError at construction. A copy folds into an existing target block
+    # and produces none of its own, so Joint has no target for a shared copy
+    # to fold into either.
+    with pytest.raises(TypeError, match="Copy"):
+        Shared(Copy("u", index="j"))
 
 
 def test_mixed_likelihoods_are_allowed():

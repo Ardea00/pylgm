@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from scipy.sparse import csr_matrix, vstack
 
-from pylgm.effects import Weighted
+from pylgm.effects import Copy, Weighted
 from pylgm.ir.model import LatentBlock
 from pylgm.parameters import Hyperparameter
 
@@ -72,6 +72,12 @@ class Shared:
     def __post_init__(self) -> None:
         if not hasattr(self.effect, "name"):
             raise TypeError("Shared effect must be a latent effect spec")
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                f"Shared effect {self.effect!r} is a Copy, which has no block of its "
+                "own -- it folds into an existing target block instead, so Joint has "
+                "no target for a shared copy to fold into. Copy cannot be shared."
+            )
         if not hasattr(self.effect, "index"):
             if isinstance(self.effect, Weighted):
                 raise TypeError(
