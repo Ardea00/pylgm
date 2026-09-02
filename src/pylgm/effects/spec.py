@@ -439,6 +439,39 @@ class SpaceTime(_ComposableEffect):
 
 
 @dataclass(frozen=True)
+class Copy(_ComposableEffect):
+    """A second occurrence of an existing latent field, at a different index.
+
+    ``Copy("u", index="j", scale=beta)`` adds ``beta * A_j`` to the columns of
+    the block named ``u``, so the field ``u`` enters the predictor twice: once
+    at its own index and once at ``j``, scaled. This is R-INLA's
+    ``f(j, copy="u", hyper=list(beta=...))``.
+
+    It produces no block of its own -- there is one latent field, entering
+    twice -- so ``name`` is the **target** block's name, and every compiler
+    site that reads ``effect.name`` then refers to the block this copy feeds.
+
+    ``scale`` may be a ``Hyperparameter``, which makes the target block's design
+    depend on it; the compiler registers it as a ParametricDesignBlock.
+    """
+
+    name: str
+    index: str
+    scale: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if not isinstance(self.scale, (int, float, Hyperparameter)) or isinstance(
+            self.scale, bool
+        ):
+            raise TypeError(
+                f"Copy scale must be a real number or a Hyperparameter, got "
+                f"{type(self.scale).__name__}"
+            )
+
+
+@dataclass(frozen=True)
 class Weighted(_ComposableEffect):
     """An indexed latent effect modulated by a numeric column.
 
@@ -456,6 +489,12 @@ class Weighted(_ComposableEffect):
     by: str
 
     def __post_init__(self) -> None:
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                "Weighted cannot wrap a Copy: a copy is a term referencing "
+                "another term, not an indexed effect of its own. Weight the "
+                "target effect instead."
+            )
         if isinstance(self.effect, Weighted):
             raise TypeError(
                 "Weighted effect is already weighted; two weight columns on one "
@@ -487,6 +526,7 @@ EffectSpec: TypeAlias = (
     | SAR
     | DynamicSpatialPanel
     | BYM2
+    | Copy
     | MIDAS
     | MIDASParametric
     | SpaceTime
@@ -512,8 +552,11 @@ class Predictor:
             raise TypeError(
                 f"effects must contain only effect specifications; got {offenders}"
             )
-        names = [effect.name for effect in effects]
-        if len(names) != len(set(names)):
+        # Copy effects reference existing blocks and are not blocks themselves,
+        # so they may share names with their targets. Only check uniqueness among
+        # non-Copy effects: each block should appear exactly once.
+        non_copy_names = [effect.name for effect in effects if not isinstance(effect, Copy)]
+        if len(non_copy_names) != len(set(non_copy_names)):
             raise ValueError("effect names must be unique")
         object.__setattr__(self, "effects", effects)
 
@@ -530,6 +573,7 @@ __all__ = [
     "Seasonal",
     "Besag",
     "BYM2",
+    "Copy",
     "DynamicSpatialPanel",
     "Fixed",
     "IID",

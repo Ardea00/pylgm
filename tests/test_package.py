@@ -29,6 +29,7 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
         "Pipeline",
         "Experiment",
         "ComparisonResult",
+        "Copy",
         "CandidateFailure",
         "FailureCause",
         "WeibullSurv",
