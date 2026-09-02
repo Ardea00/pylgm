@@ -992,6 +992,32 @@ def _compiled_block(name: str, builder, *args) -> object:
         raise CompilationError(f"failed to compile effect {name!r}: {error}") from error
 
 
+def _weighted_family_block(item, weights: np.ndarray):
+    """Apply a Weighted effect's weights to one family block.
+
+    ScalableBlock and ParametricBlock vary only their precision, which weighting
+    leaves alone, so scaling the template design is enough.
+    ParametricDesignBlock rebuilds its design per hyperparameter draw, so its
+    build output must be scaled on every rebuild too.
+    """
+    inner = item.block
+    scaled = LatentBlock(
+        inner.name,
+        inner.labels,
+        csr_matrix(diags(weights) @ inner.design),
+        inner.precision,
+        inner.constraints,
+    )
+    if isinstance(item, ParametricDesignBlock):
+        def build(values, inner_build=item.build, weights=weights):
+            return csr_matrix(diags(weights) @ inner_build(values))
+
+        return ParametricDesignBlock(scaled, item.parameters, build)
+    if isinstance(item, ParametricBlock):
+        return ParametricBlock(scaled, item.parameters, item.build)
+    return ScalableBlock(scaled, item.parameter, item.scale)
+
+
 def _append_family_blocks(
     effect,
     frame,
@@ -1006,6 +1032,16 @@ def _append_family_blocks(
     build the inner effect through the same path instead of duplicating it. The
     accumulators are mutated in place, exactly as the inline body did.
     """
+    if isinstance(effect, Weighted):
+        weights = _weight_vector(frame, effect)
+        first = len(scalable)
+        _append_family_blocks(
+            effect.effect, frame, scalable, parameter_names, parameter_bounds,
+            parameter_priors,
+        )
+        for position in range(first, len(scalable)):
+            scalable[position] = _weighted_family_block(scalable[position], weights)
+        return
     if isinstance(effect, Fixed):
         block = _compiled_block(
             effect.name, build_fixed, frame, effect.formula, effect.prior_precision
@@ -1516,6 +1552,11 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
     shares the exact same effect-to-entry dispatch -- the same de-duplication
     Task 4 did for ``_build_effect_block``.
     """
+    if isinstance(effect, Weighted):
+        # Weighting changes the design, not the block's labels/structure, so the
+        # predict-time descriptor is the inner effect's, same as
+        # `_effect_hyperparameters`'s delegation.
+        return _prediction_entry(effect.effect, model, panel, block)
     if isinstance(effect, Fixed):
         spec = model_matrix(effect.formula, panel.frame).model_spec
         return ("fixed", spec)
