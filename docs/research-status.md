@@ -98,3 +98,29 @@ independent implementation of the same model fitted to the same real data, with
 the comparison recorded the way the MCMC cross-check already is. Resolving the
 `laplace` degradation, or establishing it as expected, is a prerequisite either
 way.
+
+---
+
+## `Weighted` effects (spatially-varying coefficients) — RESEARCH
+
+`Weighted(effect, by)` scales an indexed effect's design row-wise by a numeric
+column, `diag(by) A`, so a covariate's slope can itself be a latent field. See
+[Weighted effects](effects.md#weighted-effects).
+
+### What is verified
+
+| Claim | Evidence |
+|---|---|
+| The design is exactly `diag(by) A` | Checked column-for-column against a manually built weighted incidence matrix. |
+| A constant weight reduces to the unweighted effect | With `by` all ones, the weighted fit's log marginal likelihood and posterior mean match the equivalent unweighted `IID` fit to a relative 1e-9 / 1e-7. |
+| Prediction round-trips | Predicting on the fit rows reproduces the fitted means to machine precision. |
+| A known spatially-varying coefficient is recovered | Simulated `u ~ N(0, 0.5²)` across 15 regions, `log mu = 0.5 + z*u_region`, Poisson response, 40 draws/region: fitted-vs-true correlation 0.979 (threshold 0.8). |
+
+### What is NOT verified
+
+- **No validation against published results on real data.** As with joint
+  models, everything above is internal consistency or recovery on *simulated*
+  data.
+- **`Weighted` inside a `Joint`'s `shared=` is untested.** Both compile
+  independently; their combination — a shared field with a per-outcome
+  spatially-varying weight — has no test and no example.

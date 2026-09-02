@@ -15,6 +15,7 @@ Each structured effect takes a fixed `precision` or a declared
 | `AR1(name, index, rho=)` | Stationary first-order autoregression | [AR1](#ar1-effect) |
 | `AR1(..., group=)` | One independent AR1 series **per panel unit** | [group-wise AR1](#group-wise-ar1) |
 | `Seasonal(name, index, period=)` | A slowly-drifting periodic pattern | [Seasonal](#seasonal-effect) |
+| `Weighted(effect, by)` | Modulates an indexed effect by a numeric column — spatially-varying coefficients | [Weighted](#weighted-effects) |
 | `MIDAS(name, columns)` | Mixed-frequency distributed lag, smoothness-penalised | [MIDAS](#midas-smooth-lag-effect) |
 | `MIDASParametric(...)` | Restricted lag curve (exp-Almon / Beta kernel) | [restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) |
 | `SpaceTime(name, space, time, interaction=)` | Knorr-Held space-time interaction, types I–IV | [SpaceTime](#spacetime-effect-knorr-held-interaction) |
@@ -282,6 +283,59 @@ predictor:
   effects:
     - {name: seas, type: seasonal, index: month, period: 12, precision: 1.0, ridge: 1.0e-6}
 ```
+
+## Weighted effects
+
+`Weighted(effect, by)` modulates an indexed effect by a numeric column: the
+design becomes `diag(by) A` instead of the plain incidence `A`, so the
+effect's contribution to the predictor at row `i` is `by_i * u_{index(i)}`
+rather than plain `u_{index(i)}`. This is R-INLA's `f(index, weights,
+model=...)`.
+
+The model this unlocks is a **spatially-varying coefficient**: a covariate
+whose slope is itself a latent field instead of one shared number.
+
+```
+log mu_i = alpha + z_i * u_{s(i)},    u ~ IID(tau)
+```
+
+```python
+from pylgm import Fixed, IID, LGM, Poisson, Weighted
+from pylgm.parameters import Hyperparameter
+
+# ... a frame whose `region` is the index, `z` the covariate whose slope
+# varies, and `y` the Poisson response ...
+result = LGM(
+    response="y", likelihood=Poisson(),
+    predictor=Fixed("1") + Weighted(
+        IID("u", index="region", precision=Hyperparameter("tau", initial=1.0)), by="z"
+    ),
+).fit(frame, engine="laplace")
+```
+
+The effect of `z` now varies by `region`: region `s`'s slope is `u_s`, shrunk
+toward zero by the estimated `tau` exactly as an ordinary `IID` would shrink
+an intercept. Any indexed effect can be wrapped this way, not only `IID` — a
+`Weighted(RW1(...), by=...)` gives a smoothly-varying-in-time coefficient, a
+`Weighted(Besag(...), by=...)` a spatially-smooth one.
+
+**Precision, labels and constraints are the inner effect's, untouched.**
+Wrapping changes how the field enters the predictor, not the field itself, so
+`result.latent_marginals("u")` and the `u:0`, `u:1`, ... labels in
+`result.labels` are exactly what the unwrapped `IID("u", ...)` would produce.
+The weighting is design-only.
+
+**`by` must be numeric, finite, and not all-zero.** A missing or non-numeric
+column is a data contract error. An all-zero column is rejected too, rather
+than silently accepted: it would make the effect contribute nothing to the
+predictor while still consuming latent dimensions, fitting happily and
+reporting a field the data never actually informed.
+
+**`Fixed` cannot be wrapped.** `Weighted` requires an indexed effect — it
+scales rows of an incidence matrix `A` — and `Fixed` has no index; its design
+comes from a formula instead. To weight a fixed-effect column, multiply the
+covariate into the formula directly (`Fixed("z:region")` or similar), rather
+than wrapping.
 
 ## MIDAS smooth-lag effect
 

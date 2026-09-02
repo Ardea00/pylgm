@@ -46,11 +46,16 @@ class PredictionContext:
     order: ``("fixed", ModelSpec)``,
     ``("structured", (block_name, index_column, labels_tuple))``,
     ``("midas", (block_name, columns_tuple))``,
+    ``("midas_parametric", (block_name, columns_tuple, kernel, theta))``,
     ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
     ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
     ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``,
-    or ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
-    models only -- a shared field's predict-time design is ``scale * incidence``).
+    ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
+    models only -- a shared field's predict-time design is ``scale * incidence``),
+    or ``("weighted", (inner_entry, by_column))`` -- rebuilds ``inner_entry``'s
+    own design (any other kind, recursively) and scales it row-wise by
+    ``by_column`` from ``new_data``, mirroring the ``diag(by) A`` design a
+    ``Weighted`` effect compiles to.
     """
 
     entries: tuple[tuple[str, object], ...]
