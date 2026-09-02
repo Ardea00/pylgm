@@ -268,3 +268,69 @@ def test_an_estimated_copy_scale_does_not_drop_the_targets_estimated_precision()
     assert not np.allclose(p_low, p_high)
     nonzero = p_low != 0
     assert np.allclose(p_high[nonzero] / p_low[nonzero], 50.0)
+
+
+def test_copy_inside_joint_submodel_is_rejected():
+    """Verifies claim from docs/research-status.md: Copy inside a Joint
+    sub-model is rejected at fit time with CompilationError: unsupported
+    effect type: Copy. Joint compiles each sub-model independently and has
+    no target block for a copy to fold into."""
+    from pylgm.compiler import compile_joint
+    from pylgm.joint import Joint
+
+    frame = pd.DataFrame({
+        "i": ["a", "b", "c", "a"],
+        "j": ["b", "c", "a", "c"],
+        "y1": [1.0, 2.0, 3.0, 4.0],
+        "y2": [5.0, 6.0, 7.0, 8.0],
+        "row": range(4),
+    })
+    model_1 = LGM(response="y1", likelihood=Poisson(),
+                  predictor=Fixed("1") + IID("u", index="i", precision=1.0))
+    model_2 = LGM(response="y2", likelihood=Poisson(),
+                  predictor=Fixed("1") + IID("u", index="i", precision=1.0)
+                  + Copy("u", index="j"))
+    joint = Joint([model_1, model_2])
+
+    panel_1 = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y1", panel=())
+    )
+    panel_2 = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y2", panel=())
+    )
+    panels = {"y1": panel_1, "y2": panel_2}
+
+    with pytest.raises(CompilationError, match="unsupported effect type: Copy"):
+        compile_joint(joint, panels)
+
+
+def test_estimated_copy_scale_on_parametric_block_target_is_rejected():
+    """Verifies claim from docs/research-status.md: An estimated copy scale
+    on a target whose precision is itself a ParametricBlock is rejected, not
+    supported. When the target's own precision is a function of hyperparameters
+    (estimated rho on AR1), and the copy's scale is also a Hyperparameter,
+    compilation raises CompilationError rather than combining the two."""
+    from pylgm import AR1
+    from pylgm.compiler import compile_family
+    from pylgm.parameters import Hyperparameter
+
+    frame = pd.DataFrame({
+        "t": [1, 2, 3, 4, 1, 2, 3, 4],
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "row": range(8),
+    })
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + AR1(
+            "u", index="t",
+            precision=1.0,
+            rho=Hyperparameter("rho", initial=0.5, transform="logit")
+        ) + Copy("u", index="t", scale=Hyperparameter("beta", initial=1.0)),
+    )
+
+    with pytest.raises(
+        CompilationError,
+        match="copy of 'u' has an estimated scale, but that block's precision "
+              "is itself a function of hyperparameters"
+    ):
+        compile_family(model, _panel(frame))
