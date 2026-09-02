@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from pylgm import Fixed, Gaussian, IID, LGM, Poisson
+from pylgm import Fixed, Gaussian, IID, LGM, Poisson, Weighted
 from pylgm.compiler import compile_joint
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
@@ -71,6 +71,16 @@ def test_shared_rejects_an_effect_with_no_index_at_declaration_time():
     # and only die later, at fit time, with an unrelated AttributeError.
     with pytest.raises(TypeError, match="index"):
         Shared(Fixed("1"))
+
+
+def test_shared_rejects_a_weighted_effect_naming_the_wrapper():
+    # Final-slice finding I2: Weighted also has no `.index` (deliberately --
+    # it wraps an indexed effect but doesn't expose one itself), so it hits
+    # the same branch as Fixed above. The message must name Weighted as the
+    # unsupported part rather than only describing what a base model needs,
+    # since the base model (IID here) is in fact a valid Shared effect.
+    with pytest.raises(TypeError, match="Weighted"):
+        Shared(Weighted(IID("u", index="district"), by="z"))
 
 
 def test_mixed_likelihoods_are_allowed():

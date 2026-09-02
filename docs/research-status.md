@@ -121,6 +121,15 @@ column, `diag(by) A`, so a covariate's slope can itself be a latent field. See
 - **No validation against published results on real data.** As with joint
   models, everything above is internal consistency or recovery on *simulated*
   data.
-- **`Weighted` inside a `Joint`'s `shared=` is untested.** Both compile
-  independently; their combination — a shared field with a per-outcome
-  spatially-varying weight — has no test and no example.
+- **`Weighted` inside a `Joint`'s `shared=` is rejected, not merely untested.**
+  `Shared.__post_init__` requires the wrapped effect to expose `.index`, which
+  `Weighted` deliberately does not; `Shared(Weighted(...))` raises `TypeError`
+  at construction. A shared field with a per-outcome spatially-varying weight
+  cannot be built at all today.
+- **`Weighted` inside a `Joint` sub-model has no test.** Unlike `shared=`,
+  wrapping a sub-model's own effect in `Weighted` does compile and predict —
+  it just has no test or example exercising it, so it belongs under neither
+  heading above yet.
+- **No YAML/config surface.** Every neighbouring effect in
+  [effects.md](effects.md) has a YAML block; `Weighted` has none, and the
+  config schema has no `weighted` effect type to parse one into.

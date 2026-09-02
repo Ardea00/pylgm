@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from scipy.sparse import csr_matrix, vstack
 
+from pylgm.effects import Weighted
 from pylgm.ir.model import LatentBlock
 from pylgm.parameters import Hyperparameter
 
@@ -72,6 +73,14 @@ class Shared:
         if not hasattr(self.effect, "name"):
             raise TypeError("Shared effect must be a latent effect spec")
         if not hasattr(self.effect, "index"):
+            if isinstance(self.effect, Weighted):
+                raise TypeError(
+                    f"Shared effect {self.effect!r} is a Weighted wrapper, which has "
+                    "no `index` of its own -- a shared effect must be indexed (IID, "
+                    "RW1/RW2, AR1, Seasonal, Besag, ProperCAR, SAR, BYM2), so it can "
+                    "be summed across sub-models over a common level set. Weighted "
+                    "cannot be shared."
+                )
             raise TypeError(
                 f"Shared effect {self.effect!r} has no `index` -- a shared effect "
                 "must be indexed (IID, RW1/RW2, AR1, Seasonal, Besag, ProperCAR, "
