@@ -117,12 +117,13 @@ def _context_with_fitted_likelihood(context, result, model):
 
 
 def _context_with_fitted_weights(context, result):
-    """Substitute fitted shape estimates into parametric-MIDAS design entries.
+    """Substitute fitted estimates into parametric-MIDAS and copy-scale entries.
 
     ``build_prediction_context`` runs on a ``compile_lgm`` result, which resolves
-    an estimated shape Hyperparameter to its ``.initial`` (the starting guess). A
-    parametric-MIDAS design is a function of that shape, so predict() would
-    otherwise aggregate new rows with the initial weights, not the fitted ones.
+    an estimated Hyperparameter (a MIDAS shape, or a ``Copy`` scale) to its
+    ``.initial`` (the starting guess). A parametric-MIDAS design and a copy's
+    folded incidence are both functions of that value, so predict() would
+    otherwise aggregate new rows with the initial value, not the fitted one.
     Mirror ``_context_with_fitted_likelihood`` and swap in the estimates. Under
     ``hyperparameters="integrate"`` the point estimate lives in the INLA
     marginal table (``result.hyperparameters`` is ``None`` there), so check that
@@ -146,6 +147,14 @@ def _context_with_fitted_weights(context, result):
             name, columns, kernel, theta_spec = payload
             theta = tuple(s if not isinstance(s, str) else _resolve(s) for s in theta_spec)
             new_entries.append((kind, (name, columns, kernel, theta)))
+            changed = True
+        elif kind == "copied":
+            base_entry, copies = payload
+            new_copies = tuple(
+                (index, labels, spec, _resolve(spec) if isinstance(spec, str) else value)
+                for index, labels, spec, value in copies
+            )
+            new_entries.append((kind, (base_entry, new_copies)))
             changed = True
         else:
             new_entries.append((kind, payload))

@@ -538,7 +538,7 @@ def _copy_incidence(frame, copy, labels: "tuple[str, ...]") -> csr_matrix:
             f"copy index column {copy.index!r} for target block {copy.name!r} not found"
         )
     position = {label: column for column, label in enumerate(labels)}
-    values = frame[copy.index].astype(str)
+    values = frame[copy.index].map(str)
     unknown = sorted({value for value in values if value not in position})
     if unknown:
         raise CompilationError(
@@ -1952,7 +1952,7 @@ def _restack_family_block(item, outcome: str, before: int, after: int):
                 pieces.append(csr_matrix((after, width)))
             return vstack(pieces, format="csr") if len(pieces) > 1 else design
 
-        return ParametricDesignBlock(padded, item.parameters, build)
+        return ParametricDesignBlock(padded, item.parameters, build, item.parameter, item.scale)
 
     if isinstance(item, ParametricBlock):
         return ParametricBlock(padded, item.parameters, item.build)

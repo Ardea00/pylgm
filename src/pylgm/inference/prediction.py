@@ -328,16 +328,17 @@ def _copied_block(entry, new_data: pd.DataFrame) -> np.ndarray:
                 f"predict() new_data is missing the copy index column {index_column!r}"
             )
         position = {label: k for k, label in enumerate(labels)}
-        values = new_data[index_column].astype(str)
+        values = new_data[index_column].map(str)
         unknown = sorted({value for value in values if value not in position})
         if unknown:
             raise ValueError(
                 f"predict() cannot score rows whose copy level was not in the fitted "
                 f"model: {unknown!r}"
             )
-        addition = np.zeros_like(design)
-        addition[np.arange(len(new_data)), values.map(position).to_numpy()] = fitted
-        design = design + addition
+        # _design_block_for returns a freshly allocated array from every branch,
+        # so mutating it in place is safe; each row appears exactly once, so
+        # += has no duplicate-index hazard.
+        design[np.arange(len(new_data)), values.map(position).to_numpy()] += fitted
     return design
 
 

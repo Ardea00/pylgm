@@ -149,7 +149,8 @@ unscaled and once (rescaled) again. It produces no block of its own. See
 |---|---|
 | The design is exactly the target's plus `scale * A_index` | Checked column-for-column against a manually built incidence matrix summed onto the target's design (`tests/test_copy_compile.py`, `tests/test_copy_model.py`). |
 | A copy adds no block and no labels | `IID("u", ...) + Copy("u", ...)` produces the same `blocks` and `result.labels` as `IID("u", ...)` alone (`tests/test_copy_compile.py::test_a_copy_adds_no_block_of_its_own`). |
-| Prediction round-trips | Predicting on the fit rows reproduces the fitted means to a relative and absolute 1e-12, with both a fixed scale and an estimated (`Hyperparameter`) scale, over a fixture whose copy index visits levels in an order that differs from the target's sorted label order (`tests/test_copy_predict.py`). |
+| Prediction round-trips (optimize path) | Predicting on the fit rows reproduces the fitted means to a relative and absolute 1e-12, with both a fixed scale and an estimated (`Hyperparameter`) scale, over a fixture whose copy index visits levels in an order that differs from the target's sorted label order (`tests/test_copy_predict.py`). |
+| Prediction under `hyperparameters="integrate"` uses the INLA marginal mean, not the initial guess, but is a plug-in approximation | The point estimate for an estimated copy scale is read from `result.hyperparameter_marginals()` (`result.hyperparameters` is `None` on the integrate path), exactly as `midas_parametric` already does. Predicting on the fit rows lands within a max relative 0.40 of the fitted means -- the genuine plug-in-versus-mixture gap for a hyperparameter-dependent design, not a bug: a no-copy integrate baseline (hyperparameter-independent design) round-trips to machine precision (`tests/test_copy_predict.py`). |
 | Multiple copies of one field accumulate | Two copies of the same field at two different indices both fold into the same columns, matching a hand-summed design (`tests/test_copy_compile.py::test_two_copies_of_the_same_field_at_different_indices_both_fold_in`). |
 | A known copy scale is recovered | Simulated `u ~ N(0, 0.5²)` over 12 levels, `log mu = 0.3 + u_i + beta*u_j`, Poisson response, 600 rows, `beta` estimated as a `Hyperparameter`: fitted `beta = 1.69` against a true `1.8` (relative tolerance 0.4) (`tests/test_copy_model.py::test_the_copy_scale_is_recovered`). |
 
@@ -166,10 +167,10 @@ unscaled and once (rescaled) again. It produces no block of its own. See
 - **An estimated copy scale on a target whose precision is itself a
   `ParametricBlock` is rejected, not supported.** When the target's own
   precision is a function of hyperparameters (an estimated `rho` on `AR1`,
-  `ProperCAR`, `SAR`, or `phi` on `BYM2`, for example) *and* the copy's scale
-  is also a `Hyperparameter`, compilation raises `CompilationError` rather
-  than combining the two. Combining an estimated copy scale with an estimated
-  structural parameter on the same target is a real modelling case that this
-  slice does not cover.
+  `ProperCAR`, `SAR`, `phi` on `BYM2`, or an estimated precision on `Seasonal`
+  or `MIDAS`, for example) *and* the copy's scale is also a `Hyperparameter`,
+  compilation raises `CompilationError` rather than combining the two.
+  Combining an estimated copy scale with an estimated structural parameter on
+  the same target is a real modelling case that this slice does not cover.
 - **No YAML/config surface.** As with `Weighted`, `Copy` has no YAML block in
   [effects.md](effects.md) and no config schema entry.
