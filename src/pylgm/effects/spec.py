@@ -513,6 +513,61 @@ class Weighted(_ComposableEffect):
     def name(self) -> str:
         return self.effect.name
 
+    @property
+    def index(self) -> str:
+        return self.effect.index
+
+
+@dataclass(frozen=True)
+class Replicated(_ComposableEffect):
+    """``R`` independent copies of an effect, sharing every hyperparameter.
+
+    ``Replicated(AR1("t", index="year"), over="firm")`` is one AR1 series per
+    firm: the firms share ``rho`` and ``precision`` but not their realizations.
+    This is R-INLA's ``f(index, model=..., replicate=r)``.
+
+    The precision becomes ``I_R (x) Q``, the design is indexed on
+    ``(replicate, level)`` pairs, and a constrained inner effect gets **one
+    constraint per replicate** -- a single shared constraint would leave
+    ``R-1`` directions unidentified while still fitting.
+
+    Not to be confused with R-INLA's ``group``, which is *correlated* copies
+    with a between-group structure; that is a separate modifier.
+    """
+
+    effect: object
+    over: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.effect, Replicated):
+            raise TypeError(
+                "Replicated effect is already replicated; two replicate columns "
+                "is one replicate over their cross product, so combine them into "
+                "a single column"
+            )
+        if getattr(self.effect, "replicate", None) is not None:
+            raise TypeError(
+                f"{type(self.effect).__name__} already replicates itself through "
+                "its own `replicate` argument; wrapping it would give two "
+                "replication mechanisms on one effect with no defined interaction"
+            )
+        if not hasattr(self.effect, "index"):
+            raise TypeError(
+                f"Replicated requires an indexed effect, got "
+                f"{type(self.effect).__name__}, which has no index."
+            )
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                "Replicated cannot wrap a Copy: a copy is a term referencing "
+                "another term, not an indexed effect of its own. Replicate the "
+                "target effect instead."
+            )
+        object.__setattr__(self, "over", _non_empty_string(self.over, "over"))
+
+    @property
+    def name(self) -> str:
+        return self.effect.name
+
 
 EffectSpec: TypeAlias = (
     Fixed
@@ -531,6 +586,7 @@ EffectSpec: TypeAlias = (
     | MIDASParametric
     | SpaceTime
     | Weighted
+    | Replicated
 )
 
 
@@ -581,6 +637,7 @@ __all__ = [
     "MIDASParametric",
     "Predictor",
     "ProperCAR",
+    "Replicated",
     "RW1",
     "RW2",
     "SAR",
