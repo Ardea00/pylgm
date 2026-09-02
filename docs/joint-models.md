@@ -230,6 +230,19 @@ is the same declaration, not a collision.
 
 ## Not supported yet
 
+- **NaN-response hold-out.** `LGM.fit` keeps NaN-response rows as *unobserved*
+  — excluded from the likelihood, but still assigned fitted values on the
+  predictor. `Joint.fit` instead drops each sub-model's NaN-response rows before
+  compiling, so that idiom does nothing on a `Joint`.
+
+  This is deliberate, not an oversight. In the long-stacked layout joint models
+  are normally given — one row per (outcome, unit) pair — every row is NaN for
+  every *other* outcome, so a NaN means "this row belongs to another outcome",
+  not "hold this observation out". Keeping those rows would double the stacked
+  design and produce fitted values for observations that do not exist. To hold a
+  row out of a joint fit, drop it from the frame and score it afterwards with
+  `result.predict(new_data, outcome=...)`.
+
 - **Off-block-diagonal precision coupling** (coregionalization). Sharing is
   expressed entirely on the design side; `precision == block_diag(blocks)`
   still holds exactly, so two shared fields cannot be given a correlated

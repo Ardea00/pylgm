@@ -181,14 +181,21 @@ class Joint:
 
         panels = {}
         for model in self.submodels:
-            # No notna() filtering: a NaN response is a held-out row (unobserved
-            # but still fitted), exactly as LGM.fit treats it -- CanonicalPanel
-            # already derives `observed` from the response column itself, so
-            # dropping rows here would only throw away that hold-out idiom.
-            sub = frame
+            # Each sub-model sees only the rows carrying its own response.
+            #
+            # This deliberately differs from LGM.fit, which keeps NaN-response
+            # rows as held-out-but-fitted. In the long-stacked layout that joint
+            # models are normally given -- one row per (outcome, unit) pair, so
+            # every row is NaN for every *other* outcome -- a NaN means "this row
+            # belongs to another outcome", not "hold this observation out".
+            # Keeping those rows would double the stacked design and produce
+            # fitted values for observations that do not exist. The cost is that
+            # the LGM.fit hold-out idiom does not carry over to a Joint; that is
+            # documented in docs/joint-models.md under "Not supported yet".
+            sub = frame[frame[model.response].notna()].reset_index(drop=True)
             time = model.time or "__pylgm_row__"
             if model.time is None:
-                sub = frame.assign(**{time: range(len(frame))})
+                sub = sub.assign(**{time: range(len(sub))})
             panels[model.response] = CanonicalPanel.from_frame(
                 sub, DataConfig(time=time, response=model.response, panel=model.panel)
             )
