@@ -289,7 +289,12 @@ def _weighted_block(entry, new_data: pd.DataFrame) -> np.ndarray:
         raise ValueError(
             f"predict() new_data is missing the weight column {by_column!r}"
         )
-    weights = pd.to_numeric(new_data[by_column], errors="coerce").to_numpy(dtype=float)
+    try:
+        weights = new_data[by_column].to_numpy(dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"predict() weight column {by_column!r} must be numeric and finite"
+        ) from error
     if not np.isfinite(weights).all():
         raise ValueError(
             f"predict() weight column {by_column!r} must be numeric and finite"

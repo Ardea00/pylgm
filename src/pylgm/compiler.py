@@ -282,9 +282,13 @@ def _warn_missing_spacetime_main_effects(effects) -> None:
     spatial and temporal marginals; omitting one is a modelling error, so warn
     (do not crash) naming the effect and the missing companion.
     """
-    spatial_indices = {e.index for e in effects if isinstance(e, (Besag, ProperCAR, BYM2))}
-    temporal_indices = {e.index for e in effects if isinstance(e, (RW1, RW2, AR1))}
-    for effect in effects:
+    # Unwrap Weighted so a spatially-varying-coefficient main effect (or
+    # interaction) is still recognized -- weighting changes how the field
+    # enters the predictor, not what kind of effect it is.
+    unwrapped = [effect.effect if isinstance(effect, Weighted) else effect for effect in effects]
+    spatial_indices = {e.index for e in unwrapped if isinstance(e, (Besag, ProperCAR, BYM2))}
+    temporal_indices = {e.index for e in unwrapped if isinstance(e, (RW1, RW2, AR1))}
+    for effect in unwrapped:
         if not isinstance(effect, SpaceTime):
             continue
         missing = []
@@ -369,7 +373,13 @@ def _weight_vector(frame, effect) -> np.ndarray:
             f"weight column {effect.by!r} for effect {effect.name!r} not found"
         )
     column = frame[effect.by]
-    values = pd.to_numeric(column, errors="coerce").to_numpy(dtype=float)
+    try:
+        values = column.to_numpy(dtype=float)
+    except (TypeError, ValueError) as error:
+        raise DataContractError(
+            f"weight column {effect.by!r} for effect {effect.name!r} must be "
+            "numeric and finite"
+        ) from error
     if not np.isfinite(values).all():
         raise DataContractError(
             f"weight column {effect.by!r} for effect {effect.name!r} must be "
@@ -384,6 +394,24 @@ def _weight_vector(frame, effect) -> np.ndarray:
     return values
 
 
+def _scaled_design_block(block: LatentBlock, weights: np.ndarray) -> LatentBlock:
+    """Scale a latent block's design row-wise by ``diag(weights)``.
+
+    The two-site invariant a ``Weighted`` effect relies on: weighting scales
+    the design and leaves name, labels, precision and constraints untouched.
+    Shared by the compile-side (``_build_effect_block``) and family-side
+    (``_weighted_family_block``) weighted-block construction so the two never
+    drift apart.
+    """
+    return LatentBlock(
+        block.name,
+        block.labels,
+        csr_matrix(diags(weights) @ block.design),
+        block.precision,
+        block.constraints,
+    )
+
+
 def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
     """Build one latent block from an effect spec. Shared by compile_lgm and compile_joint.
 
@@ -395,16 +423,7 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
         if isinstance(effect, Weighted):
             block, precision = _build_effect_block(effect.effect, frame)
             weights = _weight_vector(frame, effect)
-            return (
-                LatentBlock(
-                    block.name,
-                    block.labels,
-                    csr_matrix(diags(weights) @ block.design),
-                    block.precision,
-                    block.constraints,
-                ),
-                precision,
-            )
+            return (_scaled_design_block(block, weights), precision)
         elif isinstance(effect, Fixed):
             block = build_fixed(frame, effect.formula, effect.prior_precision)
             precision = None
@@ -995,24 +1014,20 @@ def _compiled_block(name: str, builder, *args) -> object:
 def _weighted_family_block(item, weights: np.ndarray):
     """Apply a Weighted effect's weights to one family block.
 
-    ScalableBlock and ParametricBlock vary only their precision, which weighting
-    leaves alone, so scaling the template design is enough.
-    ParametricDesignBlock rebuilds its design per hyperparameter draw, so its
-    build output must be scaled on every rebuild too.
+    ScalableBlock and ParametricBlock vary only their precision, which
+    weighting leaves alone, so scaling the template design is enough.
+
+    A ``ParametricDesignBlock`` is deliberately not handled here: it rebuilds
+    its design per hyperparameter draw, and ``_context_with_fitted_weights``
+    (``pylgm/model.py``) does not recurse into a ``("weighted", ...)``
+    prediction entry, so predict() would silently reuse the *initial* theta
+    rather than the fitted one. It is also unreachable today -- the only
+    builder that produces one is MIDASParametric, which has no ``.index``, so
+    ``Weighted`` already refuses it at construction -- but that combination is
+    not a safe capability to half-implement, so it is not handled here either.
     """
     inner = item.block
-    scaled = LatentBlock(
-        inner.name,
-        inner.labels,
-        csr_matrix(diags(weights) @ inner.design),
-        inner.precision,
-        inner.constraints,
-    )
-    if isinstance(item, ParametricDesignBlock):
-        def build(values, inner_build=item.build, weights=weights):
-            return csr_matrix(diags(weights) @ inner_build(values))
-
-        return ParametricDesignBlock(scaled, item.parameters, build)
+    scaled = _scaled_design_block(inner, weights)
     if isinstance(item, ParametricBlock):
         return ParametricBlock(scaled, item.parameters, item.build)
     return ScalableBlock(scaled, item.parameter, item.scale)
@@ -1033,7 +1048,11 @@ def _append_family_blocks(
     accumulators are mutated in place, exactly as the inline body did.
     """
     if isinstance(effect, Weighted):
-        weights = _weight_vector(frame, effect)
+        # Routed through _compiled_block so a bad weight column raises the same
+        # CompilationError here as it does from _build_effect_block -- without
+        # this, an otherwise-identical model raised CompilationError or a raw
+        # DataContractError depending only on whether it declared a Hyperparameter.
+        weights = _compiled_block(effect.name, _weight_vector, frame, effect)
         first = len(scalable)
         _append_family_blocks(
             effect.effect, frame, scalable, parameter_names, parameter_bounds,
@@ -1555,6 +1574,15 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
     if isinstance(effect, Weighted):
         # Nest rather than special-case: later modifier wrappers reuse this same
         # rule instead of adding a case per combination.
+        #
+        # NOTE for the next wrapper: passing the *outer* block down is only
+        # sound because Weighted preserves the inner effect's labels verbatim.
+        # Replicated/Grouped re-label to (replicate, level) / (group, level)
+        # pairs, and several branches below (spacetime, dynamic_spatial_panel,
+        # grouped_structured, the fallback "structured" case) derive their
+        # level tuples straight from block.labels -- so a re-labelling wrapper
+        # must pass its own relabelled block into the recursive call here, not
+        # the block it received.
         return ("weighted", (_prediction_entry(effect.effect, model, panel, block), effect.by))
     if isinstance(effect, Fixed):
         spec = model_matrix(effect.formula, panel.frame).model_spec
