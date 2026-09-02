@@ -513,10 +513,6 @@ class Weighted(_ComposableEffect):
     def name(self) -> str:
         return self.effect.name
 
-    @property
-    def index(self) -> str:
-        return self.effect.index
-
 
 @dataclass(frozen=True)
 class Replicated(_ComposableEffect):
@@ -551,7 +547,13 @@ class Replicated(_ComposableEffect):
                 "its own `replicate` argument; wrapping it would give two "
                 "replication mechanisms on one effect with no defined interaction"
             )
-        if not hasattr(self.effect, "index"):
+        # Resolve the index THROUGH a Weighted wrapper rather than giving
+        # Weighted an `index` of its own: joint.Shared distinguishes "wrapper,
+        # cannot be shared" from "no index at all" by hasattr(effect, "index"),
+        # so an index on Weighted turns that guard into dead code. Same unwrap
+        # pattern as compiler._build_effect_block and data.spark._required_columns.
+        target = self.effect.effect if isinstance(self.effect, Weighted) else self.effect
+        if not hasattr(target, "index"):
             raise TypeError(
                 f"Replicated requires an indexed effect, got "
                 f"{type(self.effect).__name__}, which has no index."

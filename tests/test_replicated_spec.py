@@ -67,3 +67,14 @@ def test_replicated_may_wrap_a_weighted_effect():
 def test_replicated_accepts_a_constrained_effect():
     graph = {"a": ["b"], "b": ["a"]}
     assert Replicated(Besag("u", index="d", graph=graph), over="firm").name == "u"
+
+def test_weighted_still_exposes_no_index_attribute():
+    """Pins the invariant joint.Shared relies on.
+
+    Shared distinguishes "a wrapper, which cannot be shared" from "no index at
+    all" by `hasattr(effect, "index")`. Giving Weighted an index of its own --
+    the obvious way to let Replicated wrap it -- silently turns that guard into
+    dead code, and Shared(Weighted(...)) starts being accepted. Replicated
+    unwraps locally instead; this stops the shortcut being reintroduced.
+    """
+    assert not hasattr(Weighted(IID("u", index="t"), by="z"), "index")
