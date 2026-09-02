@@ -126,7 +126,11 @@ precision and indexing. They therefore **commute**:
 
 This is asserted by test, not left as a convention to remember.
 
-`Weighted`, `Replicated` and `Grouped` nest freely.
+`Weighted`, `Replicated` and `Grouped` nest freely in any combination of
+*distinct* wrappers. Nesting the same wrapper twice is rejected: two weight
+columns on one block are their product, and two replicate columns are one
+replicate over their cross product, so in both cases the doubled form is a
+second way to say something the single form already says.
 
 `Copy` does not participate in nesting: it is neither a wrapper nor wrappable,
 so `Weighted(Copy(...))` and `Copy` of a `Copy` are both rejected. It may
