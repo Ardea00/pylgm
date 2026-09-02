@@ -262,27 +262,6 @@ def test_inner_hyperparameters_are_still_discovered_through_the_wrapper():
     assert [hp.name for hp in _effect_hyperparameters(wrapped)] == ["tau"]
 
 
-def test_weighted_model_fits_and_estimates_the_inner_hyperparameter():
-    rng = np.random.default_rng(3)
-    n = 60
-    district = [f"d{i % 12}" for i in range(n)]
-    z = rng.normal(0.0, 1.0, n)
-    frame = pd.DataFrame({
-        "district": district, "z": z,
-        "y": rng.poisson(np.exp(0.2 + 0.3 * z)).astype(float),
-        "row": range(n),
-    })
-    model = LGM(
-        response="y", likelihood=Poisson(),
-        predictor=Fixed("1") + Weighted(
-            IID("u", index="district", precision=Hyperparameter("tau", initial=1.0)), by="z"
-        ),
-    )
-    result = model.fit(frame, engine="laplace")
-    assert np.isfinite(result.log_marginal_likelihood)
-    assert result.hyperparameters["tau"] > 0
-
-
 def test_missing_weight_column_is_rejected_naming_the_effect_and_column():
     frame = _frame([1.0, 1.0, 1.0, 1.0]).drop(columns=["z"])
     with pytest.raises((CompilationError, DataContractError), match="z"):
@@ -377,7 +356,7 @@ Add `Weighted` to the `from pylgm.effects import (...)` block at the top of `com
 - [ ] **Step 4: Run tests**
 
 Run: `PYTHONPATH=src python -m pytest tests/test_weighted_compile.py tests/test_weighted_spec.py -q`
-Expected: PASS, 17 passed
+Expected: PASS, 16 passed
 
 - [ ] **Step 5: Run the full suite — this touches shared compile paths**
 
@@ -408,7 +387,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: Task 2's `_weight_vector`; `ScalableBlock`, `ParametricBlock`, `ParametricDesignBlock` from `pylgm.ir.family`.
 - Produces: no new public names.
 
-**Why this is a separate task:** `compile_family` has its **own** effect chain, independent of `_build_effect_block`. Task 2 makes a `Weighted` model *compile*; without this task, a `Weighted` model with an estimated hyperparameter takes the family path and falls through that chain. The Task 2 test `test_weighted_model_fits_and_estimates_the_inner_hyperparameter` will be exercising this path, so if it passed in Task 2 the fallthrough raised — verify which by reading the failure, not by assuming.
+**Why this is a separate task:** `compile_family` has its **own** effect chain, independent of `_build_effect_block`. Task 2 makes a `Weighted` model *compile* on the fixed-hyperparameter path; a model with an **estimated** hyperparameter instead goes through `compile_family` and falls through that chain until this task. That is why the end-to-end fit test lives here and not in Task 2 — before this task it cannot pass, and a test failing for a reason its own task cannot fix breaks the TDD cycle.
 
 **The `ParametricDesignBlock` subtlety:** a `ScalableBlock` or `ParametricBlock` varies only its precision, which weighting does not touch, so weighting the template design suffices. A `ParametricDesignBlock` rebuilds its *design* on every hyperparameter draw, so the weights must be applied to each rebuild. This mirrors `_restack_family_block` in the joint slice, which had exactly this split.
 
@@ -417,7 +396,28 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 Append to `tests/test_weighted_compile.py`:
 
 ```python
-def test_weighted_family_scales_every_rebuilt_design(monkeypatch):
+def test_weighted_model_fits_and_estimates_the_inner_hyperparameter():
+    rng = np.random.default_rng(3)
+    n = 60
+    district = [f"d{i % 12}" for i in range(n)]
+    z = rng.normal(0.0, 1.0, n)
+    frame = pd.DataFrame({
+        "district": district, "z": z,
+        "y": rng.poisson(np.exp(0.2 + 0.3 * z)).astype(float),
+        "row": range(n),
+    })
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Weighted(
+            IID("u", index="district", precision=Hyperparameter("tau", initial=1.0)), by="z"
+        ),
+    )
+    result = model.fit(frame, engine="laplace")
+    assert np.isfinite(result.log_marginal_likelihood)
+    assert result.hyperparameters["tau"] > 0
+
+
+def test_weighted_family_scales_every_rebuilt_design():
     """A ParametricDesignBlock rebuilds its design per draw; weights must apply
     to each rebuild, not only to the template built at the initial value."""
     from pylgm.compiler import compile_family
@@ -590,7 +590,7 @@ Expected: PASS, unchanged counts. Then `git restore docs/img/`.
 - [ ] **Step 5: Run the new tests**
 
 Run: `PYTHONPATH=src python -m pytest tests/test_weighted_compile.py -q`
-Expected: PASS, 19 passed
+Expected: PASS, 19 passed (8 from Task 2 plus 3 here)
 
 Run: `ruff check src tests`
 Expected: no findings
