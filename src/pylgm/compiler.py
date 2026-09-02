@@ -1605,7 +1605,7 @@ def _copied_family_block(item, copy, incidence):
                       scale=float(copy.scale)):
                 return csr_matrix(inner_build(values) + scale * incidence)
 
-            return ParametricDesignBlock(baked, item.parameters, build)
+            return ParametricDesignBlock(baked, item.parameters, build, item.parameter, item.scale)
         if isinstance(item, ParametricBlock):
             return ParametricBlock(baked, item.parameters, item.build)
         return ScalableBlock(baked, item.parameter, item.scale)
@@ -1621,7 +1621,11 @@ def _copied_family_block(item, copy, incidence):
         design = inner_build(values) if inner_build is not None else base_design
         return csr_matrix(design + float(values[name]) * incidence)
 
-    return ParametricDesignBlock(baked, parameters, build)
+    # item is a ScalableBlock or ParametricDesignBlock here (ParametricBlock with
+    # an estimated copy scale already raised above), so item.parameter/item.scale
+    # is always defined -- carry the target's own precision scaling across so an
+    # estimated precision on the target block is not silently dropped.
+    return ParametricDesignBlock(baked, parameters, build, item.parameter, item.scale)
 
 
 def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:

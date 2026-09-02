@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pylgm import Copy, Fixed, IID, LGM, Poisson
+from pylgm import Copy, Fixed, Gaussian, IID, LGM, Poisson
 from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
@@ -171,24 +171,41 @@ def test_an_estimated_copy_scale_is_discovered_as_a_hyperparameter():
 
 
 def test_a_model_with_an_estimated_copy_scale_fits_and_reports_beta():
+    """``beta`` must be more than merely finite: it must have actually moved,
+    driven by data that carries real signal for it, and must not be pinned at
+    its lower bound (a pinned estimate means the bound set the value, not the
+    data -- indistinguishable from ``np.isfinite`` alone)."""
     from pylgm.parameters import Hyperparameter
 
     rng = np.random.default_rng(4)
-    n = 80
-    levels = [f"L{k}" for k in range(10)]
-    i = [levels[k % 10] for k in range(n)]
-    j = [levels[(k * 3) % 10] for k in range(n)]
+    K = 12
+    n = 300
+    levels = [f"L{k}" for k in range(K)]
+    u_true = rng.normal(size=K)
+    beta_true = 2.0
+    sigma_true = 0.05
+    i_idx = rng.integers(0, K, size=n)
+    j_idx = rng.integers(0, K, size=n)
+    eta = 1.0 + u_true[i_idx] + beta_true * u_true[j_idx]
     frame = pd.DataFrame({
-        "i": i, "j": j, "y": rng.poisson(3.0, n).astype(float), "row": range(n),
+        "i": [levels[k] for k in i_idx],
+        "j": [levels[k] for k in j_idx],
+        "y": eta + rng.normal(scale=sigma_true, size=n),
+        "row": range(n),
     })
     model = LGM(
-        response="y", likelihood=Poisson(),
+        response="y", likelihood=Gaussian(sigma=sigma_true),
         predictor=Fixed("1") + IID("u", index="i", precision=1.0)
         + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
     )
-    result = model.fit(frame, engine="laplace")
+    result = model.fit(frame, engine="exact_gaussian")
     assert np.isfinite(result.log_marginal_likelihood)
-    assert np.isfinite(result.hyperparameters["beta"])
+    fitted_beta = result.hyperparameters["beta"]
+    assert np.isfinite(fitted_beta)
+    assert abs(fitted_beta - 1.0) > 0.1
+    assert abs(fitted_beta - beta_true) < 0.1
+    at_bound = result.diagnostics["hyperparameters_at_bound"].split(", ")
+    assert "beta" not in at_bound
 
 
 def test_the_estimated_scale_is_applied_on_every_rebuild_not_only_the_template():
@@ -223,3 +240,31 @@ def _base_design(frame):
     """The u design with no copy folded in, for the difference check above."""
     base = _compiled(Fixed("1") + IID("u", index="i", precision=1.0), frame=frame)
     return [b for b in base.blocks if b.name == "u"][0].design.toarray()
+
+
+def test_an_estimated_copy_scale_does_not_drop_the_targets_estimated_precision():
+    """A ParametricDesignBlock folded from a Copy must still scale the
+    *precision* by the target block's own Hyperparameter (here ``tau``), not
+    just rebuild the design. Before the fix, converting a ScalableBlock target
+    into a ParametricDesignBlock dropped ``item.parameter``/``item.scale`` on
+    the floor, so the copied block's precision was byte-identical regardless
+    of tau."""
+    from pylgm.compiler import compile_family
+    from pylgm.parameters import Hyperparameter
+
+    frame = _frame()
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=IID("u", index="i", precision=Hyperparameter("tau", initial=1.0))
+        + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
+    )
+    family = compile_family(model, _panel(frame))
+    assert family is not None
+
+    low = family.materialize({"tau": 1.0, "beta": 1.0})
+    high = family.materialize({"tau": 50.0, "beta": 1.0})
+    p_low = [b for b in low.blocks if b.name == "u"][0].precision.toarray()
+    p_high = [b for b in high.blocks if b.name == "u"][0].precision.toarray()
+    assert not np.allclose(p_low, p_high)
+    nonzero = p_low != 0
+    assert np.allclose(p_high[nonzero] / p_low[nonzero], 50.0)
