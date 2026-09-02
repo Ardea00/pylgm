@@ -158,3 +158,68 @@ def test_spark_required_columns_include_a_copy_index():
     )
     required = _required_columns(model)
     assert "i" in required and "j" in required
+
+
+def test_an_estimated_copy_scale_is_discovered_as_a_hyperparameter():
+    from pylgm.compiler import _effect_hyperparameters
+    from pylgm.parameters import Hyperparameter
+
+    beta = Hyperparameter("beta", initial=1.0)
+    assert [hp.name for hp in _effect_hyperparameters(Copy("u", index="j", scale=beta))] == [
+        "beta"
+    ]
+
+
+def test_a_model_with_an_estimated_copy_scale_fits_and_reports_beta():
+    from pylgm.parameters import Hyperparameter
+
+    rng = np.random.default_rng(4)
+    n = 80
+    levels = [f"L{k}" for k in range(10)]
+    i = [levels[k % 10] for k in range(n)]
+    j = [levels[(k * 3) % 10] for k in range(n)]
+    frame = pd.DataFrame({
+        "i": i, "j": j, "y": rng.poisson(3.0, n).astype(float), "row": range(n),
+    })
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + IID("u", index="i", precision=1.0)
+        + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
+    )
+    result = model.fit(frame, engine="laplace")
+    assert np.isfinite(result.log_marginal_likelihood)
+    assert np.isfinite(result.hyperparameters["beta"])
+
+
+def test_the_estimated_scale_is_applied_on_every_rebuild_not_only_the_template():
+    """A ParametricDesignBlock rebuilds its design per draw. If the copy were
+    folded only into the template, every draw after the first would silently
+    lose it -- a model that fits and returns plausible numbers."""
+    from pylgm.compiler import compile_family
+    from pylgm.ir.family import ParametricDesignBlock
+    from pylgm.parameters import Hyperparameter
+
+    frame = _frame()
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + IID("u", index="i", precision=1.0)
+        + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
+    )
+    family = compile_family(model, _panel(frame))
+    assert family is not None
+    assert "beta" in family.parameter_names
+
+    item = [b for b in family.blocks if b.block.name == "u"][0]
+    assert isinstance(item, ParametricDesignBlock)
+    at_one = item.build({"beta": 1.0}).toarray()
+    at_three = item.build({"beta": 3.0}).toarray()
+    # Changing beta must change the design; a template-only fold would not.
+    assert not np.allclose(at_one, at_three)
+    # And the difference is exactly twice the copy's incidence.
+    assert np.allclose(at_three - at_one, 2.0 * (at_one - _base_design(frame)))
+
+
+def _base_design(frame):
+    """The u design with no copy folded in, for the difference check above."""
+    base = _compiled(Fixed("1") + IID("u", index="i", precision=1.0), frame=frame)
+    return [b for b in base.blocks if b.name == "u"][0].design.toarray()

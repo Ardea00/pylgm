@@ -810,6 +810,8 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         # Delegate: an unfound inner Hyperparameter would silently pin at its
         # initial value instead of being estimated.
         return _effect_hyperparameters(effect.effect)
+    if isinstance(effect, Copy):
+        return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
     found: list[Hyperparameter] = []
     precision = getattr(effect, "precision", None)
     if isinstance(precision, Hyperparameter):
@@ -1573,6 +1575,55 @@ def _append_family_blocks(
         parameter_bounds[precision.name] = _log_bounds(precision)
 
 
+def _copied_family_block(item, copy, incidence):
+    """Fold a copy into one family block, rebuilding per draw when needed.
+
+    A fixed scale bakes into the template. An estimated scale makes the design
+    a function of the hyperparameter, so it must be re-formed on every draw --
+    folding only into the template would silently drop the copy from every draw
+    after the first.
+    """
+    inner = item.block
+    fixed = not isinstance(copy.scale, Hyperparameter)
+    if isinstance(item, ParametricBlock) and not fixed:
+        raise CompilationError(
+            f"copy of {copy.name!r} has an estimated scale, but that block's "
+            "precision is itself a function of hyperparameters. Combining an "
+            "estimated copy scale with an estimated structural parameter on the "
+            "same block is not supported; fix one of them."
+        )
+    baked = LatentBlock(
+        inner.name,
+        inner.labels,
+        csr_matrix(inner.design + _resolve_scale(copy.scale, {}, default=1.0) * incidence),
+        inner.precision,
+        inner.constraints,
+    )
+    if fixed:
+        if isinstance(item, ParametricDesignBlock):
+            def build(values, inner_build=item.build, incidence=incidence,
+                      scale=float(copy.scale)):
+                return csr_matrix(inner_build(values) + scale * incidence)
+
+            return ParametricDesignBlock(baked, item.parameters, build)
+        if isinstance(item, ParametricBlock):
+            return ParametricBlock(baked, item.parameters, item.build)
+        return ScalableBlock(baked, item.parameter, item.scale)
+
+    name = copy.scale.name
+    base_design = inner.design
+    inner_build = item.build if isinstance(item, ParametricDesignBlock) else None
+    parameters = tuple(dict.fromkeys((item.parameters if isinstance(
+        item, (ParametricBlock, ParametricDesignBlock)) else ()) + (name,)))
+
+    def build(values, base_design=base_design, incidence=incidence, name=name,
+              inner_build=inner_build):
+        design = inner_build(values) if inner_build is not None else base_design
+        return csr_matrix(design + float(values[name]) * incidence)
+
+    return ParametricDesignBlock(baked, parameters, build)
+
+
 def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
     """Build an optimisable family, or None when no Hyperparameter is declared."""
     if not _model_hyperparameters(model):
@@ -1591,10 +1642,34 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     parameter_names: list[str] = []
     parameter_bounds: dict[str, OptimizationBounds] = {}
     parameter_priors: dict[str, object] = {}
-    for effect in model.predictor.effects:
+    ordinary, copies = _split_copies(model.predictor.effects)
+    for effect in ordinary:
         _append_family_blocks(
             effect, frame, scalable, parameter_names, parameter_bounds, parameter_priors
         )
+    for copy in copies:
+        matches = [k for k, item in enumerate(scalable) if item.block.name == copy.name]
+        if not matches:
+            raise CompilationError(
+                f"copy targets block {copy.name!r}, which this model does not "
+                f"declare. Declared blocks: "
+                f"{sorted(item.block.name for item in scalable)!r}"
+            )
+        position = matches[0]
+        incidence = _copy_incidence(frame, copy, scalable[position].block.labels)
+        scalable[position] = _copied_family_block(scalable[position], copy, incidence)
+        if isinstance(copy.scale, Hyperparameter):
+            parameter_names.append(copy.scale.name)
+            # Mirrors the exp-Almon MIDAS shape dispatch: a copy scale defaults to
+            # transform="log" (Hyperparameter's own default, positive-only), and
+            # _real_bounds only accepts "identity" -- so dispatch on the declared
+            # transform instead of assuming one.
+            parameter_bounds[copy.scale.name] = (
+                _log_bounds(copy.scale) if copy.scale.transform == "log"
+                else _real_bounds(copy.scale, "copy scale")
+            )
+            if copy.scale.prior is not None:
+                parameter_priors[copy.scale.name] = copy.scale.prior
 
     if isinstance(model.likelihood, Gaussian):
         sigma = model.likelihood.sigma
@@ -1713,7 +1788,12 @@ def build_prediction_context(
     blocks = {block.name: block for block in compiled.blocks}
     entries: list[tuple[str, object]] = []
     implied_labels: list[str] = []
-    for effect in model.predictor.effects:
+    # A copy produces no block of its own -- it folds into its target's design
+    # (_fold_copies) -- so it carries no separate prediction entry either; a
+    # naive loop over every effect would look its target block up a second
+    # time and duplicate that block's labels here.
+    ordinary, _copies = _split_copies(model.predictor.effects)
+    for effect in ordinary:
         block = blocks[effect.name]
         entries.append(_prediction_entry(effect, model, panel, block))
         implied_labels.extend(f"{block.name}:{label}" for label in block.labels)
