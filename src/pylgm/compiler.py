@@ -16,6 +16,7 @@ from pylgm.effects import (
     AR1,
     Besag,
     BYM2,
+    Copy,
     DynamicSpatialPanel,
     Fixed,
     IID,
@@ -525,6 +526,76 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
     return block, precision
 
 
+def _copy_incidence(frame, copy, labels: "tuple[str, ...]") -> csr_matrix:
+    """The incidence A_index of a copy's index over its target block's levels.
+
+    A copy reuses an existing latent field, so every value of its index column
+    must already be a level of the target. A value outside that set would mean
+    creating a new latent component, which a copy by definition cannot do.
+    """
+    if copy.index not in frame.columns:
+        raise CompilationError(
+            f"copy index column {copy.index!r} for target block {copy.name!r} not found"
+        )
+    position = {label: column for column, label in enumerate(labels)}
+    values = frame[copy.index].astype(str)
+    unknown = sorted({value for value in values if value not in position})
+    if unknown:
+        raise CompilationError(
+            f"copy of {copy.name!r} indexes level(s) {unknown!r} through column "
+            f"{copy.index!r} that the target block does not have. A copy reuses an "
+            "existing latent field and cannot add a level to it."
+        )
+    rows = np.arange(len(frame))
+    columns = np.array([position[value] for value in values])
+    return csr_matrix(
+        (np.ones(len(frame)), (rows, columns)), shape=(len(frame), len(labels))
+    )
+
+
+def _fold_copies(blocks, copies, frame, resolved) -> "list[LatentBlock]":
+    """Add each copy's scaled incidence to the columns of the block it names.
+
+    Copies produce no block of their own: ``design == hstack(blocks)`` gives each
+    block a disjoint column span, and a copy shares its target's columns by
+    definition. Folding here is what keeps that invariant true.
+    """
+    by_name = {block.name: index for index, block in enumerate(blocks)}
+    folded = list(blocks)
+    for copy in copies:
+        if copy.name not in by_name:
+            raise CompilationError(
+                f"copy targets block {copy.name!r}, which this model does not "
+                f"declare. Declared blocks: {sorted(by_name)!r}"
+            )
+        position = by_name[copy.name]
+        target = folded[position]
+        scale = _resolve_scale(copy.scale, resolved, default=1.0)
+        incidence = _copy_incidence(frame, copy, target.labels)
+        folded[position] = LatentBlock(
+            target.name,
+            target.labels,
+            csr_matrix(target.design + scale * incidence),
+            target.precision,
+            target.constraints,
+        )
+    return folded
+
+
+def _split_copies(effects) -> "tuple[list, list]":
+    """Separate ordinary effects from copies, preserving declaration order.
+
+    Several copies may target the same block -- one field entering the predictor
+    three or more times, at different indices. They simply fold in turn. A copy
+    of a *copy* is not rejected here because it is not expressible: a copy has no
+    name of its own, so nothing can reference one.
+    """
+    ordinary, copies = [], []
+    for effect in effects:
+        (copies if isinstance(effect, Copy) else ordinary).append(effect)
+    return ordinary, copies
+
+
 def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     """Compile a declarative model through the existing sparse effect builders."""
     if panel.response != model.response:
@@ -533,13 +604,15 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             f"{panel.response!r} != {model.response!r}"
         )
     frame = panel.frame
+    ordinary, copies = _split_copies(model.predictor.effects)
     blocks: list[LatentBlock] = []
     precisions: dict[str, float] = {}
-    for effect in model.predictor.effects:
+    for effect in ordinary:
         block, precision = _build_effect_block(effect, frame)
         if precision is not None:
             precisions[effect.name] = precision
         blocks.append(block)
+    blocks = _fold_copies(blocks, copies, frame, {})
 
     _warn_missing_spacetime_main_effects(model.predictor.effects)
 

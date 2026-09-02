@@ -42,6 +42,13 @@ def test_copy_rejects_a_non_numeric_non_hyperparameter_scale():
         Copy("u", index="j", scale="2.0")
 
 
+def test_copy_rejects_a_bool_scale():
+    # bool subclasses int, so a bare numeric check would silently accept
+    # True/False as 1.0/0.0.
+    with pytest.raises(TypeError, match="scale"):
+        Copy("u", index="j", scale=True)
+
+
 def test_copy_cannot_be_wrapped_by_weighted():
     # Copy is a term referencing another term, not an indexed effect of its own,
     # so wrapping it has no meaning: weight the target instead.
