@@ -486,7 +486,7 @@ class LGM:
         else:
             result = self._run_empirical_bayes(family, engine)
             compiled = compile_lgm(self, panel)
-        context = build_prediction_context(self, panel, compiled)
+        context = build_prediction_context(self, panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
         context = _context_with_fitted_weights(context, result)
         result = _rebuild_result(result, prediction_context=context)
@@ -521,7 +521,7 @@ class LGM:
         else:
             result = self._run_empirical_bayes(family, engine)
             compiled = compile_lgm(self, canonical.panel)
-        context = build_prediction_context(self, canonical.panel, compiled)
+        context = build_prediction_context(self, canonical.panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
         context = _context_with_fitted_weights(context, result)
         return _rebuild_result(

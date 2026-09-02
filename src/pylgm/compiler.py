@@ -1780,7 +1780,7 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
 
 
 def build_prediction_context(
-    model: "LGM", panel: CanonicalPanel, compiled: CompiledLGM
+    model: "LGM", panel: CanonicalPanel, compiled: CompiledLGM, result=None
 ) -> PredictionContext:
     """Capture what ``result.predict(new_data)`` needs to rebuild a design.
 
@@ -1795,11 +1795,25 @@ def build_prediction_context(
     # A copy produces no block of its own -- it folds into its target's design
     # (_fold_copies) -- so it carries no separate prediction entry either; a
     # naive loop over every effect would look its target block up a second
-    # time and duplicate that block's labels here.
-    ordinary, _copies = _split_copies(model.predictor.effects)
+    # time and duplicate that block's labels here. Instead each copy is
+    # attached to its target effect's own entry (the "copied" wrapper) so
+    # predict() folds the same scaled incidence back in.
+    ordinary, copies = _split_copies(model.predictor.effects)
+    fitted = dict(result.hyperparameters or {}) if result is not None else {}
+    by_target: dict[str, list] = {}
+    for copy in copies:
+        spec = copy.scale.name if isinstance(copy.scale, Hyperparameter) else float(copy.scale)
+        value = _resolve_scale(copy.scale, fitted, default=1.0)
+        by_target.setdefault(copy.name, []).append((copy.index, spec, value))
     for effect in ordinary:
         block = blocks[effect.name]
-        entries.append(_prediction_entry(effect, model, panel, block))
+        entry = _prediction_entry(effect, model, panel, block)
+        if effect.name in by_target:
+            entry = ("copied", (entry, tuple(
+                (index, block.labels, spec, value)
+                for index, spec, value in by_target[effect.name]
+            )))
+        entries.append(entry)
         implied_labels.extend(f"{block.name}:{label}" for label in block.labels)
     if tuple(implied_labels) != compiled.labels:
         raise CompilationError(

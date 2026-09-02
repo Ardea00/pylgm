@@ -53,10 +53,15 @@ class PredictionContext:
     ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``,
     ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
     models only -- a shared field's predict-time design is ``scale * incidence``),
-    or ``("weighted", (inner_entry, by_column))`` -- rebuilds ``inner_entry``'s
+    ``("weighted", (inner_entry, by_column))`` -- rebuilds ``inner_entry``'s
     own design (any other kind, recursively) and scales it row-wise by
     ``by_column`` from ``new_data``, mirroring the ``diag(by) A`` design a
-    ``Weighted`` effect compiles to.
+    ``Weighted`` effect compiles to -- or ``("copied", (base_entry, copies))``,
+    where ``copies`` is a tuple of ``(index_column, labels, scale_spec,
+    fitted_scale)`` -- rebuilds ``base_entry``'s own design (the target block
+    it copies into) and adds each copy's ``scale * incidence`` over the same
+    columns, mirroring how a ``Copy`` effect folds into its target block at
+    fit time.
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -308,6 +313,34 @@ def _weighted_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     return weights[:, None] * _design_block_for(inner_entry, new_data)
 
 
+def _copied_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """Rebuild a block that one or more copies fold into.
+
+    The base entry supplies the block's own design; each copy adds its scaled
+    incidence over the same columns, which is what makes a copy a second
+    occurrence of one field rather than a second field.
+    """
+    base_entry, copies = entry
+    design = _design_block_for(base_entry, new_data)
+    for index_column, labels, _spec, fitted in copies:
+        if index_column not in new_data.columns:
+            raise ValueError(
+                f"predict() new_data is missing the copy index column {index_column!r}"
+            )
+        position = {label: k for k, label in enumerate(labels)}
+        values = new_data[index_column].astype(str)
+        unknown = sorted({value for value in values if value not in position})
+        if unknown:
+            raise ValueError(
+                f"predict() cannot score rows whose copy level was not in the fitted "
+                f"model: {unknown!r}"
+            )
+        addition = np.zeros_like(design)
+        addition[np.arange(len(new_data)), values.map(position).to_numpy()] = fitted
+        design = design + addition
+    return design
+
+
 def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.ndarray:
     """Rebuild the dense predict-time design block for one ``(kind, payload)`` entry."""
     kind, payload = entry
@@ -329,6 +362,8 @@ def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.n
         return _shared_design_block(payload, new_data)
     elif kind == "weighted":
         return _weighted_block(payload, new_data)
+    elif kind == "copied":
+        return _copied_block(payload, new_data)
     else:
         raise ValueError(f"predict() context has an unknown block kind {kind!r}")
 
