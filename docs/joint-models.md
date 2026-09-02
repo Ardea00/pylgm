@@ -230,6 +230,25 @@ is the same declaration, not a collision.
 
 ## Not supported yet
 
+- **`latent_strategy="laplace"` is not recommended on joint models.** Under
+  `hyperparameters="integrate"`, the full-Laplace (tabulated) strategy was
+  measured against NUTS ground truth on a shared-component model and came out
+  *worse* than the plain `gaussian` baseline — mean |z| 0.337 against 0.072, and
+  worst-case 1.14 against 0.40 — with skewness estimates that barely track the
+  truth (correlation +0.23). A single-response control over the same data shows
+  no such degradation (`laplace` slightly *improves* there), so this is specific
+  to joint models and not a general property of the strategy.
+
+  `simplified_laplace` behaves as designed: its skewness estimates correlate
+  +0.87 with NUTS, and it more than halves the worst-case error (0.19 against
+  0.40). Prefer it when you want a skew correction on a joint. Note that in a
+  near-Gaussian regime neither correction has anything to fix and both can add
+  a little error — `gaussian` is already close to exact there.
+
+  See `examples/joint_mcmc_crosscheck/` for the measurement setup. This is
+  reported as a limitation rather than pinned by a test, because a test would
+  cement behaviour we believe is wrong.
+
 - **NaN-response hold-out.** `LGM.fit` keeps NaN-response rows as *unobserved*
   — excluded from the likelihood, but still assigned fitted values on the
   predictor. `Joint.fit` instead drops each sub-model's NaN-response rows before
