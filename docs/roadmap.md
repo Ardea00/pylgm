@@ -87,7 +87,7 @@ For the precise semantics of each shipped feature, follow the links into the
   pinned estimate means the bound (often a default derived from `initial`)
   rather than the data is setting the value.
 
-> **Joint models are research-grade and live on the `research` branch, not
+> **Joint models are research-grade and live on the `research-tier` branch, not
 > `main`.** They are tested and reviewed, but validated only internally and
 > against MCMC on *simulated* data -- no published result on real data has been
 > reproduced, and `latent_strategy="laplace"` is known to degrade on them. See

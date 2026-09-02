@@ -7,15 +7,15 @@ correctness has been established against something outside pyLGM — published
 results, an analytic solution, or an independent implementation — on the model
 as users will actually run it.
 
-**`research` carries frontier work.** The code is tested, reviewed, and believed
-correct, but its validation is internal or partial: agreement with an
+**`research-tier` carries frontier work.** The code is tested, reviewed, and
+believed correct, but its validation is internal or partial: agreement with an
 independent optimisation of the same objective, agreement with MCMC on simulated
 data, exact reduction to an already-verified path. That is real evidence. It is
 not the same as reproducing a published result on real data, and this page does
 not pretend otherwise.
 
-If you are deciding whether to use something from `research` for work you will
-publish, read the entry for it below and treat the gaps as yours to close.
+If you are deciding whether to use something from `research-tier` for work you
+will publish, read the entry for it below and treat the gaps as yours to close.
 
 ---
 

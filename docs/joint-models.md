@@ -1,6 +1,6 @@
 # Joint multi-likelihood models
 
-> **Research-grade.** Joint models live on the `research` branch, not `main`.
+> **Research-grade.** Joint models live on the `research-tier` branch, not `main`.
 > They are tested and reviewed, and validated against MCMC ground truth — but
 > on *simulated* data. No published result on real data has been reproduced,
 > and `latent_strategy="laplace"` is known to degrade on them. See
