@@ -86,6 +86,14 @@ For the precise semantics of each shipped feature, follow the links into the
   `result.diagnostics["hyperparameters_at_bound"]` and warned about, because a
   pinned estimate means the bound (often a default derived from `initial`)
   rather than the data is setting the value.
+
+> **Joint models are research-grade and live on the `research` branch, not
+> `main`.** They are tested and reviewed, but validated only internally and
+> against MCMC on *simulated* data -- no published result on real data has been
+> reproduced, and `latent_strategy="laplace"` is known to degrade on them. See
+> [research status](research-status.md) for exactly what is and is not
+> established.
+
 - **Joint multi-likelihood models** — `Joint` stacks several `LGM` sub-models
   (each with its own response, likelihood, offset, and predictor) into one
   fit, with `Shared` letting one latent field enter more than one sub-model

@@ -1,5 +1,11 @@
 # Joint multi-likelihood models
 
+> **Research-grade.** Joint models live on the `research` branch, not `main`.
+> They are tested and reviewed, and validated against MCMC ground truth — but
+> on *simulated* data. No published result on real data has been reproduced,
+> and `latent_strategy="laplace"` is known to degrade on them. See
+> [research status](research-status.md) before relying on this for published work.
+
 `LGM` takes exactly one `response` column and one `likelihood`. `Joint` stacks
 several `LGM` sub-models — each with its own response, likelihood, offset, and
 predictor — into a single fit, optionally letting one latent field enter more
