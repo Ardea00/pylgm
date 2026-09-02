@@ -277,29 +277,50 @@ def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     return block
 
 
+def _weighted_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """Scale a nested entry's rebuilt design by a weight column from new_data."""
+    inner_entry, by_column = entry
+    if by_column not in new_data.columns:
+        raise ValueError(
+            f"predict() new_data is missing the weight column {by_column!r}"
+        )
+    weights = pd.to_numeric(new_data[by_column], errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(weights).all():
+        raise ValueError(
+            f"predict() weight column {by_column!r} must be numeric and finite"
+        )
+    return weights[:, None] * _design_block_for(inner_entry, new_data)
+
+
+def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.ndarray:
+    """Rebuild the dense predict-time design block for one ``(kind, payload)`` entry."""
+    kind, payload = entry
+    if kind == "fixed":
+        return _fixed_block(payload, new_data)
+    elif kind == "structured":
+        return _structured_block(payload, new_data)
+    elif kind == "midas":
+        return _midas_block(payload, new_data)
+    elif kind == "midas_parametric":
+        return _midas_parametric_block(payload, new_data)
+    elif kind == "spacetime":
+        return _spacetime_block(payload, new_data)
+    elif kind == "dynamic_spatial_panel":
+        return _dynamic_spatial_panel_block(payload, new_data)
+    elif kind == "grouped_structured":
+        return _grouped_structured_block(payload, new_data)
+    elif kind == "shared":
+        return _shared_design_block(payload, new_data)
+    elif kind == "weighted":
+        return _weighted_block(payload, new_data)
+    else:
+        raise ValueError(f"predict() context has an unknown block kind {kind!r}")
+
+
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
     if not isinstance(new_data, pd.DataFrame) or new_data.empty:
         raise ValueError("predict() new_data must be a non-empty pandas DataFrame")
-    blocks = []
-    for kind, payload in context.entries:
-        if kind == "fixed":
-            blocks.append(_fixed_block(payload, new_data))
-        elif kind == "structured":
-            blocks.append(_structured_block(payload, new_data))
-        elif kind == "midas":
-            blocks.append(_midas_block(payload, new_data))
-        elif kind == "midas_parametric":
-            blocks.append(_midas_parametric_block(payload, new_data))
-        elif kind == "spacetime":
-            blocks.append(_spacetime_block(payload, new_data))
-        elif kind == "dynamic_spatial_panel":
-            blocks.append(_dynamic_spatial_panel_block(payload, new_data))
-        elif kind == "grouped_structured":
-            blocks.append(_grouped_structured_block(payload, new_data))
-        elif kind == "shared":
-            blocks.append(_shared_design_block(payload, new_data))
-        else:
-            raise ValueError(f"predict() context has an unknown block kind {kind!r}")
+    blocks = [_design_block_for(entry, new_data) for entry in context.entries]
     if context.column_slices:
         if len(context.column_slices) != len(blocks):
             raise ValueError(

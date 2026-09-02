@@ -1553,10 +1553,9 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
     Task 4 did for ``_build_effect_block``.
     """
     if isinstance(effect, Weighted):
-        # Weighting changes the design, not the block's labels/structure, so the
-        # predict-time descriptor is the inner effect's, same as
-        # `_effect_hyperparameters`'s delegation.
-        return _prediction_entry(effect.effect, model, panel, block)
+        # Nest rather than special-case: later modifier wrappers reuse this same
+        # rule instead of adding a case per combination.
+        return ("weighted", (_prediction_entry(effect.effect, model, panel, block), effect.by))
     if isinstance(effect, Fixed):
         spec = model_matrix(effect.formula, panel.frame).model_spec
         return ("fixed", spec)
