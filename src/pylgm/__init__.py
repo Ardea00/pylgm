@@ -16,6 +16,7 @@ from pylgm.effects import (
     SAR,
     Seasonal,
     SpaceTime,
+    Weighted,
     load_graph_file,
 )
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
@@ -75,6 +76,7 @@ __all__ = [
     "Seasonal",
     "Shared",
     "SpaceTime",
+    "Weighted",
     "WeibullSurv",
     "__version__",
 ]

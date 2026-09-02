@@ -27,6 +27,7 @@ from pylgm.effects.spec import (
     RW2,
     SAR,
     SpaceTime,
+    Weighted,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "RW2",
     "SAR",
     "SpaceTime",
+    "Weighted",
     "build_ar1",
     "build_seasonal",
     "seasonal_penalty",

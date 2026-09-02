@@ -438,6 +438,43 @@ class SpaceTime(_ComposableEffect):
         return self.space
 
 
+@dataclass(frozen=True)
+class Weighted(_ComposableEffect):
+    """An indexed latent effect modulated by a numeric column.
+
+    The design becomes ``diag(by) A`` instead of the plain incidence ``A``, so
+    the effect's contribution to the predictor is ``by_i * u_{index(i)}``. This
+    is R-INLA's ``f(index, weights, model=...)``, and it is what a
+    spatially-varying coefficient needs: a covariate whose effect varies over a
+    latent field.
+
+    Precision, labels and constraints are the inner effect's, untouched --
+    weighting changes how the field enters the predictor, not the field itself.
+    """
+
+    effect: object
+    by: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.effect, Weighted):
+            raise TypeError(
+                "Weighted effect is already weighted; two weight columns on one "
+                "block is their product, so multiply them into a single column"
+            )
+        if not hasattr(self.effect, "index"):
+            raise TypeError(
+                f"Weighted requires an indexed effect, got "
+                f"{type(self.effect).__name__}, which has no index. A Fixed effect "
+                "builds its design from a formula -- multiply the covariate into "
+                "the formula instead."
+            )
+        object.__setattr__(self, "by", _non_empty_string(self.by, "by"))
+
+    @property
+    def name(self) -> str:
+        return self.effect.name
+
+
 EffectSpec: TypeAlias = (
     Fixed
     | IID
@@ -453,6 +490,7 @@ EffectSpec: TypeAlias = (
     | MIDAS
     | MIDASParametric
     | SpaceTime
+    | Weighted
 )
 
 
@@ -503,4 +541,5 @@ __all__ = [
     "RW2",
     "SAR",
     "SpaceTime",
+    "Weighted",
 ]

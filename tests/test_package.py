@@ -35,6 +35,7 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
         "ExponentialSurv",
         "Joint",
         "Shared",
+        "Weighted",
     }
 
     assert expected.issubset(set(pylgm.__all__))
