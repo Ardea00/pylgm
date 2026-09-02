@@ -992,6 +992,453 @@ def _compiled_block(name: str, builder, *args) -> object:
         raise CompilationError(f"failed to compile effect {name!r}: {error}") from error
 
 
+def _append_family_blocks(
+    effect,
+    frame,
+    scalable: list,
+    parameter_names: list[str],
+    parameter_bounds: dict,
+    parameter_priors: dict,
+) -> None:
+    """One effect's contribution to a CompiledFamily.
+
+    Extracted verbatim out of compile_family's loop so the Weighted branch can
+    build the inner effect through the same path instead of duplicating it. The
+    accumulators are mutated in place, exactly as the inline body did.
+    """
+    if isinstance(effect, Fixed):
+        block = _compiled_block(
+            effect.name, build_fixed, frame, effect.formula, effect.prior_precision
+        )
+        scalable.append(ScalableBlock(block, None, 1.0))
+        return
+    if isinstance(effect, MIDASParametric):
+        # No `.precision` field (unlike every other effect below): the beta
+        # loading's prior precision is a fixed constant, not a named
+        # Hyperparameter, so this branch must precede `effect.precision`.
+        theta_init = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
+        template = _compiled_block(
+            effect.name, build_midas_parametric,
+            frame, effect.name, effect.columns, effect.kernel, theta_init, effect.prior_precision,
+        )
+        shapes = (effect.shape1, effect.shape2)
+        estimated = [s for s in shapes if isinstance(s, Hyperparameter)]
+        if not estimated:
+            # both shapes fixed: design bakes in, no per-theta rebuild
+            scalable.append(ScalableBlock(template, None, 1.0))
+            return
+        name1 = effect.shape1.name if isinstance(effect.shape1, Hyperparameter) else None
+        name2 = effect.shape2.name if isinstance(effect.shape2, Hyperparameter) else None
+        fixed1 = None if name1 else float(effect.shape1)
+        fixed2 = None if name2 else float(effect.shape2)
+        columns, kernel, prior_precision = effect.columns, effect.kernel, effect.prior_precision
+        frame_ref = frame
+
+        def build(values, columns=columns, kernel=kernel, prior_precision=prior_precision,
+                  frame_ref=frame_ref, name1=name1, name2=name2, fixed1=fixed1, fixed2=fixed2):
+            theta = (
+                values[name1] if name1 else fixed1,
+                values[name2] if name2 else fixed2,
+            )
+            V = frame_ref[list(columns)].to_numpy(dtype=float)
+            w = midas_weights(kernel, len(columns), theta)
+            return csr_matrix((V @ w).reshape(-1, 1))
+
+        param_names = tuple(s.name for s in estimated)
+        scalable.append(ParametricDesignBlock(template, param_names, build))
+        for shape in estimated:
+            parameter_names.append(shape.name)
+            parameter_bounds[shape.name] = (
+                _log_bounds(shape) if shape.transform == "log"
+                else _real_bounds(shape, "exp-Almon MIDAS shape")
+            )
+            if shape.prior is not None:
+                parameter_priors[shape.name] = shape.prior
+        return
+    precision = effect.precision
+    optimized = isinstance(precision, Hyperparameter)
+    value = 1.0 if optimized else precision
+    if isinstance(effect, Besag):
+        block = _compiled_block(
+            effect.name, build_besag,
+            frame, effect.name, effect.index, dict(effect.graph), value, effect.scale,
+        )
+        scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        return
+    if isinstance(effect, ProperCAR):
+        rho_is_hp = isinstance(effect.rho, Hyperparameter)
+        if not rho_is_hp:
+            block = _compiled_block(
+                effect.name, build_proper_car,
+                frame, effect.name, effect.index, dict(effect.graph), effect.rho, value,
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            return
+        # rho is a Hyperparameter -> a ParametricBlock over (tau, rho), bounded
+        # to the graph's positive-definiteness interval via a Logit transform.
+        nodes, w = normalize_graph(dict(effect.graph))
+        degree = np.asarray(w.sum(axis=1)).ravel()
+        a, b = car_rho_interval(dict(effect.graph))
+        rho_bounds = _bounded_parameter(
+            effect.rho, a, b, label="proper CAR rho", inset=1e-6 * (b - a)
+        )
+        rho_initial = float(effect.rho.initial)
+        template = _compiled_block(
+            effect.name, build_proper_car,
+            frame, effect.name, effect.index, dict(effect.graph),
+            rho_initial, value if not optimized else 1.0,
+        )
+        deg = degree
+        wmat = w
+        tau_name = precision.name if optimized else None
+        tau_fixed = None if optimized else value
+        rho_name = effect.rho.name
+
+        def build(
+            values,
+            deg=deg,
+            wmat=wmat,
+            tau_name=tau_name,
+            tau_fixed=tau_fixed,
+            rho_name=rho_name,
+        ) -> csr_matrix:
+            tau = values[tau_name] if tau_name else tau_fixed
+            rho = values[rho_name]
+            return csr_matrix(tau * (diags(deg) - rho * wmat))
+
+        params = tuple(name for name in (tau_name, rho_name) if name)
+        scalable.append(ParametricBlock(template, params, build))
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        parameter_names.append(rho_name)
+        parameter_bounds[rho_name] = rho_bounds
+        return
+    if isinstance(effect, BYM2):
+        phi_is_hp = isinstance(effect.phi, Hyperparameter)
+        if not phi_is_hp:
+            block = _compiled_block(
+                effect.name, build_bym2,
+                frame, effect.name, effect.index, dict(effect.graph), value, effect.phi,
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            return
+        # phi is a Hyperparameter -> a ParametricBlock over (tau, phi), bounded
+        # to (0, 1) via a Logit transform (BYM2 is unconstrained: no graph
+        # interval to resolve, unlike proper CAR's rho).
+        phi_bounds = _bounded_parameter(effect.phi, 0.0, 1.0, label="BYM2 phi", inset=1e-6)
+        tau_name = precision.name if optimized else None
+        tau_fixed = None if optimized else value
+        phi_name = effect.phi.name
+        nodes_bym2, w_bym2 = normalize_graph(dict(effect.graph))
+        augmented = len(nodes_bym2) > _BYM2_AUGMENT_NODES
+        if augmented:
+            template = _compiled_block(
+                effect.name, _build_bym2_augmented,
+                frame, effect.name, effect.index, dict(effect.graph),
+                value, float(effect.phi.initial),
+            )
+            degree = np.asarray(w_bym2.sum(axis=1)).ravel()
+            rstar = sorbye_rue_scale((diags(degree) - w_bym2).tocsc(), null_dim=1)
+            ident = identity(len(nodes_bym2), format="csr")
+
+            def build(
+                values_map,
+                rstar=rstar,
+                ident=ident,
+                tau_name=tau_name,
+                tau_fixed=tau_fixed,
+                phi_name=phi_name,
+            ) -> csr_matrix:
+                tau = values_map[tau_name] if tau_name else tau_fixed
+                phi = values_map[phi_name]
+                a_ = 1.0 / (1.0 - phi)
+                b_ = -np.sqrt(phi) / (1.0 - phi)
+                d_ = phi / (1.0 - phi)
+                return (tau * bmat([[a_ * ident, b_ * ident],
+                                    [b_ * ident, rstar + d_ * ident]], format="csr")).tocsr()
+        else:
+            vectors, values_ = bym2_spectrum(dict(effect.graph))
+            template = _compiled_block(
+                effect.name, build_bym2,
+                frame, effect.name, effect.index, dict(effect.graph),
+                value, float(effect.phi.initial),
+            )
+
+            def build(
+                values_map,
+                vectors=vectors,
+                spectrum=values_,
+                tau_name=tau_name,
+                tau_fixed=tau_fixed,
+                phi_name=phi_name,
+            ) -> csr_matrix:
+                tau = values_map[tau_name] if tau_name else tau_fixed
+                return bym2_precision(vectors, spectrum, tau, values_map[phi_name])
+
+        params = tuple(name for name in (tau_name, phi_name) if name)
+        scalable.append(ParametricBlock(template, params, build))
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        parameter_names.append(phi_name)
+        parameter_bounds[phi_name] = phi_bounds
+        if effect.phi.prior is not None and hasattr(effect.phi.prior, "bind"):
+            if augmented:
+                raise NotImplementedError(
+                    "a PC prior on BYM2 phi needs the graph spectrum, which the "
+                    "large-graph augmented path does not compute; raise "
+                    "_BYM2_AUGMENT_NODES to use the dense path, or drop the PC prior"
+                )
+            parameter_priors[phi_name] = effect.phi.prior.bind(values_[values_ > 1e-10])
+        elif effect.phi.prior is not None:
+            parameter_priors[phi_name] = effect.phi.prior
+        return
+    if isinstance(effect, AR1):
+        rho_is_hp = isinstance(effect.rho, Hyperparameter)
+        if not rho_is_hp:
+            block = _compiled_block(
+                effect.name, build_ar1,
+                frame, effect.name, effect.index, value, effect.rho, effect.group,
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            return
+        rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="AR1 rho", inset=1e-6)
+        level_count = len(ordered_observed_levels(frame[effect.index]))
+        group_count = (
+            1 if effect.group is None else frame[effect.group].astype(str).nunique()
+        )
+        template = _compiled_block(
+            effect.name, build_ar1,
+            frame, effect.name, effect.index, value, float(effect.rho.initial),
+            effect.group,
+        )
+        tau_name = precision.name if optimized else None
+        tau_fixed = None if optimized else value
+        rho_name = effect.rho.name
+
+        def build(
+            values,
+            level_count=level_count,
+            group_count=group_count,
+            tau_name=tau_name,
+            tau_fixed=tau_fixed,
+            rho_name=rho_name,
+        ) -> csr_matrix:
+            tau = values[tau_name] if tau_name else tau_fixed
+            return csr_matrix(
+                tau * ar1_structure(level_count, values[rho_name], group_count)
+            )
+
+        params = tuple(n for n in (tau_name, rho_name) if n)
+        scalable.append(ParametricBlock(template, params, build))
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        parameter_names.append(rho_name)
+        parameter_bounds[rho_name] = rho_bounds
+        return
+    if isinstance(effect, SAR):
+        if not isinstance(effect.rho, Hyperparameter):
+            block = _compiled_block(
+                effect.name, build_sar,
+                frame, effect.name, effect.index, dict(effect.graph), effect.rho, value,
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            return
+        rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="SAR rho", inset=1e-6)
+        nodes, w = normalize_directed_graph(dict(effect.graph))
+        w = row_standardize(w)
+        template = _compiled_block(
+            effect.name, build_sar,
+            frame, effect.name, effect.index, dict(effect.graph),
+            float(effect.rho.initial), value if not optimized else 1.0,
+        )
+        tau_name = precision.name if optimized else None
+        tau_fixed = None if optimized else value
+        rho_name = effect.rho.name
+        wmat = w
+        n_nodes = len(nodes)
+
+        def build(values, wmat=wmat, n_nodes=n_nodes, tau_name=tau_name,
+                  tau_fixed=tau_fixed, rho_name=rho_name) -> csr_matrix:
+            tau = values[tau_name] if tau_name else tau_fixed
+            m = _sar_operator(wmat, values[rho_name])
+            return _gram_precision(m, tau)
+
+        params = tuple(nm for nm in (tau_name, rho_name) if nm)
+        scalable.append(ParametricBlock(template, params, build))
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        parameter_names.append(rho_name)
+        parameter_bounds[rho_name] = rho_bounds
+        return
+    if isinstance(effect, DynamicSpatialPanel):
+        graphs = {t: dict(g) for t, g in dict(effect.graphs).items()}
+        coeff_is_hp = any(
+            isinstance(p, Hyperparameter) for p in (effect.rho, effect.gamma, effect.eta)
+        )
+        if not coeff_is_hp:
+            block = _compiled_block(
+                effect.name, build_dynamic_spatial_panel,
+                frame, effect.name, effect.unit, effect.time, graphs,
+                effect.rho, effect.gamma, effect.eta, value,
+            )
+            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+            if optimized:
+                parameter_names.append(precision.name)
+                parameter_bounds[precision.name] = _log_bounds(precision)
+            return
+        _, _, ws = _panel_networks(graphs)
+
+        def _coeff(param):
+            if isinstance(param, Hyperparameter):
+                return param.name, None
+            return None, float(param)
+
+        rho_name, rho_fixed = _coeff(effect.rho)
+        gamma_name, gamma_fixed = _coeff(effect.gamma)
+        eta_name, eta_fixed = _coeff(effect.eta)
+        tau_name = precision.name if optimized else None
+        tau_fixed = None if optimized else value
+
+        template = _compiled_block(
+            effect.name, build_dynamic_spatial_panel,
+            frame, effect.name, effect.unit, effect.time, graphs,
+            rho_fixed if rho_fixed is not None else float(effect.rho.initial),
+            gamma_fixed if gamma_fixed is not None else float(effect.gamma.initial),
+            eta_fixed if eta_fixed is not None else float(effect.eta.initial),
+            value if not optimized else 1.0,
+        )
+
+        def build(values, ws=ws,
+                  rho_name=rho_name, rho_fixed=rho_fixed,
+                  gamma_name=gamma_name, gamma_fixed=gamma_fixed,
+                  eta_name=eta_name, eta_fixed=eta_fixed,
+                  tau_name=tau_name, tau_fixed=tau_fixed) -> csr_matrix:
+            rho = values[rho_name] if rho_name else rho_fixed
+            gamma = values[gamma_name] if gamma_name else gamma_fixed
+            eta = values[eta_name] if eta_name else eta_fixed
+            tau = values[tau_name] if tau_name else tau_fixed
+            m = _sdpd_operator(ws, rho, gamma, eta)
+            return _gram_precision(m, tau)
+
+        params = tuple(nm for nm in (tau_name, rho_name, gamma_name, eta_name) if nm)
+        scalable.append(ParametricBlock(template, params, build))
+        if rho_name:
+            parameter_names.append(rho_name)
+            parameter_bounds[rho_name] = _bounded_parameter(
+                effect.rho, -1.0, 1.0, label="SDPD rho", inset=1e-6
+            )
+        if gamma_name:
+            parameter_names.append(gamma_name)
+            parameter_bounds[gamma_name] = _real_bounds(effect.gamma, "SDPD gamma")
+        if eta_name:
+            parameter_names.append(eta_name)
+            parameter_bounds[eta_name] = _real_bounds(effect.eta, "SDPD eta")
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        return
+    if isinstance(effect, Seasonal):
+        # Q(tau) = tau * StS + delta * P0, exactly like MIDAS below: the
+        # delta * P0 term holds the fixed seasonal patterns and does not
+        # scale with tau, so an estimated tau needs a ParametricBlock.
+        level_count = len(ordered_observed_levels(frame[effect.index]))
+        sts, projector = seasonal_penalty(level_count, effect.period)
+        delta = effect.ridge
+        if not optimized:
+            block = _compiled_block(
+                effect.name, build_seasonal,
+                frame, effect.name, effect.index, value, effect.period, delta,
+            )
+            scalable.append(ScalableBlock(block, None, 1.0))
+            return
+        tau_name = precision.name
+        template = _compiled_block(
+            effect.name, build_seasonal,
+            frame, effect.name, effect.index, float(precision.initial),
+            effect.period, delta,
+        )
+
+        def build(values, sts=sts, projector=projector, delta=delta,
+                  tau_name=tau_name) -> csr_matrix:
+            return csr_matrix(values[tau_name] * sts + delta * projector)
+
+        scalable.append(ParametricBlock(template, (tau_name,), build))
+        parameter_names.append(tau_name)
+        parameter_bounds[tau_name] = _log_bounds(precision)
+        return
+    if isinstance(effect, MIDAS):
+        # Q(tau) = tau * DtD + delta * P0. The delta * P0 term does not scale
+        # with tau, so an estimated tau needs a ParametricBlock (rebuild per
+        # tau) rather than a ScalableBlock; a fixed tau bakes into one matrix.
+        dtd, projector = midas_penalty(len(effect.columns), effect.order)
+        delta = effect.ridge
+        if not optimized:
+            block = _compiled_block(
+                effect.name, build_midas,
+                frame, effect.name, effect.columns, value, effect.order, delta,
+            )
+            scalable.append(ScalableBlock(block, None, 1.0))
+            return
+        tau_name = precision.name
+        template = _compiled_block(
+            effect.name, build_midas,
+            frame, effect.name, effect.columns, float(precision.initial), effect.order, delta,
+        )
+
+        def build(values, dtd=dtd, projector=projector, delta=delta, tau_name=tau_name) -> csr_matrix:
+            return csr_matrix(values[tau_name] * dtd + delta * projector)
+
+        scalable.append(ParametricBlock(template, (tau_name,), build))
+        parameter_names.append(tau_name)
+        parameter_bounds[tau_name] = _log_bounds(precision)
+        return
+    if isinstance(effect, SpaceTime):
+        block = _compiled_block(
+            effect.name, build_spacetime,
+            frame, effect.name, effect.space, effect.time,
+            dict(effect.graph) if effect.graph is not None else None,
+            effect.interaction, effect.order, value, effect.scale,
+        )
+        scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+        if optimized:
+            parameter_names.append(precision.name)
+            parameter_bounds[precision.name] = _log_bounds(precision)
+        return
+    if isinstance(effect, IID):
+        block = _compiled_block(effect.name, build_iid, frame, effect.name, effect.index, value)
+    elif isinstance(effect, (RW1, RW2)):
+        order = 1 if isinstance(effect, RW1) else 2
+        block = _compiled_block(
+            effect.name, build_random_walk, frame, effect.name, effect.index, value, order
+        )
+    else:
+        # As in compile_lgm: never let an unrecognized effect become an RW2.
+        raise CompilationError(f"unsupported effect type: {type(effect).__name__}")
+    scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
+    if optimized:
+        parameter_names.append(precision.name)
+        parameter_bounds[precision.name] = _log_bounds(precision)
+
+
 def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
     """Build an optimisable family, or None when no Hyperparameter is declared."""
     if not _model_hyperparameters(model):
@@ -1011,437 +1458,9 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
     parameter_bounds: dict[str, OptimizationBounds] = {}
     parameter_priors: dict[str, object] = {}
     for effect in model.predictor.effects:
-        if isinstance(effect, Fixed):
-            block = _compiled_block(
-                effect.name, build_fixed, frame, effect.formula, effect.prior_precision
-            )
-            scalable.append(ScalableBlock(block, None, 1.0))
-            continue
-        if isinstance(effect, MIDASParametric):
-            # No `.precision` field (unlike every other effect below): the beta
-            # loading's prior precision is a fixed constant, not a named
-            # Hyperparameter, so this branch must precede `effect.precision`.
-            theta_init = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
-            template = _compiled_block(
-                effect.name, build_midas_parametric,
-                frame, effect.name, effect.columns, effect.kernel, theta_init, effect.prior_precision,
-            )
-            shapes = (effect.shape1, effect.shape2)
-            estimated = [s for s in shapes if isinstance(s, Hyperparameter)]
-            if not estimated:
-                # both shapes fixed: design bakes in, no per-theta rebuild
-                scalable.append(ScalableBlock(template, None, 1.0))
-                continue
-            name1 = effect.shape1.name if isinstance(effect.shape1, Hyperparameter) else None
-            name2 = effect.shape2.name if isinstance(effect.shape2, Hyperparameter) else None
-            fixed1 = None if name1 else float(effect.shape1)
-            fixed2 = None if name2 else float(effect.shape2)
-            columns, kernel, prior_precision = effect.columns, effect.kernel, effect.prior_precision
-            frame_ref = frame
-
-            def build(values, columns=columns, kernel=kernel, prior_precision=prior_precision,
-                      frame_ref=frame_ref, name1=name1, name2=name2, fixed1=fixed1, fixed2=fixed2):
-                theta = (
-                    values[name1] if name1 else fixed1,
-                    values[name2] if name2 else fixed2,
-                )
-                V = frame_ref[list(columns)].to_numpy(dtype=float)
-                w = midas_weights(kernel, len(columns), theta)
-                return csr_matrix((V @ w).reshape(-1, 1))
-
-            param_names = tuple(s.name for s in estimated)
-            scalable.append(ParametricDesignBlock(template, param_names, build))
-            for shape in estimated:
-                parameter_names.append(shape.name)
-                parameter_bounds[shape.name] = (
-                    _log_bounds(shape) if shape.transform == "log"
-                    else _real_bounds(shape, "exp-Almon MIDAS shape")
-                )
-                if shape.prior is not None:
-                    parameter_priors[shape.name] = shape.prior
-            continue
-        precision = effect.precision
-        optimized = isinstance(precision, Hyperparameter)
-        value = 1.0 if optimized else precision
-        if isinstance(effect, Besag):
-            block = _compiled_block(
-                effect.name, build_besag,
-                frame, effect.name, effect.index, dict(effect.graph), value, effect.scale,
-            )
-            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            continue
-        if isinstance(effect, ProperCAR):
-            rho_is_hp = isinstance(effect.rho, Hyperparameter)
-            if not rho_is_hp:
-                block = _compiled_block(
-                    effect.name, build_proper_car,
-                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, value,
-                )
-                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-                if optimized:
-                    parameter_names.append(precision.name)
-                    parameter_bounds[precision.name] = _log_bounds(precision)
-                continue
-            # rho is a Hyperparameter -> a ParametricBlock over (tau, rho), bounded
-            # to the graph's positive-definiteness interval via a Logit transform.
-            nodes, w = normalize_graph(dict(effect.graph))
-            degree = np.asarray(w.sum(axis=1)).ravel()
-            a, b = car_rho_interval(dict(effect.graph))
-            rho_bounds = _bounded_parameter(
-                effect.rho, a, b, label="proper CAR rho", inset=1e-6 * (b - a)
-            )
-            rho_initial = float(effect.rho.initial)
-            template = _compiled_block(
-                effect.name, build_proper_car,
-                frame, effect.name, effect.index, dict(effect.graph),
-                rho_initial, value if not optimized else 1.0,
-            )
-            deg = degree
-            wmat = w
-            tau_name = precision.name if optimized else None
-            tau_fixed = None if optimized else value
-            rho_name = effect.rho.name
-
-            def build(
-                values,
-                deg=deg,
-                wmat=wmat,
-                tau_name=tau_name,
-                tau_fixed=tau_fixed,
-                rho_name=rho_name,
-            ) -> csr_matrix:
-                tau = values[tau_name] if tau_name else tau_fixed
-                rho = values[rho_name]
-                return csr_matrix(tau * (diags(deg) - rho * wmat))
-
-            params = tuple(name for name in (tau_name, rho_name) if name)
-            scalable.append(ParametricBlock(template, params, build))
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            parameter_names.append(rho_name)
-            parameter_bounds[rho_name] = rho_bounds
-            continue
-        if isinstance(effect, BYM2):
-            phi_is_hp = isinstance(effect.phi, Hyperparameter)
-            if not phi_is_hp:
-                block = _compiled_block(
-                    effect.name, build_bym2,
-                    frame, effect.name, effect.index, dict(effect.graph), value, effect.phi,
-                )
-                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-                if optimized:
-                    parameter_names.append(precision.name)
-                    parameter_bounds[precision.name] = _log_bounds(precision)
-                continue
-            # phi is a Hyperparameter -> a ParametricBlock over (tau, phi), bounded
-            # to (0, 1) via a Logit transform (BYM2 is unconstrained: no graph
-            # interval to resolve, unlike proper CAR's rho).
-            phi_bounds = _bounded_parameter(effect.phi, 0.0, 1.0, label="BYM2 phi", inset=1e-6)
-            tau_name = precision.name if optimized else None
-            tau_fixed = None if optimized else value
-            phi_name = effect.phi.name
-            nodes_bym2, w_bym2 = normalize_graph(dict(effect.graph))
-            augmented = len(nodes_bym2) > _BYM2_AUGMENT_NODES
-            if augmented:
-                template = _compiled_block(
-                    effect.name, _build_bym2_augmented,
-                    frame, effect.name, effect.index, dict(effect.graph),
-                    value, float(effect.phi.initial),
-                )
-                degree = np.asarray(w_bym2.sum(axis=1)).ravel()
-                rstar = sorbye_rue_scale((diags(degree) - w_bym2).tocsc(), null_dim=1)
-                ident = identity(len(nodes_bym2), format="csr")
-
-                def build(
-                    values_map,
-                    rstar=rstar,
-                    ident=ident,
-                    tau_name=tau_name,
-                    tau_fixed=tau_fixed,
-                    phi_name=phi_name,
-                ) -> csr_matrix:
-                    tau = values_map[tau_name] if tau_name else tau_fixed
-                    phi = values_map[phi_name]
-                    a_ = 1.0 / (1.0 - phi)
-                    b_ = -np.sqrt(phi) / (1.0 - phi)
-                    d_ = phi / (1.0 - phi)
-                    return (tau * bmat([[a_ * ident, b_ * ident],
-                                        [b_ * ident, rstar + d_ * ident]], format="csr")).tocsr()
-            else:
-                vectors, values_ = bym2_spectrum(dict(effect.graph))
-                template = _compiled_block(
-                    effect.name, build_bym2,
-                    frame, effect.name, effect.index, dict(effect.graph),
-                    value, float(effect.phi.initial),
-                )
-
-                def build(
-                    values_map,
-                    vectors=vectors,
-                    spectrum=values_,
-                    tau_name=tau_name,
-                    tau_fixed=tau_fixed,
-                    phi_name=phi_name,
-                ) -> csr_matrix:
-                    tau = values_map[tau_name] if tau_name else tau_fixed
-                    return bym2_precision(vectors, spectrum, tau, values_map[phi_name])
-
-            params = tuple(name for name in (tau_name, phi_name) if name)
-            scalable.append(ParametricBlock(template, params, build))
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            parameter_names.append(phi_name)
-            parameter_bounds[phi_name] = phi_bounds
-            if effect.phi.prior is not None and hasattr(effect.phi.prior, "bind"):
-                if augmented:
-                    raise NotImplementedError(
-                        "a PC prior on BYM2 phi needs the graph spectrum, which the "
-                        "large-graph augmented path does not compute; raise "
-                        "_BYM2_AUGMENT_NODES to use the dense path, or drop the PC prior"
-                    )
-                parameter_priors[phi_name] = effect.phi.prior.bind(values_[values_ > 1e-10])
-            elif effect.phi.prior is not None:
-                parameter_priors[phi_name] = effect.phi.prior
-            continue
-        if isinstance(effect, AR1):
-            rho_is_hp = isinstance(effect.rho, Hyperparameter)
-            if not rho_is_hp:
-                block = _compiled_block(
-                    effect.name, build_ar1,
-                    frame, effect.name, effect.index, value, effect.rho, effect.group,
-                )
-                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-                if optimized:
-                    parameter_names.append(precision.name)
-                    parameter_bounds[precision.name] = _log_bounds(precision)
-                continue
-            rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="AR1 rho", inset=1e-6)
-            level_count = len(ordered_observed_levels(frame[effect.index]))
-            group_count = (
-                1 if effect.group is None else frame[effect.group].astype(str).nunique()
-            )
-            template = _compiled_block(
-                effect.name, build_ar1,
-                frame, effect.name, effect.index, value, float(effect.rho.initial),
-                effect.group,
-            )
-            tau_name = precision.name if optimized else None
-            tau_fixed = None if optimized else value
-            rho_name = effect.rho.name
-
-            def build(
-                values,
-                level_count=level_count,
-                group_count=group_count,
-                tau_name=tau_name,
-                tau_fixed=tau_fixed,
-                rho_name=rho_name,
-            ) -> csr_matrix:
-                tau = values[tau_name] if tau_name else tau_fixed
-                return csr_matrix(
-                    tau * ar1_structure(level_count, values[rho_name], group_count)
-                )
-
-            params = tuple(n for n in (tau_name, rho_name) if n)
-            scalable.append(ParametricBlock(template, params, build))
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            parameter_names.append(rho_name)
-            parameter_bounds[rho_name] = rho_bounds
-            continue
-        if isinstance(effect, SAR):
-            if not isinstance(effect.rho, Hyperparameter):
-                block = _compiled_block(
-                    effect.name, build_sar,
-                    frame, effect.name, effect.index, dict(effect.graph), effect.rho, value,
-                )
-                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-                if optimized:
-                    parameter_names.append(precision.name)
-                    parameter_bounds[precision.name] = _log_bounds(precision)
-                continue
-            rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="SAR rho", inset=1e-6)
-            nodes, w = normalize_directed_graph(dict(effect.graph))
-            w = row_standardize(w)
-            template = _compiled_block(
-                effect.name, build_sar,
-                frame, effect.name, effect.index, dict(effect.graph),
-                float(effect.rho.initial), value if not optimized else 1.0,
-            )
-            tau_name = precision.name if optimized else None
-            tau_fixed = None if optimized else value
-            rho_name = effect.rho.name
-            wmat = w
-            n_nodes = len(nodes)
-
-            def build(values, wmat=wmat, n_nodes=n_nodes, tau_name=tau_name,
-                      tau_fixed=tau_fixed, rho_name=rho_name) -> csr_matrix:
-                tau = values[tau_name] if tau_name else tau_fixed
-                m = _sar_operator(wmat, values[rho_name])
-                return _gram_precision(m, tau)
-
-            params = tuple(nm for nm in (tau_name, rho_name) if nm)
-            scalable.append(ParametricBlock(template, params, build))
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            parameter_names.append(rho_name)
-            parameter_bounds[rho_name] = rho_bounds
-            continue
-        if isinstance(effect, DynamicSpatialPanel):
-            graphs = {t: dict(g) for t, g in dict(effect.graphs).items()}
-            coeff_is_hp = any(
-                isinstance(p, Hyperparameter) for p in (effect.rho, effect.gamma, effect.eta)
-            )
-            if not coeff_is_hp:
-                block = _compiled_block(
-                    effect.name, build_dynamic_spatial_panel,
-                    frame, effect.name, effect.unit, effect.time, graphs,
-                    effect.rho, effect.gamma, effect.eta, value,
-                )
-                scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-                if optimized:
-                    parameter_names.append(precision.name)
-                    parameter_bounds[precision.name] = _log_bounds(precision)
-                continue
-            _, _, ws = _panel_networks(graphs)
-
-            def _coeff(param):
-                if isinstance(param, Hyperparameter):
-                    return param.name, None
-                return None, float(param)
-
-            rho_name, rho_fixed = _coeff(effect.rho)
-            gamma_name, gamma_fixed = _coeff(effect.gamma)
-            eta_name, eta_fixed = _coeff(effect.eta)
-            tau_name = precision.name if optimized else None
-            tau_fixed = None if optimized else value
-
-            template = _compiled_block(
-                effect.name, build_dynamic_spatial_panel,
-                frame, effect.name, effect.unit, effect.time, graphs,
-                rho_fixed if rho_fixed is not None else float(effect.rho.initial),
-                gamma_fixed if gamma_fixed is not None else float(effect.gamma.initial),
-                eta_fixed if eta_fixed is not None else float(effect.eta.initial),
-                value if not optimized else 1.0,
-            )
-
-            def build(values, ws=ws,
-                      rho_name=rho_name, rho_fixed=rho_fixed,
-                      gamma_name=gamma_name, gamma_fixed=gamma_fixed,
-                      eta_name=eta_name, eta_fixed=eta_fixed,
-                      tau_name=tau_name, tau_fixed=tau_fixed) -> csr_matrix:
-                rho = values[rho_name] if rho_name else rho_fixed
-                gamma = values[gamma_name] if gamma_name else gamma_fixed
-                eta = values[eta_name] if eta_name else eta_fixed
-                tau = values[tau_name] if tau_name else tau_fixed
-                m = _sdpd_operator(ws, rho, gamma, eta)
-                return _gram_precision(m, tau)
-
-            params = tuple(nm for nm in (tau_name, rho_name, gamma_name, eta_name) if nm)
-            scalable.append(ParametricBlock(template, params, build))
-            if rho_name:
-                parameter_names.append(rho_name)
-                parameter_bounds[rho_name] = _bounded_parameter(
-                    effect.rho, -1.0, 1.0, label="SDPD rho", inset=1e-6
-                )
-            if gamma_name:
-                parameter_names.append(gamma_name)
-                parameter_bounds[gamma_name] = _real_bounds(effect.gamma, "SDPD gamma")
-            if eta_name:
-                parameter_names.append(eta_name)
-                parameter_bounds[eta_name] = _real_bounds(effect.eta, "SDPD eta")
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            continue
-        if isinstance(effect, Seasonal):
-            # Q(tau) = tau * StS + delta * P0, exactly like MIDAS below: the
-            # delta * P0 term holds the fixed seasonal patterns and does not
-            # scale with tau, so an estimated tau needs a ParametricBlock.
-            level_count = len(ordered_observed_levels(frame[effect.index]))
-            sts, projector = seasonal_penalty(level_count, effect.period)
-            delta = effect.ridge
-            if not optimized:
-                block = _compiled_block(
-                    effect.name, build_seasonal,
-                    frame, effect.name, effect.index, value, effect.period, delta,
-                )
-                scalable.append(ScalableBlock(block, None, 1.0))
-                continue
-            tau_name = precision.name
-            template = _compiled_block(
-                effect.name, build_seasonal,
-                frame, effect.name, effect.index, float(precision.initial),
-                effect.period, delta,
-            )
-
-            def build(values, sts=sts, projector=projector, delta=delta,
-                      tau_name=tau_name) -> csr_matrix:
-                return csr_matrix(values[tau_name] * sts + delta * projector)
-
-            scalable.append(ParametricBlock(template, (tau_name,), build))
-            parameter_names.append(tau_name)
-            parameter_bounds[tau_name] = _log_bounds(precision)
-            continue
-        if isinstance(effect, MIDAS):
-            # Q(tau) = tau * DtD + delta * P0. The delta * P0 term does not scale
-            # with tau, so an estimated tau needs a ParametricBlock (rebuild per
-            # tau) rather than a ScalableBlock; a fixed tau bakes into one matrix.
-            dtd, projector = midas_penalty(len(effect.columns), effect.order)
-            delta = effect.ridge
-            if not optimized:
-                block = _compiled_block(
-                    effect.name, build_midas,
-                    frame, effect.name, effect.columns, value, effect.order, delta,
-                )
-                scalable.append(ScalableBlock(block, None, 1.0))
-                continue
-            tau_name = precision.name
-            template = _compiled_block(
-                effect.name, build_midas,
-                frame, effect.name, effect.columns, float(precision.initial), effect.order, delta,
-            )
-
-            def build(values, dtd=dtd, projector=projector, delta=delta, tau_name=tau_name) -> csr_matrix:
-                return csr_matrix(values[tau_name] * dtd + delta * projector)
-
-            scalable.append(ParametricBlock(template, (tau_name,), build))
-            parameter_names.append(tau_name)
-            parameter_bounds[tau_name] = _log_bounds(precision)
-            continue
-        if isinstance(effect, SpaceTime):
-            block = _compiled_block(
-                effect.name, build_spacetime,
-                frame, effect.name, effect.space, effect.time,
-                dict(effect.graph) if effect.graph is not None else None,
-                effect.interaction, effect.order, value, effect.scale,
-            )
-            scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-            if optimized:
-                parameter_names.append(precision.name)
-                parameter_bounds[precision.name] = _log_bounds(precision)
-            continue
-        if isinstance(effect, IID):
-            block = _compiled_block(effect.name, build_iid, frame, effect.name, effect.index, value)
-        elif isinstance(effect, (RW1, RW2)):
-            order = 1 if isinstance(effect, RW1) else 2
-            block = _compiled_block(
-                effect.name, build_random_walk, frame, effect.name, effect.index, value, order
-            )
-        else:
-            # As in compile_lgm: never let an unrecognized effect become an RW2.
-            raise CompilationError(f"unsupported effect type: {type(effect).__name__}")
-        scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
-        if optimized:
-            parameter_names.append(precision.name)
-            parameter_bounds[precision.name] = _log_bounds(precision)
+        _append_family_blocks(
+            effect, frame, scalable, parameter_names, parameter_bounds, parameter_priors
+        )
 
     if isinstance(model.likelihood, Gaussian):
         sigma = model.likelihood.sigma
