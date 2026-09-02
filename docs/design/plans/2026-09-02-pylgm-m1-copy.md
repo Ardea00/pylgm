@@ -299,11 +299,27 @@ def test_copy_naming_a_missing_block_is_rejected():
         _compiled(Fixed("1") + IID("u", index="i") + Copy("nonexistent", index="j"))
 
 
-def test_copy_of_a_copy_is_rejected():
-    with pytest.raises(CompilationError, match="copy"):
-        _compiled(
-            Fixed("1") + IID("u", index="i") + Copy("u", index="j") + Copy("u", index="i")
-        )
+def test_two_copies_of_the_same_field_at_different_indices_both_fold_in():
+    """Not a copy of a copy -- a copy has no name of its own, so that is not
+    expressible. This is one field entering three times, which R-INLA allows and
+    the spec does not forbid: both copies fold into the same columns."""
+    frame = _frame()
+    base = _compiled(Fixed("1") + IID("u", index="i", precision=1.0))
+    both = _compiled(
+        Fixed("1") + IID("u", index="i", precision=1.0)
+        + Copy("u", index="j", scale=2.0) + Copy("u", index="i", scale=0.5)
+    )
+    u_base = [b for b in base.blocks if b.name == "u"][0]
+    u_both = [b for b in both.blocks if b.name == "u"][0]
+    assert len(both.blocks) == len(base.blocks)
+
+    position = {label: k for k, label in enumerate(u_base.labels)}
+    expected = u_base.design.toarray().copy()
+    for row, level in enumerate(frame["j"].astype(str)):
+        expected[row, position[level]] += 2.0
+    for row, level in enumerate(frame["i"].astype(str)):
+        expected[row, position[level]] += 0.5
+    assert np.allclose(u_both.design.toarray(), expected)
 
 
 def test_copy_whose_index_has_a_level_outside_the_target_is_rejected():
@@ -415,25 +431,16 @@ def _fold_copies(blocks, copies, frame, resolved) -> "list[LatentBlock]":
 
 
 def _split_copies(effects) -> "tuple[list, list]":
-    """Separate ordinary effects from copies, rejecting a copy of a copy.
+    """Separate ordinary effects from copies, preserving declaration order.
 
-    A copy of a copy has no meaning here: both fold into the same target
-    columns, so the second is just a third scaled incidence -- expressible as
-    one copy with the summed scale, and ambiguous as written.
+    Several copies may target the same block -- one field entering the predictor
+    three or more times, at different indices. They simply fold in turn. A copy
+    of a *copy* is not rejected here because it is not expressible: a copy has no
+    name of its own, so nothing can reference one.
     """
-    ordinary, copies, targets = [], [], set()
+    ordinary, copies = [], []
     for effect in effects:
-        if isinstance(effect, Copy):
-            if effect.name in targets:
-                raise CompilationError(
-                    f"more than one copy targets block {effect.name!r}; a copy of a "
-                    "copy folds into the same columns, so express it as one copy "
-                    "with the combined scale"
-                )
-            targets.add(effect.name)
-            copies.append(effect)
-        else:
-            ordinary.append(effect)
+        (copies if isinstance(effect, Copy) else ordinary).append(effect)
     return ordinary, copies
 ```
 

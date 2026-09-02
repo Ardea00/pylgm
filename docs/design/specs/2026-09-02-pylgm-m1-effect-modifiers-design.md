@@ -133,7 +133,11 @@ replicate over their cross product, so in both cases the doubled form is a
 second way to say something the single form already says.
 
 `Copy` does not participate in nesting: it is neither a wrapper nor wrappable,
-so `Weighted(Copy(...))` and `Copy` of a `Copy` are both rejected. It may
+so `Weighted(Copy(...))` is rejected. A copy of a *copy* needs no rejection
+because it is not expressible — a copy has no name of its own, so nothing can
+reference one. Several copies **may** target the same block, which is one field
+entering the predictor three or more times at different indices; they fold in
+turn. It may
 however *reference* a wrapped block, which is a different relationship — the
 copy contributes to that block's existing columns rather than modifying how the
 block was built.
