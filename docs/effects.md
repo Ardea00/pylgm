@@ -16,6 +16,7 @@ Each structured effect takes a fixed `precision` or a declared
 | `AR1(..., group=)` | One independent AR1 series **per panel unit** | [group-wise AR1](#group-wise-ar1) |
 | `Seasonal(name, index, period=)` | A slowly-drifting periodic pattern | [Seasonal](#seasonal-effect) |
 | `Weighted(effect, by)` | Modulates an indexed effect by a numeric column — spatially-varying coefficients | [Weighted](#weighted-effects) |
+| `Copy(name, index, scale=)` | A second occurrence of an existing field at another index, optionally rescaled | [Copy](#copy) |
 | `MIDAS(name, columns)` | Mixed-frequency distributed lag, smoothness-penalised | [MIDAS](#midas-smooth-lag-effect) |
 | `MIDASParametric(...)` | Restricted lag curve (exp-Almon / Beta kernel) | [restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) |
 | `SpaceTime(name, space, time, interaction=)` | Knorr-Held space-time interaction, types I–IV | [SpaceTime](#spacetime-effect-knorr-held-interaction) |
@@ -336,6 +337,60 @@ scales rows of an incidence matrix `A` — and `Fixed` has no index; its design
 comes from a formula instead. To weight a fixed-effect column, multiply the
 covariate into the formula directly (`Fixed("z:region")` or similar), rather
 than wrapping.
+
+## Copy
+
+`Copy(name, index, scale=1.0)` is a second occurrence of an existing latent
+field at a different index, R-INLA's `f(index, copy="name")`. It adds
+`scale * A_index` to the target block's design — `A_index` the incidence
+matrix of `index` over the target's own levels — and produces **no block of
+its own**.
+
+The model this expresses is a field entering one predictor twice, once
+unscaled at its declaring index and once rescaled at a second index:
+
+```
+log mu_k = alpha + u_{i(k)} + beta * u_{j(k)},    u ~ IID(tau)
+```
+
+```python
+from pylgm import Copy, Fixed, IID, LGM, Poisson
+from pylgm.parameters import Hyperparameter
+
+# ... a frame whose `i` indexes u's own declaration, `j` a second index over
+# the same levels, and `y` the Poisson response ...
+result = LGM(
+    response="y", likelihood=Poisson(),
+    predictor=Fixed("1")
+    + IID("u", index="i", precision=1.0)
+    + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
+).fit(frame, engine="laplace")
+```
+
+**A copy contributes no labels or block of its own.** `IID("u", ...) +
+Copy("u", index="j", ...)` produces exactly the blocks and `result.labels`
+that `IID("u", ...)` alone would — the copy only changes what values land in
+`u`'s existing columns. `result.latent_marginals("u")` is `u` as declared;
+there is nothing named after the copy to query separately.
+
+**`scale` may be a fixed number or a `Hyperparameter`.** A fixed scale bakes
+into the design once; an estimated scale makes the design a function of the
+hyperparameter, re-formed on every draw during optimisation, and the fitted
+value is reported under its own name in `result.hyperparameters` exactly like
+any other estimated parameter.
+
+**The copy's index values must already be levels of the target.** A copy
+reuses an existing latent field — it has no mechanism to create a level in
+it — so an `index` column containing a value the target was never declared
+over is a `CompilationError` at compile time, not a silently-added level.
+
+**`Weighted(Copy(...))` and `Copy` inside a `Joint` are both rejected.** A
+copy is a term referencing another effect's block, not an indexed effect with
+a design of its own, so wrapping it in `Weighted` raises `TypeError` at
+construction — weight the target effect instead. A `Joint` sub-model
+containing a `Copy` fails to compile with a `CompilationError`, because
+`Joint` compiles each sub-model's effects independently and has no target
+block, from an earlier sub-model or the same one, for the copy to fold into.
 
 ## MIDAS smooth-lag effect
 

@@ -133,3 +133,43 @@ column, `diag(by) A`, so a covariate's slope can itself be a latent field. See
 - **No YAML/config surface.** Every neighbouring effect in
   [effects.md](effects.md) has a YAML block; `Weighted` has none, and the
   config schema has no `weighted` effect type to parse one into.
+
+---
+
+## `Copy` effects (a field entering a predictor twice) — RESEARCH
+
+`Copy(name, index, scale=1.0)` folds `scale * A_index` into an existing
+field's design at a second index, so the field enters the predictor once
+unscaled and once (rescaled) again. It produces no block of its own. See
+[Copy](effects.md#copy).
+
+### What is verified
+
+| Claim | Evidence |
+|---|---|
+| The design is exactly the target's plus `scale * A_index` | Checked column-for-column against a manually built incidence matrix summed onto the target's design (`tests/test_copy_compile.py`, `tests/test_copy_model.py`). |
+| A copy adds no block and no labels | `IID("u", ...) + Copy("u", ...)` produces the same `blocks` and `result.labels` as `IID("u", ...)` alone (`tests/test_copy_compile.py::test_a_copy_adds_no_block_of_its_own`). |
+| Prediction round-trips | Predicting on the fit rows reproduces the fitted means to a relative and absolute 1e-12, with both a fixed scale and an estimated (`Hyperparameter`) scale, over a fixture whose copy index visits levels in an order that differs from the target's sorted label order (`tests/test_copy_predict.py`). |
+| Multiple copies of one field accumulate | Two copies of the same field at two different indices both fold into the same columns, matching a hand-summed design (`tests/test_copy_compile.py::test_two_copies_of_the_same_field_at_different_indices_both_fold_in`). |
+| A known copy scale is recovered | Simulated `u ~ N(0, 0.5²)` over 12 levels, `log mu = 0.3 + u_i + beta*u_j`, Poisson response, 600 rows, `beta` estimated as a `Hyperparameter`: fitted `beta = 1.69` against a true `1.8` (relative tolerance 0.4) (`tests/test_copy_model.py::test_the_copy_scale_is_recovered`). |
+
+### What is NOT verified
+
+- **No validation against published results on real data.** As with `Joint`
+  and `Weighted`, everything above is internal consistency or recovery on
+  *simulated* data.
+- **`Copy` inside a `Joint` is rejected, not merely untested.** `Joint`
+  compiles each sub-model's effects independently and has no target block for
+  a copy to fold into, so a sub-model containing a `Copy` fails to compile
+  with `CompilationError: unsupported effect type: Copy` rather than being
+  supported or silently ignored.
+- **An estimated copy scale on a target whose precision is itself a
+  `ParametricBlock` is rejected, not supported.** When the target's own
+  precision is a function of hyperparameters (an estimated `rho` on `AR1`,
+  `ProperCAR`, `SAR`, or `phi` on `BYM2`, for example) *and* the copy's scale
+  is also a `Hyperparameter`, compilation raises `CompilationError` rather
+  than combining the two. Combining an estimated copy scale with an estimated
+  structural parameter on the same target is a real modelling case that this
+  slice does not cover.
+- **No YAML/config surface.** As with `Weighted`, `Copy` has no YAML block in
+  [effects.md](effects.md) and no config schema entry.
