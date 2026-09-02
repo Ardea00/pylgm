@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 from formulaic import model_matrix
 from formulaic.errors import FormulaicError
 from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity, vstack
@@ -373,6 +374,11 @@ def _weight_vector(frame, effect) -> np.ndarray:
             f"weight column {effect.by!r} for effect {effect.name!r} not found"
         )
     column = frame[effect.by]
+    if not is_numeric_dtype(column):
+        raise DataContractError(
+            f"weight column {effect.by!r} for effect {effect.name!r} must be "
+            "numeric and finite"
+        )
     try:
         values = column.to_numpy(dtype=float)
     except (TypeError, ValueError) as error:

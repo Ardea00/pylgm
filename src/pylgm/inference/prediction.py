@@ -32,6 +32,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 from formulaic import ModelSpec
 
 from pylgm.exceptions import NumericalError
@@ -289,8 +290,13 @@ def _weighted_block(entry, new_data: pd.DataFrame) -> np.ndarray:
         raise ValueError(
             f"predict() new_data is missing the weight column {by_column!r}"
         )
+    column = new_data[by_column]
+    if not is_numeric_dtype(column):
+        raise ValueError(
+            f"predict() weight column {by_column!r} must be numeric and finite"
+        )
     try:
-        weights = new_data[by_column].to_numpy(dtype=float)
+        weights = column.to_numpy(dtype=float)
     except (TypeError, ValueError) as error:
         raise ValueError(
             f"predict() weight column {by_column!r} must be numeric and finite"

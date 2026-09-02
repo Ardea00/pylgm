@@ -97,6 +97,17 @@ def test_datetime_weight_column_is_rejected_not_silently_cast_to_nanoseconds():
         _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
+def test_datetime64_weight_column_is_rejected_at_fit_time():
+    """A `by` column with datetime64[ns] dtype must raise CompilationError at fit
+    time, not silently convert to nanosecond-since-epoch floats (~1.58e18)."""
+    frame = _frame([1.0, 1.0, 1.0, 1.0])
+    frame["z"] = pd.to_datetime(
+        ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"]
+    )
+    with pytest.raises(CompilationError, match="z"):
+        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+
+
 def test_nan_weight_is_rejected():
     frame = _frame([1.0, np.nan, 1.0, 1.0])
     with pytest.raises(CompilationError, match="z"):

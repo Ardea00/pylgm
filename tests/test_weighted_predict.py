@@ -56,3 +56,17 @@ def test_predict_rejects_a_datetime_weight_column():
     bad["z"] = [datetime.date(2020, 1, 1 + i % 27) for i in range(len(bad))]
     with pytest.raises(ValueError, match="z"):
         result.predict(bad)
+
+
+def test_predict_rejects_a_datetime64_weight_column():
+    """A `by` column with datetime64[ns] dtype at predict time must raise
+    ValueError, not silently convert to nanosecond-since-epoch floats."""
+    frame, result = _fitted()
+    bad = frame.copy()
+    bad["z"] = pd.to_datetime(
+        ["2020-01-01", "2020-01-02"] * (len(bad) // 2)
+    )
+    if len(bad) % 2 == 1:
+        bad.loc[len(bad) - 1, "z"] = pd.to_datetime("2020-01-01")
+    with pytest.raises(ValueError, match="z"):
+        result.predict(bad)
