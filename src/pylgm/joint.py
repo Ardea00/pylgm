@@ -181,10 +181,14 @@ class Joint:
 
         panels = {}
         for model in self.submodels:
-            sub = frame[frame[model.response].notna()].reset_index(drop=True)
+            # No notna() filtering: a NaN response is a held-out row (unobserved
+            # but still fitted), exactly as LGM.fit treats it -- CanonicalPanel
+            # already derives `observed` from the response column itself, so
+            # dropping rows here would only throw away that hold-out idiom.
+            sub = frame
             time = model.time or "__pylgm_row__"
             if model.time is None:
-                sub = sub.assign(**{time: range(len(sub))})
+                sub = frame.assign(**{time: range(len(frame))})
             panels[model.response] = CanonicalPanel.from_frame(
                 sub, DataConfig(time=time, response=model.response, panel=model.panel)
             )

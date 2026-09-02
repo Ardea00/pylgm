@@ -578,8 +578,23 @@ class CompiledMixture(_CompiledLikelihood):
 
     def restrict(self, observed: np.ndarray) -> "CompiledMixture":
         observed = np.asarray(observed, dtype=bool)
+        # Two different index spaces are in play here, both called "this part's
+        # rows" -- mixing them up is the exact bug this method used to have.
+        # `mask` selects a part's rows out of the CURRENT (pre-restrict) stacked
+        # row space (length self.n_rows); `mask[observed]` re-expresses that same
+        # selection in the NEW, restricted row space, which is the mask this
+        # method returns. `lk`'s already-bound aux vectors (Binomial `trials`;
+        # survival `event`/`entry`) live in a THIRD space: the part's OWN
+        # pre-restrict rows (length mask.sum()), because compile_joint binds them
+        # via `for_observations` over the whole sub-frame, not the full stack.
+        # `observed[mask]` re-expresses the stacked `observed` flags in that same
+        # per-part space, so it's what re-slices the aux vectors correctly.
         return CompiledMixture(
-            tuple((mask[observed], lk) for mask, lk in self.parts), int(observed.sum())
+            tuple(
+                (mask[observed], _restrict_bound_aux(lk, observed[mask]))
+                for mask, lk in self.parts
+            ),
+            int(observed.sum()),
         )
 
     def for_observations(self, aux) -> "CompiledMixture":
@@ -629,6 +644,25 @@ class CompiledMixture(_CompiledLikelihood):
     def validate_response(self, y: np.ndarray) -> None:
         for mask, likelihood in self.parts:
             likelihood.validate_response(y[mask])
+
+
+def _restrict_bound_aux(likelihood, local_observed: np.ndarray):
+    """Re-slice a part's already-bound per-row aux to its own observed rows.
+
+    `for_observations` binds aux (Binomial `trials`; survival `event`/`entry`)
+    directly as attributes on the compiled object rather than keeping the
+    original dict around, so restricting rows means reading those attributes
+    back off, slicing them, and rebuilding via the same `for_observations`
+    hook. Every other likelihood has none of these attributes, so this is a
+    no-op for it -- exactly mirroring how `for_observations` itself is a no-op
+    for likelihoods with no per-row data.
+    """
+    aux = {
+        key: np.asarray(value)[local_observed]
+        for key in ("trials", "event", "entry")
+        if (value := getattr(likelihood, key, None)) is not None
+    }
+    return likelihood.for_observations(aux) if aux else likelihood
 
 
 def _mask_aux(aux, mask: np.ndarray):

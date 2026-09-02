@@ -1,7 +1,8 @@
 import numpy as np
+import pandas as pd
 import pytest
 
-from pylgm import Fixed, Gaussian, IID, LGM, Poisson
+from pylgm import Binomial, Fixed, Gaussian, IID, LGM, Poisson
 from pylgm.exceptions import CompilationError, UnsupportedEngineError
 from pylgm.joint import Joint, Shared
 from pylgm.parameters import Hyperparameter
@@ -101,6 +102,60 @@ def test_shared_entries_reusing_the_same_hyperparameter_still_work(shared_compon
     )
     result = joint.fit(frame, engine="laplace")
     assert np.isfinite(result.hyperparameters["delta"])
+
+
+def test_joint_fit_keeps_nan_response_rows_as_unobserved_not_dropped():
+    """Finding I4: Joint.fit used to drop each sub-model's NaN-response rows
+    (`frame[frame[response].notna()]`) instead of holding them out, so the
+    NaN hold-out idiom documented for LGM.fit -- unobserved but still fitted
+    -- silently did nothing on a Joint sub-model. Every sub-model's panel
+    must keep spanning the full input frame, with the previously-dropped
+    rows now assigned a fitted value instead of vanishing."""
+    frame = pd.DataFrame({
+        "count_a": [1.0, 2.0, None, 4.0, 5.0],
+        "count_b": [3.0, 1.0, 2.0, 4.0, None],
+        "row": range(5),
+    })
+    joint = Joint([
+        LGM(response="count_a", likelihood=Poisson(), predictor=Fixed("1")),
+        LGM(response="count_b", likelihood=Poisson(), predictor=Fixed("1")),
+    ])
+    result = joint.fit(frame, engine="laplace")
+
+    # Neither sub-model's rows were dropped: each still spans every input row
+    # (5 rows, not 4), so the stacked prediction covers 2 * len(frame).
+    assert len(result.predictive_mean) == 2 * len(frame)
+    a_fitted, b_fitted = np.split(result.predictive_mean, 2)
+    # The rows that used to be dropped (count_a row 2, count_b row 4) now get
+    # a real fitted value on the linear predictor rather than being absent.
+    assert np.isfinite(a_fitted[2])
+    assert np.isfinite(b_fitted[4])
+    assert np.all(np.isfinite(a_fitted))
+    assert np.all(np.isfinite(b_fitted))
+
+
+def test_joint_fit_with_binomial_submodel_and_unobserved_row():
+    """Finding I3: compile_joint binds a part's aux (Binomial's trials) via
+    `for_observations` over its own full sub-frame, but CompiledMixture's old
+    `restrict` re-indexed only the masks, leaving that aux at full length.
+    The moment I4 stops dropping NaN-response rows, a Binomial sub-model with
+    any unobserved row hits the Laplace engine's `restrict(observed)` call
+    and crashes with a broadcast error -- this is exactly that case, now
+    routed through the full Joint.fit path rather than compile_joint
+    directly, and must fit cleanly instead of crashing."""
+    frame = pd.DataFrame({
+        "y_bin": [3.0, 5.0, None, 2.0],
+        "n_bin": [10.0, 10.0, 10.0, 10.0],
+        "y_pois": [1.0, 2.0, 3.0, 4.0],
+        "row": range(4),
+    })
+    joint = Joint([
+        LGM(response="y_bin", likelihood=Binomial(trials="n_bin"), predictor=Fixed("1")),
+        LGM(response="y_pois", likelihood=Poisson(), predictor=Fixed("1")),
+    ])
+    result = joint.fit(frame, engine="laplace")
+    assert np.isfinite(result.log_marginal_likelihood)
+    assert len(result.predictive_mean) == 2 * len(frame)
 
 
 def test_shared_effect_hyperparameter_precision_raises(shared_component_frame):
