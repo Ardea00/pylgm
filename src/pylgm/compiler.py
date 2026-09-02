@@ -26,6 +26,7 @@ from pylgm.effects import (
     SAR,
     Seasonal,
     SpaceTime,
+    Weighted,
     build_ar1,
     build_besag,
     build_bym2,
@@ -355,6 +356,34 @@ def _slice_aux(aux: "dict | None", observed: "np.ndarray") -> "dict | None":
     return {k: (v[observed] if v is not None else None) for k, v in aux.items()}
 
 
+def _weight_vector(frame, effect) -> np.ndarray:
+    """The validated weight column for a Weighted effect.
+
+    Rejected rather than tolerated: a missing or non-numeric column is a data
+    contract error, and an all-zero column makes the effect contribute nothing
+    while still consuming latent dimensions, which fits happily and reports a
+    field the data never informed.
+    """
+    if effect.by not in frame.columns:
+        raise DataContractError(
+            f"weight column {effect.by!r} for effect {effect.name!r} not found"
+        )
+    column = frame[effect.by]
+    values = pd.to_numeric(column, errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise DataContractError(
+            f"weight column {effect.by!r} for effect {effect.name!r} must be "
+            "numeric and finite"
+        )
+    if not np.any(values):
+        raise CompilationError(
+            f"weight column {effect.by!r} for effect {effect.name!r} is all zero, "
+            "so the effect cannot contribute to the predictor while still "
+            "consuming latent dimensions"
+        )
+    return values
+
+
 def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
     """Build one latent block from an effect spec. Shared by compile_lgm and compile_joint.
 
@@ -363,7 +392,20 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
     do not carry one (Fixed, MIDASParametric).
     """
     try:
-        if isinstance(effect, Fixed):
+        if isinstance(effect, Weighted):
+            block, precision = _build_effect_block(effect.effect, frame)
+            weights = _weight_vector(frame, effect)
+            return (
+                LatentBlock(
+                    block.name,
+                    block.labels,
+                    csr_matrix(diags(weights) @ block.design),
+                    block.precision,
+                    block.constraints,
+                ),
+                precision,
+            )
+        elif isinstance(effect, Fixed):
             block = build_fixed(frame, effect.formula, effect.prior_precision)
             precision = None
         elif isinstance(effect, IID):
@@ -666,6 +708,10 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
     shapes). Shared by ``_model_hyperparameters`` and the shared-effect guard
     in ``_shared_block``, so both stay in sync with which fields can carry one.
     """
+    if isinstance(effect, Weighted):
+        # Delegate: an unfound inner Hyperparameter would silently pin at its
+        # initial value instead of being estimated.
+        return _effect_hyperparameters(effect.effect)
     found: list[Hyperparameter] = []
     precision = getattr(effect, "precision", None)
     if isinstance(precision, Hyperparameter):
