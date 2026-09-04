@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 from typing import TypeAlias
+import warnings
 
 from pylgm.parameters import Hyperparameter
 
@@ -109,23 +110,47 @@ class RW2(_ComposableEffect):
 class AR1(_ComposableEffect):
     """A stationary first-order autoregressive latent effect.
 
-    With ``group`` set, the effect is one independent AR1 series per level of
-    that column -- the panel-econometrics case (a separate series per firm,
-    country, or region) -- sharing ``precision`` and ``rho`` across groups but
-    not their realizations.
+    With ``replicate`` set, the effect is one independent AR1 series per level
+    of that column -- the panel-econometrics case (a separate series per firm,
+    country, or region) -- sharing ``precision`` and ``rho`` across replicates
+    but not their realizations. This is R-INLA's ``f(index, model=...,
+    replicate=r)``; it is unrelated to R-INLA's own ``group``, which means
+    *correlated* copies with a between-group structure.
+
+    ``group`` is the deprecated former name for ``replicate`` -- kept for
+    backward compatibility and folded into ``replicate`` with a
+    ``DeprecationWarning``.
     """
 
     name: str
     index: str
     precision: float | Hyperparameter = 1.0
     rho: float | Hyperparameter = 0.5
+    replicate: str | None = None
     group: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if self.replicate is not None and self.group is not None:
+            raise ValueError(
+                "AR1 takes either `replicate` or the deprecated `group`, not both"
+            )
         if self.group is not None:
             object.__setattr__(self, "group", _non_empty_string(self.group, "group"))
+            warnings.warn(
+                "AR1(group=) is R-INLA's `replicate` -- independent series sharing "
+                "hyperparameters -- under the wrong name. Use AR1(replicate=) "
+                "instead. R-INLA's own `group` means correlated copies with a "
+                "between-group structure, which this is not.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            object.__setattr__(self, "replicate", self.group)
+        elif self.replicate is not None:
+            object.__setattr__(
+                self, "replicate", _non_empty_string(self.replicate, "replicate")
+            )
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )

@@ -504,7 +504,7 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
             precision = _resolved_precision(effect.precision)
             rho = _resolved_precision(effect.rho) if isinstance(effect.rho, Hyperparameter) else effect.rho
             block = build_ar1(
-                frame, effect.name, effect.index, precision, rho, effect.group
+                frame, effect.name, effect.index, precision, rho, effect.replicate
             )
         elif isinstance(effect, (RW1, RW2)):
             precision = _resolved_precision(effect.precision)
@@ -1450,7 +1450,7 @@ def _append_family_blocks(
         if not rho_is_hp:
             block = _compiled_block(
                 effect.name, build_ar1,
-                frame, effect.name, effect.index, value, effect.rho, effect.group,
+                frame, effect.name, effect.index, value, effect.rho, effect.replicate,
             )
             scalable.append(ScalableBlock(block, precision.name if optimized else None, 1.0))
             if optimized:
@@ -1460,12 +1460,12 @@ def _append_family_blocks(
         rho_bounds = _bounded_parameter(effect.rho, -1.0, 1.0, label="AR1 rho", inset=1e-6)
         level_count = len(ordered_observed_levels(frame[effect.index]))
         group_count = (
-            1 if effect.group is None else frame[effect.group].astype(str).nunique()
+            1 if effect.replicate is None else frame[effect.replicate].astype(str).nunique()
         )
         template = _compiled_block(
             effect.name, build_ar1,
             frame, effect.name, effect.index, value, float(effect.rho.initial),
-            effect.group,
+            effect.replicate,
         )
         tau_name = precision.name if optimized else None
         tau_fixed = None if optimized else value
@@ -1875,12 +1875,12 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
             "dynamic_spatial_panel",
             (effect.name, effect.unit, effect.time, unit_labels, time_labels),
         )
-    if isinstance(effect, AR1) and effect.group is not None:
+    if isinstance(effect, AR1) and effect.replicate is not None:
         group_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
         level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
         return (
             "grouped_structured",
-            (effect.name, effect.group, effect.index, group_labels, level_labels),
+            (effect.name, effect.replicate, effect.index, group_labels, level_labels),
         )
     if isinstance(effect, Replicated):
         # Same re-labelling rule as AR1(group=) above: Replicated's own labels

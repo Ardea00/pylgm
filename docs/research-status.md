@@ -174,3 +174,41 @@ unscaled and once (rescaled) again. It produces no block of its own. See
   the same target is a real modelling case that this slice does not cover.
 - **No YAML/config surface.** As with `Weighted`, `Copy` has no YAML block in
   [effects.md](effects.md) and no config schema entry.
+
+---
+
+## `Replicated` effects (independent copies sharing hyperparameters) — RESEARCH
+
+`Replicated(effect, over)` builds `R` independent copies of any indexed
+effect, one per level of `over`: precision `I_R ⊗ Q`, design on
+`(replicate, level)` pairs, one constraint per replicate. This is R-INLA's
+`f(index, model=..., replicate=r)`. See [Replicated](effects.md#replicated).
+
+### What is verified
+
+| Claim | Evidence |
+|---|---|
+| The precision is exactly the Kronecker product | Checked against a hand-built `np.kron(I_R, Q)` (`tests/test_replicated_compile.py::test_precision_is_the_kronecker_product_of_identity_and_the_inner_structure`). |
+| A constrained inner effect gets one constraint per replicate, full rank | `R` copies of the inner constraint, not one shared across all `R` — checked directly for count, placement and rank (`tests/test_replicated_compile.py::test_a_constrained_inner_effect_gets_one_constraint_per_replicate`). |
+| A single replicate reduces to the unwrapped inner block | `Replicated(effect, over=...)` over a column with one level matches `effect` alone (`tests/test_replicated_compile.py::test_a_single_replicate_reduces_to_the_inner_block`). |
+| It commutes with `Weighted` | `Replicated(Weighted(...))` and `Weighted(Replicated(...))` compile to the same design and precision (`tests/test_replicated_compile.py::test_replicated_commutes_with_weighted`). |
+| Matches the shipped `AR1(group=)` bit for bit | `Replicated(AR1(...), over=...)` and the pre-existing `AR1(..., group=...)` produce identical labels, design, precision and constraints across `rho` in `{0.0, 0.3, -0.6, 0.9}`, and identical `log_marginal_likelihood`/posterior mean under a full Poisson/Laplace fit — the general machinery checked against an implementation that was correct before this slice existed (`tests/test_replicated_equivalence.py`). |
+| Prediction round-trips, including when sorted and first-seen level order diverge | Predicting on the fit rows reproduces the fitted means to a relative/absolute 1e-12, on a fixture (`t1..t11`) chosen because lexicographic and first-seen order genuinely disagree — the class of bug this project has shipped twice before (`tests/test_replicated_predict.py::test_round_trip_holds_when_sorted_and_first_seen_level_order_differ`, plus the unseen-replicate/unseen-level and `Replicated(Weighted(...))` round-trip cases in the same file). |
+| Every declared hyperparameter on a `Replicated` effect actually affects the fit | Covered by the project's structural cross-check for the "registered but dead" failure mode, for `Replicated(IID(tau))`, `Replicated(AR1(rho))`, and `Replicated(Weighted(IID(tau)))` (`tests/test_hyperparameter_effectiveness.py`). |
+
+### What is NOT verified
+
+- **No validation against published results on real data.** As with `Joint`,
+  `Weighted` and `Copy`, everything above is internal consistency or exact
+  agreement with an independent implementation, not recovery on real data.
+- **`Replicated` inside a `Joint` is untested.** No test exercises a
+  `Replicated` effect inside a `Joint` sub-model or as a `Shared` target; the
+  `Joint`/`Shared` entry above already notes no `replicate` within a shared
+  effect is supported.
+- **A `ParametricDesignBlock` inner effect is rejected, not supported.** An
+  effect whose design is itself a function of an estimated hyperparameter —
+  today only `MIDASParametric` — cannot be replicated. In practice this is
+  already unreachable through the public API (`MIDASParametric` has no
+  `index`, so `Replicated` rejects it at construction), but the compiler
+  keeps a second guard for the same case so a future design-varying effect
+  fails loudly rather than silently replicating over the wrong row space.

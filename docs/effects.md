@@ -13,10 +13,11 @@ Each structured effect takes a fixed `precision` or a declared
 | `IID(name, index)` | Exchangeable random effects per level | [core](#core-building-blocks) |
 | `RW1` / `RW2` | Smooth temporal trends (1st / 2nd difference penalty) | [core](#core-building-blocks) |
 | `AR1(name, index, rho=)` | Stationary first-order autoregression | [AR1](#ar1-effect) |
-| `AR1(..., group=)` | One independent AR1 series **per panel unit** | [group-wise AR1](#group-wise-ar1) |
+| `AR1(..., replicate=)` | One independent AR1 series **per panel unit** | [group-wise AR1](#group-wise-ar1) |
 | `Seasonal(name, index, period=)` | A slowly-drifting periodic pattern | [Seasonal](#seasonal-effect) |
 | `Weighted(effect, by)` | Modulates an indexed effect by a numeric column — spatially-varying coefficients | [Weighted](#weighted-effects) |
 | `Copy(name, index, scale=)` | A second occurrence of an existing field at another index, optionally rescaled | [Copy](#copy) |
+| `Replicated(effect, over=)` | `R` independent copies of any indexed effect, sharing its hyperparameters | [Replicated](#replicated) |
 | `MIDAS(name, columns)` | Mixed-frequency distributed lag, smoothness-penalised | [MIDAS](#midas-smooth-lag-effect) |
 | `MIDASParametric(...)` | Restricted lag curve (exp-Almon / Beta kernel) | [restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) |
 | `SpaceTime(name, space, time, interaction=)` | Knorr-Held space-time interaction, types I–IV | [SpaceTime](#spacetime-effect-knorr-held-interaction) |
@@ -178,8 +179,10 @@ irregular-spacing support (`ρ^Δt`) and AR(p) effects.
 
 **From YAML:** the standalone `load_model` frontend declares `type: ar1`,
 indexed by a single `index`, with optional fixed `rho` (default `0.5`),
-`precision` (default `1.0`), and a `group` column for the group-wise variant.
-Estimating `rho`/`precision` from YAML stays Python-API-only.
+`precision` (default `1.0`), and a `group` column for the group-wise variant —
+the config schema keeps the `group` key, threaded to `AR1(replicate=)`
+directly, so loading this YAML raises no deprecation warning. Estimating
+`rho`/`precision` from YAML stays Python-API-only.
 
 ```yaml
 predictor:
@@ -189,17 +192,20 @@ predictor:
 
 ### Group-wise AR1
 
-`AR1(name, index, precision, rho, group=None)` with `group` set declares **one
-independent AR1 series per level of that column** — a separate series per firm,
-country, or region — sharing `precision` and `rho` across groups but not their
-realizations. This is the panel case: a common persistence parameter estimated
-from all units at once, with each unit keeping its own trajectory.
+`AR1(name, index, precision, rho, replicate=None)` with `replicate` set
+declares **one independent AR1 series per level of that column** — a separate
+series per firm, country, or region — sharing `precision` and `rho` across
+replicates but not their realizations. This is the panel case: a common
+persistence parameter estimated from all units at once, with each unit keeping
+its own trajectory. It is also exactly what
+[`Replicated`](#replicated) does for any indexed effect; `AR1(replicate=)`
+predates `Replicated` and is kept as the direct, single-effect spelling.
 
 ```python
 model = LGM(
     response="y",
     predictor=Fixed("1") + AR1(
-        "dyn", index="t", group="firm",
+        "dyn", index="t", replicate="firm",
         rho=Hyperparameter("dyn.rho", initial=0.0, transform="logit"),
         precision=Hyperparameter("dyn.precision", initial=1.0),
     ),
@@ -207,21 +213,29 @@ model = LGM(
 )
 ```
 
-The latent field has one cell per `(group, index)` pair, laid out group-major
-and labelled `"<group>@<level>"`, so the precision is block diagonal —
-`I_G ⊗ T(ρ)`, one contiguous AR1 band per group. Pooling is in the
-hyperparameters only: fitting `G` groups jointly is *exactly* `G` separate AR1
-fits at the same `ρ` and `precision` (the test suite pins this equality), so no
-group borrows latent strength from another.
+The latent field has one cell per `(replicate, index)` pair, laid out
+replicate-major and labelled `"<replicate>@<level>"`, so the precision is
+block diagonal — `I_R ⊗ T(ρ)`, one contiguous AR1 band per replicate. Pooling
+is in the hyperparameters only: fitting `R` replicates jointly is *exactly*
+`R` separate AR1 fits at the same `ρ` and `precision` (the test suite pins
+this equality), so no replicate borrows latent strength from another.
 
 The time levels are the union of levels observed anywhere in the frame, so the
-grid is balanced across groups: a `(group, period)` cell absent from the data
-still gets a latent column and a prediction, exactly like the `NaN`-response
-future rows above. `result.predict(new_data)` scores grouped rows; an unseen
-*group* raises, pointing at the same `NaN`-response workflow as an unseen level.
+grid is balanced across replicates: a `(replicate, period)` cell absent from
+the data still gets a latent column and a prediction, exactly like the
+`NaN`-response future rows above. `result.predict(new_data)` scores replicated
+rows; an unseen *replicate* raises, pointing at the same `NaN`-response
+workflow as an unseen level.
 
-**Regular spacing is assumed within each group**, for the same reason it is for
-the ungrouped effect.
+**Regular spacing is assumed within each replicate**, for the same reason it
+is for the ungrouped effect.
+
+**`group=` is deprecated in favour of `replicate=`.** `AR1(group=...)` was
+the original, misleadingly-named spelling — this is R-INLA's `replicate`, not
+its `group`, which means *correlated* copies with a between-group structure.
+`AR1(..., group="firm")` still works and folds into `replicate` with a
+`DeprecationWarning`; passing both raises `ValueError`. Use `replicate=`
+directly in new code.
 
 ## Seasonal effect
 
@@ -400,6 +414,79 @@ effect instead. A `Joint` sub-model containing a bare `Copy` fails to compile
 with a `CompilationError`, because `Joint` compiles each sub-model's effects
 independently and has no target block, from an earlier sub-model or the same
 one, for the copy to fold into.
+
+## Replicated
+
+`Replicated(effect, over)` builds `R` independent copies of any indexed
+effect — one per level of `over` — sharing the wrapped effect's
+hyperparameters but not its realizations. This is R-INLA's `f(index,
+model=..., replicate=r)`. `AR1(replicate=)`, in the section above, is the
+single-effect special case that predates `Replicated` and is now expressible
+as `Replicated(AR1(...), over=...)`.
+
+```
+log mu_i = alpha + u_{r(i), s(i)},    u ~ IID(tau)
+```
+
+for replicate `r(i)` and level `s(i)` of row `i`: `R` independent draws of the
+inner field, `tau` shared across all of them.
+
+```python
+from pylgm import Fixed, IID, LGM, Poisson, Replicated
+from pylgm.parameters import Hyperparameter
+
+# ... a frame whose `region` is IID's own index, `firm` the replicate column,
+# and `y` the Poisson response ...
+result = LGM(
+    response="y", likelihood=Poisson(),
+    predictor=Fixed("1") + Replicated(
+        IID("u", index="region", precision=Hyperparameter("tau", initial=1.0)), over="firm"
+    ),
+).fit(frame, engine="laplace")
+```
+
+**Structure: `I_R ⊗ Q`, paired labels.** The precision is the Kronecker
+product of an `R×R` identity and the inner effect's own precision `Q`, laid
+out replicate-major (`cell = replicate * n_levels + level`, the same
+convention `AR1(replicate=)` uses, which is what lets the two match bit for
+bit below). Labels are `"<replicate>@<level>"` pairs — two firms over regions
+`ny`/`sf` give `result.labels` entries `"u:f1@ny"`, `"u:f1@sf"`, `"u:f2@ny"`,
+`"u:f2@sf"`.
+
+**Constraints replicate too: one per replicate, not one shared.** A
+constrained inner effect (`RW1`, `RW2`, `Besag`, ...) gets `R` copies of its
+own constraint, `I_R ⊗ C`, not a single constraint shared across all `R`
+copies — a shared constraint would leave `R−1` directions unidentified while
+the fit still converges on plausible numbers.
+
+**Replicates share every hyperparameter, never their realizations.** Fitting
+`R` replicates jointly is exactly `R` separate fits at the same
+hyperparameters — `precision`, `rho`, whatever the inner effect declares —
+pooled only in the hyperparameters, never in the latent values themselves.
+
+**It commutes with `Weighted`.** `Replicated(Weighted(effect, by=...),
+over=...)` and `Weighted(Replicated(effect, over=...), by=...)` compile to
+the same block: weighting scales the design, replication reshapes precision
+and indexing, and the two touch disjoint parts of the block.
+
+**A `ParametricDesignBlock` inner effect is rejected.** An effect whose
+design is itself a function of an estimated hyperparameter — today only
+`MIDASParametric` — cannot be replicated. In practice this is caught earlier:
+`MIDASParametric` has no `index`, so `Replicated(MIDASParametric(...), ...)`
+already raises `TypeError` at construction. The compiler carries a second
+guard for the same case, currently unreachable through the public API, kept
+so a future design-varying effect that does gain an `index` fails loudly
+rather than silently replicating over the wrong row space.
+
+**`AR1(group=)` is deprecated in `Replicated`'s favour.**
+`AR1(name, index, precision, rho, group="firm")` is exactly
+`Replicated(AR1(name, index, precision, rho), over="firm")` — matched bit for
+bit (labels, design, precision, constraints) across four values of `rho`, and
+under a full `fit()`, in `tests/test_replicated_equivalence.py`. `AR1(group=)`
+still works, folded into `AR1(replicate=)` with a `DeprecationWarning`; prefer
+`AR1(replicate=)` for a single AR1 panel, or `Replicated(AR1(...), over=...)`
+when it reads more consistently alongside other replicated effects in the
+same model.
 
 ## MIDAS smooth-lag effect
 

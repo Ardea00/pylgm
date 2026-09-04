@@ -49,7 +49,6 @@ def test_replicated_rejects_wrapping_a_copy():
         Replicated(Copy("u", index="j"), over="firm")
 
 
-@pytest.mark.xfail(reason="AR1.replicate arrives in Task 5", strict=False)
 def test_replicated_rejects_an_ar1_that_already_replicates_itself():
     # AR1(replicate=) is the same concept; wrapping it would give two
     # replication mechanisms on one effect with no defined interaction.
