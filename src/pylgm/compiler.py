@@ -1892,10 +1892,19 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
         target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
         replicate_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
         level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
-        return (
+        entry = (
             "replicated_structured",
             (effect.name, effect.over, target.index, replicate_labels, level_labels),
         )
+        if isinstance(inner_spec, Weighted):
+            # Same nesting Weighted(Replicated(...)) already produces above --
+            # build the replicated entry from the unwrapped inner effect, then
+            # wrap it in "weighted" so _design_block_for's existing recursive
+            # dispatch reapplies the weights. Without this the weighting is
+            # silently dropped: replicated_structured's own payload carries no
+            # weight information at all.
+            entry = ("weighted", (entry, inner_spec.by))
+        return entry
     return ("structured", (effect.name, effect.index, block.labels))
 
 
