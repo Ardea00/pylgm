@@ -100,6 +100,8 @@ def build_spacetime(
     time_pos = {t: j for j, t in enumerate(times)}
     observed_area = [str(v) for v in frame[space]]
     observed_time = [str(v) for v in frame[time]]
+    # Unseen area/time levels are a hard error (see kronecker.py's module
+    # docstring for the area-major one-hot layout this check guards).
     missing_area = sorted({v for v in observed_area if v not in area_pos})
     if missing_area:
         raise ValueError(f"observed {space!r} level(s) {missing_area!r} not in the area universe")
