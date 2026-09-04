@@ -1845,7 +1845,7 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
         # sound because Weighted preserves the inner effect's labels verbatim.
         # Replicated/Grouped re-label to (replicate, level) / (group, level)
         # pairs, and several branches below (spacetime, dynamic_spatial_panel,
-        # grouped_structured, the fallback "structured" case) derive their
+        # replicated_structured, the fallback "structured" case) derive their
         # level tuples straight from block.labels -- so a re-labelling wrapper
         # must pass its own relabelled block into the recursive call here, not
         # the block it received.
