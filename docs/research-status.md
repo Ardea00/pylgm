@@ -212,3 +212,13 @@ effect, one per level of `over`: precision `I_R ⊗ Q`, design on
   `index`, so `Replicated` rejects it at construction), but the compiler
   keeps a second guard for the same case so a future design-varying effect
   fails loudly rather than silently replicating over the wrong row space.
+- **No YAML/config surface.** As with `Weighted` and `Copy`, there is no
+  `replicated` effect type in the config schema and no YAML block in
+  [effects.md](effects.md); the Python API is the only way to declare one.
+- **Not supported on Spark.** `_required_columns` in `data/spark.py` reads
+  `effect.index` unconditionally, so a `Replicated` model raises a bare
+  `AttributeError` there, and `over` is never added to the projection either.
+  This slice did not introduce the gap: that helper is already blind to
+  `MIDAS`, `MIDASParametric`, `SpaceTime` and `DynamicSpatialPanel`, and it
+  drops even `AR1(replicate=)`'s replicate column. It is recorded here rather
+  than fixed because the fix belongs to that helper, across all of them.

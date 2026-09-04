@@ -1170,9 +1170,9 @@ def _replicated_family_block(item, frame, effect, replicates, index):
     wrapped inner effect, not on the ``Weighted`` itself (see
     ``_build_effect_block``'s Replicated branch).
     """
-    composed = replicated_block(item.block, frame, index, effect.over, replicates)
-    count = len(replicates)
-
+    # Rejected before composing: replicated_block on a design that spans the
+    # level set can raise its own "level(s) absent" ValueError first, which
+    # would mask this CompilationError with an unrelated message.
     if isinstance(item, ParametricDesignBlock):
         raise CompilationError(
             f"effect {effect.name!r} is replicated and its design is itself a "
@@ -1180,6 +1180,8 @@ def _replicated_family_block(item, frame, effect, replicates, index):
             "because the rebuilt design spans the level set rather than the "
             "replicated row space"
         )
+    composed = replicated_block(item.block, frame, index, effect.over, replicates)
+    count = len(replicates)
     if isinstance(item, ParametricBlock):
         def build(values, inner_build=item.build, count=count):
             return csr_matrix(

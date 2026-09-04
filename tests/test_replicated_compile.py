@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
-from pylgm import Besag, Fixed, IID, LGM, Poisson, Replicated, Weighted
+from pylgm import Besag, Fixed, IID, LGM, Poisson, Replicated, RW1, Weighted
 from pylgm.compiler import (
     _build_effect_block,
     _effect_hyperparameters,
@@ -239,3 +239,57 @@ def test_parametric_design_block_is_rejected():
 
     with pytest.raises(CompilationError, match="design is itself a function"):
         _replicated_family_block(block, frame, effect, replicates, "t")
+
+
+def _integer_index_frame():
+    """Twelve integer levels, so 1/2/10/11/12 discriminate numeric from lexical."""
+    years = list(range(1, 13))
+    return pd.DataFrame({
+        "year": years * 2,
+        "firm": ["f0"] * 12 + ["f1"] * 12,
+        "y": [0.0] * 24,
+        "row": range(24),
+    })
+
+
+def test_an_integer_index_keeps_its_numeric_level_order():
+    """The dtype passed to _levels_frame, which nothing else exercises.
+
+    Both Replicated call sites hand `frame[index].dtype` to `_levels_frame`
+    precisely so an integer index is not ordered lexically. Stringifying there
+    yields 1, 10, 11, 12, 2, ... -- and for RW1/RW2/Seasonal/AR1 that applies
+    the smoothness penalty across the wrong neighbours, a silently wrong prior.
+    Every other test in this file uses a string index and cannot see it; the
+    prediction round-trip cannot either, since fit and predict would agree on
+    the same wrong order.
+    """
+    frame = _integer_index_frame()
+    outer, _ = _build_effect_block(
+        Replicated(RW1("u", index="year", precision=1.0), over="firm"), frame
+    )
+    expected = tuple(f"{firm}@{year}" for firm in ("f0", "f1") for year in range(1, 13))
+    assert outer.labels == expected
+
+
+def test_an_integer_index_keeps_its_numeric_level_order_in_the_family_path():
+    """The same guard at the second call site, _append_family_blocks."""
+    from pylgm.compiler import compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+
+    frame = _integer_index_frame()
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Replicated(
+            RW1("u", index="year", precision=Hyperparameter("tau", initial=1.0)),
+            over="firm",
+        ),
+    )
+    panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y", panel=())
+    )
+    compiled = compile_family(model, panel).materialize({"tau": 1.0})
+    expected = tuple(
+        f"u:{firm}@{year}" for firm in ("f0", "f1") for year in range(1, 13)
+    )
+    assert tuple(compiled.labels[-24:]) == expected

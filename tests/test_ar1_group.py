@@ -65,7 +65,7 @@ def test_grouped_fit_equals_separate_per_group_fits():
     )
     joint = LGM(
         response="y",
-        predictor=Predictor((AR1("d", "t", group="g", precision=1.5, rho=0.6),)),
+        predictor=Predictor((AR1("d", "t", replicate="g", precision=1.5, rho=0.6),)),
         likelihood=Gaussian(sigma=0.2),
     ).fit(both).mean
 
@@ -87,7 +87,7 @@ def test_grouped_ar1_recovers_rho_from_a_panel():
     model = LGM(
         response="y",
         predictor=Fixed("1") + AR1(
-            "dyn", index="t", group="firm",
+            "dyn", index="t", replicate="firm",
             rho=Hyperparameter("dyn.rho", initial=0.0, transform="logit"),
             precision=Hyperparameter("dyn.precision", initial=1.0),
         ),
@@ -111,7 +111,7 @@ def test_predict_scores_grouped_rows():
     frame = _panel(groups=4, periods=12, rho=0.6, sd=0.3)
     model = LGM(
         response="y",
-        predictor=Fixed("1") + AR1("dyn", index="t", group="firm", precision=1.0, rho=0.6),
+        predictor=Fixed("1") + AR1("dyn", index="t", replicate="firm", precision=1.0, rho=0.6),
         likelihood=Gaussian(sigma=0.3),
     )
     result = model.fit(frame)
@@ -127,7 +127,7 @@ def test_predict_rejects_an_unseen_group():
     frame = _panel(groups=3, periods=10, rho=0.6, sd=0.3)
     model = LGM(
         response="y",
-        predictor=Fixed("1") + AR1("dyn", index="t", group="firm", precision=1.0, rho=0.6),
+        predictor=Fixed("1") + AR1("dyn", index="t", replicate="firm", precision=1.0, rho=0.6),
         likelihood=Gaussian(sigma=0.3),
     )
     result = model.fit(frame)
@@ -148,3 +148,17 @@ def test_ungrouped_ar1_is_unchanged():
     block = build_ar1(frame, "d", "t", precision=1.0, rho=0.5)
     assert block.labels == ("0", "1", "2", "3")
     assert block.precision.shape == (4, 4)
+
+
+def test_the_deprecated_group_spelling_still_builds_the_same_effect():
+    """The rename's back-compat path, pinned so it cannot rot silently.
+
+    The substantive coverage above moved to `replicate=`; this is the only
+    remaining use of the deprecated spelling, so when `group=` is removed the
+    panel-AR1 coverage stays behind rather than leaving with it.
+    """
+    with pytest.warns(DeprecationWarning, match="replicate"):
+        deprecated = AR1("dyn", index="t", group="firm", precision=1.0, rho=0.6)
+    assert deprecated.replicate == "firm"
+    current = AR1("dyn", index="t", replicate="firm", precision=1.0, rho=0.6)
+    assert deprecated.replicate == current.replicate

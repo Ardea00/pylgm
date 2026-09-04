@@ -150,7 +150,7 @@ Q \;=\; \frac{\tau}{1-\rho^2}
 \operatorname{Cov}(x_s, x_t) = \tau^{-1}\rho^{|s-t|}.
 \]
 
-Setting `group=` gives one independent series per panel unit — the precision
+Setting `replicate=` gives one independent series per panel unit — the precision
 becomes \(I_G \otimes Q\), block diagonal, sharing \(\rho\) and \(\tau\) but not
 the realizations.
 

@@ -230,14 +230,17 @@ def _alternate_value(bounds) -> float:
     """A second value for ``bounds`` guaranteed to lie in its declared domain.
 
     Three-quarters of the way across ``[lower, upper]``, falling back to a
-    quarter of the way across on the (practically unreachable) chance that
-    lands on ``initial`` itself -- either way strictly inside the interval
+    quarter of the way across when that lands on (or near) ``initial`` itself.
+    The tolerance is a fraction of the span, not of ``initial``: an absolute
+    guard let AR1's ``rho`` land 5e-7 from a declared ``initial=0.5``, inside
+    ``np.allclose``'s tolerance, so the perturbation registered as no change
+    and the row failed spuriously -- either way strictly inside the interval
     ``OptimizationBounds`` already validated, so no per-parameter/per-
     transform special-casing is needed here.
     """
     span = bounds.upper - bounds.lower
     candidate = bounds.lower + 0.75 * span
-    if abs(candidate - bounds.initial) < 1e-9 * max(1.0, abs(bounds.initial)):
+    if abs(candidate - bounds.initial) < 1e-6 * span:
         candidate = bounds.lower + 0.25 * span
     return candidate
 
