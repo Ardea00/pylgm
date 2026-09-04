@@ -496,7 +496,7 @@ In `src/pylgm/effects/replicate.py`, replace the body of `replicated_block` afte
         replicates, identity(n_replicates, format="csr"), np.zeros((n_replicates, 0)),
         levels, inner.precision, inner.constraints.T,
         replicate_positions, level_positions,
-        "@", orthonormalise=False,
+        separator="@", orthonormalise=False,
     )
 ```
 
@@ -517,15 +517,18 @@ In `src/pylgm/effects/spacetime.py`, delete `_interaction_constraints` entirely 
     if missing_area:
         raise ValueError(f"observed {space!r} level(s) {missing_area!r} not in the area universe")
 
-    # Scalar precision multiplies the whole product, so it rides on the outer
-    # factor: precision * kron(k_s, k_t) == kron(precision * k_s, k_t).
+    # precision_scale, not a scalar folded into k_s: IEEE multiplication is not
+    # associative, and kron(precision * k_s, k_t) differs from
+    # precision * kron(k_s, k_t) by up to 3.6e-15 -- enough to break the
+    # bit-for-bit snapshot from Step 1. The kernel applies the scalar exactly
+    # where build_spacetime applies it today.
     return kron_block(
         name,
-        areas, csr_matrix(precision * k_s), _space_null_basis(interaction, w, S),
+        areas, k_s, _space_null_basis(interaction, w, S),
         times, k_t, _time_null_basis(interaction, order, T),
         np.array([area_pos[a] for a in observed_area]),
         np.array([time_pos[t] for t in observed_time]),
-        "|", orthonormalise=True,
+        separator="|", orthonormalise=True, precision_scale=precision,
     )
 ```
 
@@ -536,7 +539,7 @@ Add `from pylgm.effects.kronecker import kron_block` and drop `LatentBlock` and 
 Run: `PYTHONPATH=src python -m pytest tests/test_kronecker_delegation.py tests/test_spacetime.py tests/test_replicated_compile.py tests/test_replicated_equivalence.py tests/test_ar1_group.py -q`
 Expected: all pass, with the snapshots from Step 1 still matching.
 
-If a spacetime snapshot differs, **do not update the snapshot.** The likely cause is the precision scalar: `kron(precision * k_s, k_t)` and `precision * kron(k_s, k_t)` agree exactly in exact arithmetic but can differ in the last bits. If so, keep `k_s` unscaled in the kernel call and scale the returned precision instead.
+If a spacetime snapshot differs, **do not update the snapshot** — it is the only guard on this rewrite. Check `precision_scale` is being passed rather than folded into a factor, and that `_interaction_constraints` was deleted rather than left shadowing the kernel.
 
 - [ ] **Step 6: Run the full suite and commit**
 
@@ -1383,7 +1386,7 @@ def grouped_block(
         levels, inner.precision, inner.constraints.T,
         np.array([group_position[str(g)] for g in frame[over]]),
         np.array([level_position[t] for t in keys]),
-        "@", orthonormalise=False,
+        separator="@", orthonormalise=False,
     )
 ```
 
