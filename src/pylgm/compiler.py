@@ -6,7 +6,7 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype
 from formulaic import model_matrix
 from formulaic.errors import FormulaicError
-from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity, vstack
+from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity, kron, vstack
 
 from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, ModelConfig
@@ -1148,6 +1148,40 @@ def _weighted_family_block(item, weights: np.ndarray):
     return ScalableBlock(scaled, item.parameter, item.scale)
 
 
+def _replicated_family_block(item, frame, effect, replicates, index):
+    """Compose one family block into R independent replicates.
+
+    A ScalableBlock's precision is a scalar multiple, which commutes with the
+    Kronecker product, so the template composes once. A ParametricBlock rebuilds
+    a *structure* per draw, so each rebuild must be re-composed with I_R --
+    composing only the template would silently freeze the structure's
+    hyperparameter after the first draw.
+
+    ``index`` is resolved by the caller rather than read off ``effect.effect``
+    here: when the replicated target is a ``Weighted``, ``.index`` lives on its
+    wrapped inner effect, not on the ``Weighted`` itself (see
+    ``_build_effect_block``'s Replicated branch).
+    """
+    composed = replicated_block(item.block, frame, index, effect.over, replicates)
+    count = len(replicates)
+
+    if isinstance(item, ParametricDesignBlock):
+        raise CompilationError(
+            f"effect {effect.name!r} is replicated and its design is itself a "
+            "function of hyperparameters; that combination is not supported, "
+            "because the rebuilt design spans the level set rather than the "
+            "replicated row space"
+        )
+    if isinstance(item, ParametricBlock):
+        def build(values, inner_build=item.build, count=count):
+            return csr_matrix(
+                kron(identity(count, format="csr"), inner_build(values), format="csr")
+            )
+
+        return ParametricBlock(composed, item.parameters, build)
+    return ScalableBlock(composed, item.parameter, item.scale)
+
+
 def _append_family_blocks(
     effect,
     frame,
@@ -1162,6 +1196,36 @@ def _append_family_blocks(
     build the inner effect through the same path instead of duplicating it. The
     accumulators are mutated in place, exactly as the inline body did.
     """
+    if isinstance(effect, Replicated):
+        inner_spec = effect.effect
+        # Same Weighted-unwrap as _build_effect_block's Replicated branch: a
+        # Weighted carries no `index` of its own, and building it against the
+        # fabricated level frame would raise a spurious "weight column not
+        # found" (the `by` column lives on the real frame). Recurse on the
+        # unwrapped target over the level frame, then apply the weighting
+        # afterwards over the real frame, same as the top-level Weighted branch.
+        target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+        index = target.index
+        # Keep the column's own dtype -- see _build_effect_block's Replicated
+        # branch and _levels_frame: an integer index stringified here would be
+        # ordered 1, 10, 11, 2 by RW1/RW2/Seasonal/AR1.
+        levels = tuple(frame[index].dropna().unique())
+        replicates = replicate_levels(frame, effect.name, effect.over)
+        level_frame = _levels_frame(index, levels, frame[index].dtype)
+        first = len(scalable)
+        _append_family_blocks(
+            target, level_frame, scalable, parameter_names,
+            parameter_bounds, parameter_priors,
+        )
+        for position in range(first, len(scalable)):
+            scalable[position] = _replicated_family_block(
+                scalable[position], frame, effect, replicates, index
+            )
+        if isinstance(inner_spec, Weighted):
+            weights = _compiled_block(effect.name, _weight_vector, frame, inner_spec)
+            for position in range(first, len(scalable)):
+                scalable[position] = _weighted_family_block(scalable[position], weights)
+        return
     if isinstance(effect, Weighted):
         # Routed through _compiled_block so a bad weight column raises the same
         # CompilationError here as it does from _build_effect_block -- without

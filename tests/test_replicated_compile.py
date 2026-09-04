@@ -139,3 +139,68 @@ def test_a_replicated_model_fits():
     ).fit(frame, engine="laplace")
     assert np.isfinite(result.log_marginal_likelihood)
     assert len(result.labels) == 1 + 6 * 4
+
+
+def test_an_estimated_inner_precision_scales_every_replicate():
+    from pylgm.compiler import compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+
+    frame = _frame()
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Replicated(
+            IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), over="firm"
+        ),
+    )
+    panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y", panel=())
+    )
+    family = compile_family(model, panel)
+    assert family is not None
+    assert "tau" in family.parameter_names
+
+    low = family.materialize({"tau": 1.0})
+    high = family.materialize({"tau": 50.0})
+    u_low = [b for b in low.blocks if b.name == "u"][0].precision.toarray()
+    u_high = [b for b in high.blocks if b.name == "u"][0].precision.toarray()
+    nonzero = u_low != 0
+    assert np.allclose(u_high[nonzero] / u_low[nonzero], 50.0)
+    # The scaling reaches every replicate, not just the first.
+    assert u_low.shape == (6, 6)
+    assert np.count_nonzero(np.diag(u_high)) == 6
+
+
+def test_an_estimated_inner_rho_rebuilds_every_replicate_band():
+    """AR1's rho enters the structure, not a scalar multiplier, so the rebuilt
+    precision must be re-composed with I_R on every draw -- a per-draw structure
+    left uncomposed would be the wrong shape and fail loudly, but one composed
+    only at the template would silently freeze rho after the first draw."""
+    from pylgm import AR1
+    from pylgm.compiler import compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+
+    frame = _frame()
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Replicated(
+            AR1(
+                "u", index="t", precision=1.0,
+                rho=Hyperparameter("rho", initial=0.5, transform="logit"),
+            ),
+            over="firm",
+        ),
+    )
+    panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y", panel=())
+    )
+    family = compile_family(model, panel)
+    assert "rho" in family.parameter_names
+
+    a = [b for b in family.materialize({"rho": 0.1}).blocks if b.name == "u"][0]
+    b = [b for b in family.materialize({"rho": 0.8}).blocks if b.name == "u"][0]
+    assert a.precision.shape == (6, 6)
+    assert not np.allclose(a.precision.toarray(), b.precision.toarray())
+    # Both replicate blocks change, not only the first.
+    assert not np.allclose(a.precision.toarray()[3:, 3:], b.precision.toarray()[3:, 3:])

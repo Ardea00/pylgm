@@ -43,6 +43,7 @@ from pylgm import (
     LGM,
     Poisson,
     ProperCAR,
+    Replicated,
     RW1,
     SAR,
     Seasonal,
@@ -74,7 +75,10 @@ def _frame(seed=0, n_rows=90):
         "i": rng.choice(LEVELS, n_rows),
         "j": rng.choice(LEVELS, n_rows),
         "k": rng.choice(LEVELS, n_rows),
+        "t": rng.choice(LEVELS, n_rows),
         "w": rng.normal(1.0, 0.1, n_rows),
+        "firm": rng.choice(["f0", "f1", "f2"], n_rows),
+        "z": rng.normal(1.0, 0.1, n_rows),
         "y": rng.poisson(3.0, n_rows).astype(float),
         "row": range(n_rows),
     })
@@ -192,6 +196,32 @@ MODEL_TABLE = [
             Fixed("1") + SAR("u", index="i", graph=RING_GRAPH, rho=_rho(), precision=_tau())
             + Copy("u", index="j", scale=2.0)
         ),
+    ),
+    (
+        "Replicated(IID(tau))",
+        _model(Fixed("1") + Replicated(
+            IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), over="firm")),
+    ),
+    (
+        "Replicated(AR1(rho))",
+        # initial=0.2, not 0.5: AR1 rho's default (-1, 1) bounds make
+        # _alternate_value's primary candidate land at ~0.4999995 regardless of
+        # `initial` (0.75 of the span from -1), so initial=0.5 would coincide
+        # with the alternate almost exactly and this row would not exercise a
+        # real change -- see _alternate_value's fallback, which only guards
+        # exact/near-exact collisions, not this one 5e-7 short of its epsilon.
+        _model(Fixed("1") + Replicated(
+            AR1(
+                "u", index="t", precision=1.0,
+                rho=Hyperparameter("rho", initial=0.2, transform="logit"),
+            ),
+            over="firm")),
+    ),
+    (
+        "Replicated(Weighted(IID(tau)))",
+        _model(Fixed("1") + Replicated(
+            Weighted(IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), by="z"),
+            over="firm")),
     ),
 ]
 
