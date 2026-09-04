@@ -23,6 +23,7 @@ from pylgm.effects import (
     MIDAS,
     MIDASParametric,
     ProperCAR,
+    Replicated,
     RW1,
     RW2,
     SAR,
@@ -46,6 +47,7 @@ from pylgm.effects import (
     seasonal_penalty,
     normalize_graph,
 )
+from pylgm.effects.replicate import replicate_levels, replicated_block
 from pylgm.effects.ar1 import ar1_structure
 from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
 from pylgm.effects.sar import (
@@ -431,6 +433,34 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
             block, precision = _build_effect_block(effect.effect, frame)
             weights = _weight_vector(frame, effect)
             return (_scaled_design_block(block, weights), precision)
+        elif isinstance(effect, Replicated):
+            inner_spec = effect.effect
+            # Resolve the index THROUGH a Weighted wrapper rather than off
+            # inner_spec directly: Weighted carries no `index` of its own (see
+            # effects/spec.py), same unwrap used there and at line ~290. The
+            # structural build below also uses `target` rather than
+            # `inner_spec`: a Weighted's `by` column lives on the real frame,
+            # not on the one-row-per-level frame, so building Weighted itself
+            # against that fabricated frame would raise a spurious "weight
+            # column not found". Weighting is applied afterwards instead, over
+            # the real frame, exactly as the top-level Weighted branch does.
+            target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+            index = target.index
+            # Keep the column's OWN dtype: stringifying here and then passing the
+            # real dtype to _levels_frame is contradictory, and it is exactly the
+            # slice-1 bug -- an integer `year` would be ordered 1, 10, 11, 2 by
+            # RW1/RW2/Seasonal/AR1. The builder sorts, so order here is irrelevant;
+            # only the dtype matters.
+            levels = tuple(frame[index].dropna().unique())
+            replicates = replicate_levels(frame, effect.name, effect.over)
+            structural, precision = _build_effect_block(
+                target, _levels_frame(index, levels, frame[index].dtype)
+            )
+            block = replicated_block(structural, frame, index, effect.over, replicates)
+            if isinstance(inner_spec, Weighted):
+                weights = _weight_vector(frame, inner_spec)
+                block = _scaled_design_block(block, weights)
+            return (block, precision)
         elif isinstance(effect, Fixed):
             block = build_fixed(frame, effect.formula, effect.prior_precision)
             precision = None
@@ -809,6 +839,10 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
     if isinstance(effect, Weighted):
         # Delegate: an unfound inner Hyperparameter would silently pin at its
         # initial value instead of being estimated.
+        return _effect_hyperparameters(effect.effect)
+    if isinstance(effect, Replicated):
+        # Delegate: replicates share the inner effect's hyperparameters, so an
+        # unfound one would silently pin at its initial value.
         return _effect_hyperparameters(effect.effect)
     if isinstance(effect, Copy):
         return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
@@ -1775,6 +1809,20 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
         return (
             "grouped_structured",
             (effect.name, effect.group, effect.index, group_labels, level_labels),
+        )
+    if isinstance(effect, Replicated):
+        # Same re-labelling rule as AR1(group=) above: Replicated's own labels
+        # are "replicate@level" pairs, read straight off the compiled block
+        # rather than recomputed, matching the note on Weighted just above.
+        # Predict-time support for this kind lands in Task 4; this only keeps
+        # fit() -- which always builds a PredictionContext -- from crashing.
+        inner_spec = effect.effect
+        target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+        replicate_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
+        level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
+        return (
+            "replicated_structured",
+            (effect.name, effect.over, target.index, replicate_labels, level_labels),
         )
     return ("structured", (effect.name, effect.index, block.labels))
 

@@ -500,7 +500,12 @@ class Weighted(_ComposableEffect):
                 "Weighted effect is already weighted; two weight columns on one "
                 "block is their product, so multiply them into a single column"
             )
-        if not hasattr(self.effect, "index"):
+        # Replicated has no `index` of its own -- same reason Weighted itself
+        # doesn't (see Replicated.__post_init__): giving it one would silently
+        # make joint.Shared's `hasattr(effect, "index")` gate accept
+        # Shared(Replicated(...)), which is not supported. So it is named
+        # explicitly here rather than caught by the generic hasattr check.
+        if not hasattr(self.effect, "index") and not isinstance(self.effect, Replicated):
             raise TypeError(
                 f"Weighted requires an indexed effect, got "
                 f"{type(self.effect).__name__}, which has no index. A Fixed effect "
