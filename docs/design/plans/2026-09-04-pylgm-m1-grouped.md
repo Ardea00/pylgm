@@ -412,7 +412,7 @@ PYTHONPATH=src python - <<'EOF'
 import numpy as np, pandas as pd, pathlib
 from pylgm.effects.spacetime import build_spacetime
 
-GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"], "d": ["c"]}
+GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b", "d"], "d": ["c"]}
 frame = pd.DataFrame(
     [{"s": a, "t": t, "y": 0.0} for a in ("a", "b", "c", "d") for t in range(5)]
 )
@@ -451,7 +451,7 @@ import pytest
 
 from pylgm.effects.spacetime import build_spacetime
 
-GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"], "d": ["c"]}
+GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b", "d"], "d": ["c"]}
 SNAPSHOTS = np.load("tests/data/spacetime_snapshots.npz")
 
 
@@ -588,7 +588,7 @@ from pylgm.effects.structures import (
 )
 
 LEVELS = ("g1", "g2", "g3", "g4")
-GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"], "d": ["c"]}
+GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b", "d"], "d": ["c"]}
 
 
 def test_iid_is_the_identity_with_no_null():
@@ -1601,7 +1601,7 @@ from pylgm import (
 from pylgm.compiler import _build_effect_block
 from pylgm.effects.spacetime import build_spacetime
 
-GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"], "d": ["c"]}
+GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b", "d"], "d": ["c"]}
 
 
 def _frame():
