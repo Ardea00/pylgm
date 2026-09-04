@@ -9,8 +9,9 @@ match the shipped ``AR1(group=)`` implementation bit for bit.
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix, identity, kron
+from scipy.sparse import identity
 
+from pylgm.effects.kronecker import kron_block
 from pylgm.ir.model import LatentBlock
 
 
@@ -37,7 +38,7 @@ def replicated_block(
     unidentified, and the fit would still converge on plausible numbers.
     """
     levels = inner.labels
-    n_levels, n_replicates = len(levels), len(replicates)
+    n_replicates = len(replicates)
     level_position = {level: column for column, level in enumerate(levels)}
     replicate_position = {label: row for row, label in enumerate(replicates)}
 
@@ -48,20 +49,12 @@ def replicated_block(
             f"{inner.name} index {index!r} has level(s) {unknown!r} absent from the "
             "replicated block's own level set"
         )
-    cells = np.array([
-        replicate_position[str(r)] * n_levels + level_position[t]
-        for r, t in zip(frame[over], keys)
-    ])
-    width = n_replicates * n_levels
-    design = csr_matrix(
-        (np.ones(len(frame)), (np.arange(len(frame)), cells)), shape=(len(frame), width)
+    replicate_positions = np.array([replicate_position[str(r)] for r in frame[over]])
+    level_positions = np.array([level_position[t] for t in keys])
+    return kron_block(
+        inner.name,
+        replicates, identity(n_replicates, format="csr"), np.zeros((n_replicates, 0)),
+        levels, inner.precision, inner.constraints.T,
+        replicate_positions, level_positions,
+        separator="@", orthonormalise=False,
     )
-    precision = csr_matrix(
-        kron(identity(n_replicates, format="csr"), inner.precision, format="csr")
-    )
-    if inner.constraints.shape[0]:
-        constraints = np.kron(np.eye(n_replicates), inner.constraints)
-    else:
-        constraints = np.empty((0, width))
-    labels = tuple(f"{r}@{level}" for r in replicates for level in levels)
-    return LatentBlock(inner.name, labels, design, precision, constraints)

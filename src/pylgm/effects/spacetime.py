@@ -5,12 +5,13 @@ from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix, identity, kron
+from scipy.sparse import csr_matrix, identity
 from scipy.sparse.csgraph import connected_components
 
 from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects.besag import _scaled_structure
 from pylgm.effects.graph import normalize_graph
+from pylgm.effects.kronecker import kron_block
 from pylgm.effects.random_walk import difference_operator
 from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.ir.model import LatentBlock
@@ -47,28 +48,6 @@ def _time_null_basis(interaction: str, order: int, time_count: int) -> np.ndarra
         coordinate = np.arange(time_count, dtype=float)
         columns.append(coordinate - coordinate.mean())
     return np.column_stack(columns)
-
-
-def _interaction_constraints(
-    space_null: np.ndarray, time_null: np.ndarray, area_count: int, time_count: int
-) -> np.ndarray:
-    """Orthonormal basis of null(K_s (x) K_t), as constraint rows (r, S*T).
-
-    null(K_s (x) K_t) = null(K_s) (x) R^T  +  R^S (x) null(K_t). Assemble the
-    two Kronecker spans, take an orthonormal basis of their combined column span
-    by SVD (dropping the 1_s (x) 1_t overlap counted twice), and transpose.
-    """
-    parts = []
-    if space_null.shape[1]:
-        parts.append(np.kron(space_null, np.eye(time_count)))
-    if time_null.shape[1]:
-        parts.append(np.kron(np.eye(area_count), time_null))
-    if not parts:
-        return np.zeros((0, area_count * time_count))
-    b = np.hstack(parts)
-    u, singular, _ = np.linalg.svd(b, full_matrices=False)
-    rank = int(np.sum(singular > singular[0] * 1e-10)) if singular.size else 0
-    return u[:, :rank].T
 
 
 def build_spacetime(
@@ -117,9 +96,6 @@ def build_spacetime(
         k_t = csr_matrix(_rw_structure(T, order, scale))
     else:
         k_t = identity(T, format="csr")
-    precision_matrix = csr_matrix(precision * kron(k_s, k_t, format="csr"))
-
-    # Area-major one-hot design; unseen area/time levels are a hard error.
     area_pos = {area: i for i, area in enumerate(areas)}
     time_pos = {t: j for j, t in enumerate(times)}
     observed_area = [str(v) for v in frame[space]]
@@ -127,16 +103,17 @@ def build_spacetime(
     missing_area = sorted({v for v in observed_area if v not in area_pos})
     if missing_area:
         raise ValueError(f"observed {space!r} level(s) {missing_area!r} not in the area universe")
-    cells = np.array(
-        [area_pos[a] * T + time_pos[t] for a, t in zip(observed_area, observed_time)]
-    )
-    design = csr_matrix(
-        (np.ones(len(frame)), (np.arange(len(frame)), cells)), shape=(len(frame), S * T)
-    )
 
-    space_null = _space_null_basis(interaction, w, S)
-    time_null = _time_null_basis(interaction, order, T)
-    constraints = _interaction_constraints(space_null, time_null, S, T)
-
-    labels = tuple(f"{area}|{t}" for area in areas for t in times)
-    return LatentBlock(name, labels, design, precision_matrix, constraints)
+    # precision_scale, not a scalar folded into k_s: IEEE multiplication is not
+    # associative, and kron(precision * k_s, k_t) differs from
+    # precision * kron(k_s, k_t) by up to 3.6e-15 -- enough to break the
+    # bit-for-bit snapshot from Step 1. The kernel applies the scalar exactly
+    # where build_spacetime applies it today.
+    return kron_block(
+        name,
+        areas, k_s, _space_null_basis(interaction, w, S),
+        times, k_t, _time_null_basis(interaction, order, T),
+        np.array([area_pos[a] for a in observed_area]),
+        np.array([time_pos[t] for t in observed_time]),
+        separator="|", orthonormalise=True, precision_scale=precision,
+    )
