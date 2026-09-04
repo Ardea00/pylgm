@@ -1878,11 +1878,14 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
             (effect.name, effect.unit, effect.time, unit_labels, time_labels),
         )
     if isinstance(effect, AR1) and effect.replicate is not None:
-        group_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
+        # "replicated_structured", not the "grouped_structured" this emitted
+        # before slice 4: AR1(replicate=) is R-INLA's replicate, and the two
+        # handlers were the same function apart from their message strings.
+        replicate_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
         level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
         return (
-            "grouped_structured",
-            (effect.name, effect.replicate, effect.index, group_labels, level_labels),
+            "replicated_structured",
+            (effect.name, effect.replicate, effect.index, replicate_labels, level_labels),
         )
     if isinstance(effect, Replicated):
         # Same re-labelling rule as AR1(group=) above: Replicated's own labels

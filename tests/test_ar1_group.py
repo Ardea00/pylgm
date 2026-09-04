@@ -133,7 +133,7 @@ def test_predict_rejects_an_unseen_group():
     result = model.fit(frame)
     unseen = frame.head(3).copy()
     unseen["firm"] = "brand_new"
-    with pytest.raises(ValueError, match="group/level"):
+    with pytest.raises(ValueError, match="replicate/level"):
         result.predict(unseen)
 
 
@@ -162,3 +162,28 @@ def test_the_deprecated_group_spelling_still_builds_the_same_effect():
     assert deprecated.replicate == "firm"
     current = AR1("dyn", index="t", replicate="firm", precision=1.0, rho=0.6)
     assert deprecated.replicate == current.replicate
+
+
+def test_ar1_replicate_emits_the_replicated_entry_kind():
+    """AR1(replicate=) is a replicate, so its predict entry must say so.
+
+    It emitted "grouped_structured" until slice 4: a leftover of the old
+    AR1(group=) spelling, whose predict error told users their *replicate*
+    had an unseen "group/level" -- the exact R-INLA confusion the rename
+    existed to remove.
+    """
+    from pylgm.compiler import build_prediction_context, compile_lgm
+    from pylgm.data import CanonicalPanel
+
+    frame = _panel(groups=3, periods=4, rho=0.6, sd=0.3)
+    model = LGM(
+        response="y",
+        predictor=Fixed("1") + AR1("dyn", index="t", replicate="firm", precision=1.0, rho=0.6),
+        likelihood=Gaussian(sigma=0.3),
+    )
+    panel = CanonicalPanel(frame, np.array([True] * len(frame)), ("firm",), "y")
+    compiled = compile_lgm(model, panel)
+    context = build_prediction_context(model, panel, compiled)
+    kinds = [kind for kind, _ in context.entries]
+    assert "replicated_structured" in kinds
+    assert "grouped_structured" not in kinds

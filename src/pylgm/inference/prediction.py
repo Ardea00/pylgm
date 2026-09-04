@@ -50,7 +50,6 @@ class PredictionContext:
     ``("midas_parametric", (block_name, columns_tuple, kernel, theta))``,
     ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
     ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
-    ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``,
     ``("replicated_structured", (block_name, over, index, replicate_labels,
     level_labels))``,
     ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
@@ -255,19 +254,6 @@ def _dynamic_spatial_panel_block(
     )
 
 
-def _grouped_structured_block(
-    entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
-) -> np.ndarray:
-    name, group, index_column, group_labels, level_labels = entry
-    return _paired_cell_block(
-        name, group, index_column, group_labels, level_labels, new_data,
-        block_label="grouped",
-        pair_label="group/level",
-        hint="To forecast new levels, include those rows at fit time with a NaN "
-             "response instead.",
-    )
-
-
 def _replicated_block(
     entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
 ) -> np.ndarray:
@@ -377,8 +363,6 @@ def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.n
         return _spacetime_block(payload, new_data)
     elif kind == "dynamic_spatial_panel":
         return _dynamic_spatial_panel_block(payload, new_data)
-    elif kind == "grouped_structured":
-        return _grouped_structured_block(payload, new_data)
     elif kind == "replicated_structured":
         return _replicated_block(payload, new_data)
     elif kind == "shared":
