@@ -1157,6 +1157,14 @@ def _replicated_family_block(item, frame, effect, replicates, index):
     composing only the template would silently freeze the structure's
     hyperparameter after the first draw.
 
+    A ``ParametricDesignBlock`` is deliberately not handled here: it rebuilds
+    its design per hyperparameter draw over the level-set frame, which is the
+    wrong row space for replication. It is also unreachable today -- the only
+    builder that produces one is MIDASParametric, which has no ``.index``, so
+    ``Replicated`` already rejects it at construction (see effects/spec.py) --
+    but that combination is not a safe capability to half-implement, so the
+    rejection is kept rather than removed.
+
     ``index`` is resolved by the caller rather than read off ``effect.effect``
     here: when the replicated target is a ``Weighted``, ``.index`` lives on its
     wrapped inner effect, not on the ``Weighted`` itself (see

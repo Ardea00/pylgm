@@ -1,10 +1,17 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.sparse import csr_matrix
 
 from pylgm import Besag, Fixed, IID, LGM, Poisson, Replicated, Weighted
-from pylgm.compiler import _build_effect_block, _effect_hyperparameters
+from pylgm.compiler import (
+    _build_effect_block,
+    _effect_hyperparameters,
+    _replicated_family_block,
+)
 from pylgm.exceptions import CompilationError, DataContractError
+from pylgm.ir.family import ParametricDesignBlock
+from pylgm.ir.model import LatentBlock
 from pylgm.parameters import Hyperparameter
 
 
@@ -204,3 +211,31 @@ def test_an_estimated_inner_rho_rebuilds_every_replicate_band():
     assert not np.allclose(a.precision.toarray(), b.precision.toarray())
     # Both replicate blocks change, not only the first.
     assert not np.allclose(a.precision.toarray()[3:, 3:], b.precision.toarray()[3:, 3:])
+
+
+def test_parametric_design_block_is_rejected():
+    """Replicated rejects a ParametricDesignBlock, covering an unreachable path.
+
+    The public API cannot construct Replicated(MIDASParametric(...)) because
+    MIDASParametric has no .index field, and Replicated.__post_init__ requires
+    one. This test manufactures a ParametricDesignBlock directly to exercise the
+    rejection branch, so future readers do not delete it as dead code.
+    """
+    frame = _frame()
+    # Template block must have labels matching the index levels in the frame.
+    # The frame has 't' column with values 'a', 'b', 'c'.
+    template = LatentBlock(
+        "m", ("a", "b", "c"), csr_matrix(np.ones((6, 3))), csr_matrix(np.eye(3)),
+        np.empty((0, 3)),
+    )
+
+    def build(resolved):
+        return csr_matrix(np.ones((6, 3)))
+
+    block = ParametricDesignBlock(template, ("theta",), build)
+    effect = Replicated(IID("u", index="t"), over="firm")
+    # replicates is a tuple of strings (the unique values from the 'firm' column)
+    replicates = ("f1", "f2")
+
+    with pytest.raises(CompilationError, match="design is itself a function"):
+        _replicated_family_block(block, frame, effect, replicates, "t")
