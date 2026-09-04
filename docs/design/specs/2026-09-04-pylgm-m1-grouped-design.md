@@ -76,8 +76,13 @@ kron_block(name,
 
 Pieces, not blocks: `build_spacetime` has `k_s`, `k_t` and two label tuples but
 no inner `LatentBlock` to hand over, and `grouped_block` has one it can take
-apart. The row keys are resolved to positions inside the kernel, so the
-"level absent from the block's own level set" error lives in one place.
+apart.
+
+Callers pass **already-resolved integer positions**, one per frame row, and own
+their own validation. `replicated_block` and `build_spacetime` raise different,
+test-pinned messages for an unknown level, and unifying them would break those
+tests for no gain. The kernel is therefore pure numpy/scipy: no pandas, no
+error strings.
 
 `separator` is `"@"` for `Replicated` and `Grouped`, `"|"` for `SpaceTime` --
 the same back-compatibility reason as `orthonormalise`, and the only two
@@ -98,6 +103,12 @@ exists because two released paths already have their own basis:
 - `build_spacetime` orthonormalises today, including for types II and III
   where only one Kronecker part is present. So it passes `True` and its output
   is unchanged.
+
+The flag governs the **one-part** case only. When both parts are present they
+overlap in `1_out (x) 1_in`, and dropping that duplicate is what the SVD is
+for -- skipping it would return a rank-deficient constraint matrix. Two parts
+always orthonormalise, whatever the flag says. `Replicated` always has one part
+(`null(I_R)` is empty), so it is preserved exactly.
 
 The flag is documented as preserving two released outputs, and nothing else.
 
