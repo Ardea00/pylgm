@@ -71,15 +71,20 @@ def kron_block(
     null_in: np.ndarray,
     outer_positions: np.ndarray,
     inner_positions: np.ndarray,
+    *,
     separator: str,
     orthonormalise: bool,
+    precision_scale: float = 1.0,
 ) -> LatentBlock:
     """Compose two factors into one outer-major ``LatentBlock``.
 
     ``outer_positions`` and ``inner_positions`` hold one already-validated
     index per frame row. ``separator`` is ``"@"`` for Replicated and Grouped
     and ``"|"`` for SpaceTime, whose labels are user-visible in
-    ``result.labels`` and therefore cannot change.
+    ``result.labels`` and therefore cannot change. ``precision_scale``
+    multiplies the composed precision exactly as ``build_spacetime`` applies
+    its scalar today -- after the Kronecker product, not folded into either
+    factor, since IEEE multiplication is not associative.
     """
     n_out, n_in = len(outer_labels), len(inner_labels)
     width = n_out * n_in
@@ -88,7 +93,9 @@ def kron_block(
     design = csr_matrix(
         (np.ones(rows), (np.arange(rows), cells)), shape=(rows, width)
     )
-    precision = csr_matrix(kron(outer_precision, inner_precision, format="csr"))
+    precision = csr_matrix(
+        precision_scale * kron(outer_precision, inner_precision, format="csr")
+    )
     constraints = kron_null_constraints(null_out, null_in, n_out, n_in, orthonormalise)
     labels = tuple(f"{o}{separator}{i}" for o in outer_labels for i in inner_labels)
     return LatentBlock(name, labels, design, precision, constraints)

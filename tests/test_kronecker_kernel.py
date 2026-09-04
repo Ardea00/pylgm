@@ -10,7 +10,7 @@ def test_precision_is_the_kronecker_product_in_outer_major_order():
     block = kron_block(
         "u", ("g1", "g2"), outer, np.zeros((2, 0)),
         ("a", "b", "c"), inner, np.zeros((3, 0)),
-        np.array([0, 1]), np.array([2, 0]), "@", False,
+        np.array([0, 1]), np.array([2, 0]), separator="@", orthonormalise=False,
     )
     assert np.allclose(block.precision.toarray(), np.kron(outer.toarray(), inner.toarray()))
 
@@ -19,7 +19,7 @@ def test_labels_pair_outer_major_with_the_given_separator():
     block = kron_block(
         "u", ("g1", "g2"), identity(2, format="csr"), np.zeros((2, 0)),
         ("a", "b"), identity(2, format="csr"), np.zeros((2, 0)),
-        np.array([0]), np.array([0]), "|", False,
+        np.array([0]), np.array([0]), separator="|", orthonormalise=False,
     )
     assert block.labels == ("g1|a", "g1|b", "g2|a", "g2|b")
 
@@ -28,7 +28,7 @@ def test_design_places_each_row_at_outer_times_inner_plus_inner():
     block = kron_block(
         "u", ("g1", "g2"), identity(2, format="csr"), np.zeros((2, 0)),
         ("a", "b", "c"), identity(3, format="csr"), np.zeros((3, 0)),
-        np.array([0, 1, 1]), np.array([2, 0, 2]), "@", False,
+        np.array([0, 1, 1]), np.array([2, 0, 2]), separator="@", orthonormalise=False,
     )
     dense = block.design.toarray()
     assert dense.shape == (3, 6)
@@ -80,3 +80,43 @@ def test_the_constraint_span_is_the_precision_null_space():
     q = np.kron(outer.toarray(), inner.toarray())
     assert np.allclose(q @ got.T, 0.0)
     assert got.shape[0] == q.shape[0] - np.linalg.matrix_rank(q)
+
+
+def test_kron_block_composes_the_constraints_from_both_null_bases():
+    """Without this the whole constraints line can be deleted and the file stays green."""
+    block = kron_block(
+        "u", ("r1", "r2"), identity(2, format="csr"), np.zeros((2, 0)),
+        ("a", "b", "c"), csr_matrix(np.eye(3)), np.ones((3, 1)),
+        np.array([0]), np.array([0]), separator="@", orthonormalise=False,
+    )
+    assert np.array_equal(block.constraints, np.kron(np.eye(2), np.ones((1, 3))))
+
+
+def test_precision_scale_multiplies_the_composed_precision_and_nothing_else():
+    outer = csr_matrix(np.array([[2.0, -1.0], [-1.0, 2.0]]))
+    inner = csr_matrix(np.diag([1.0, 3.0, 5.0]))
+    args = (
+        "u", ("g1", "g2"), outer, np.zeros((2, 0)),
+        ("a", "b", "c"), inner, np.zeros((3, 0)),
+        np.array([0, 1]), np.array([2, 0]),
+    )
+    plain = kron_block(*args, separator="@", orthonormalise=False)
+    scaled = kron_block(*args, separator="@", orthonormalise=False, precision_scale=2.5)
+    assert np.allclose(scaled.precision.toarray(), 2.5 * plain.precision.toarray())
+    assert scaled.labels == plain.labels
+    assert np.array_equal(scaled.design.toarray(), plain.design.toarray())
+    assert np.array_equal(scaled.constraints, plain.constraints)
+
+
+def test_precision_scale_default_is_exact_for_existing_callers():
+    """1.0 * x is exact in IEEE for every finite x, so the default must be bit-for-bit."""
+    outer = csr_matrix(np.array([[2.0, -1.0], [-1.0, 2.0]]))
+    inner = csr_matrix(np.diag([1.0, 3.0, 5.0]))
+    args = (
+        "u", ("g1", "g2"), outer, np.zeros((2, 0)),
+        ("a", "b", "c"), inner, np.zeros((3, 0)),
+        np.array([0, 1]), np.array([2, 0]),
+    )
+    default = kron_block(*args, separator="@", orthonormalise=False)
+    explicit = kron_block(*args, separator="@", orthonormalise=False, precision_scale=1.0)
+    assert np.array_equal(default.precision.toarray(), explicit.precision.toarray())
