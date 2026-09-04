@@ -650,6 +650,13 @@ def test_besag_null_has_one_column_per_connected_component():
     assert s.null_basis(s.levels(())).shape == (4, 2)
 
 
+def test_besag_rejects_levels_that_are_not_the_universe_it_returned():
+    """Silently ignoring the argument is the permuted-neighbourhood bug."""
+    s = BesagStructure(GRAPH)
+    with pytest.raises(ValueError, match="graph orders nodes"):
+        s.precision(("b", "a", "c", "d"))
+
+
 def test_a_level_outside_the_graph_is_rejected_by_name():
     """Aligning by position instead would permute the neighbourhood silently."""
     with pytest.raises(ValueError, match="zz"):
@@ -764,9 +771,14 @@ class AR1Structure:
         return np.zeros((len(levels), 0))
 
 
-@dataclass(frozen=True)
 class _RandomWalkStructure:
-    """Shared body of RW1Structure and RW2Structure; ``order`` is the subclass's."""
+    """Shared body of RW1Structure and RW2Structure.
+
+    A plain mixin, not a dataclass: ``order`` is declared by each subclass, and
+    a fieldless frozen dataclass reading ``self.order`` would read as a defect.
+    """
+
+    order: int
 
     def levels(self, observed: tuple[str, ...]) -> tuple[str, ...]:
         return observed
@@ -830,12 +842,28 @@ class BesagStructure:
             )
         return nodes
 
-    def precision(self, levels: tuple[str, ...]) -> csr_matrix:
+    def _checked(self, levels: tuple[str, ...]):
+        """The graph, asserting the caller passed the universe ``levels()`` gave.
+
+        Both methods below would otherwise silently ignore their argument and
+        return a matrix ordered by the graph while the caller indexed by
+        something else -- the permuted-neighbourhood failure this class exists
+        to prevent.
+        """
         nodes, w = self._normalized()
+        if tuple(levels) != nodes:
+            raise ValueError(
+                f"BesagStructure was given group levels {tuple(levels)!r} but its "
+                f"graph orders nodes {nodes!r}; pass the tuple levels() returned"
+            )
+        return nodes, w
+
+    def precision(self, levels: tuple[str, ...]) -> csr_matrix:
+        nodes, w = self._checked(levels)
         return csr_matrix(_scaled_structure(w, nodes, scale=True))
 
     def null_basis(self, levels: tuple[str, ...]) -> np.ndarray:
-        nodes, w = self._normalized()
+        nodes, w = self._checked(levels)
         count, membership = connected_components(w, directed=False)
         basis = np.zeros((len(nodes), count))
         for component in range(count):
