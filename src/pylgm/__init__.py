@@ -35,6 +35,7 @@ from pylgm.likelihoods import (
     WeibullSurv,
 )
 from pylgm.model import LGM
+from pylgm.observations import LinearConstraint, LinearObservation
 from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
 from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision
@@ -64,6 +65,8 @@ __all__ = [
     "IID",
     "Joint",
     "LGM",
+    "LinearConstraint",
+    "LinearObservation",
     "MIDAS",
     "MIDASParametric",
     "NegativeBinomial",

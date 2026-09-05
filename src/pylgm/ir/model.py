@@ -149,6 +149,10 @@ class CompiledLGM:
     blocks: tuple[LatentBlock, ...]
     _extra_constraints: np.ndarray = field(repr=False)
     _constraint_rhs: np.ndarray = field(repr=False)
+    _prediction_design: csr_matrix = field(repr=False)
+    _prediction_offset: np.ndarray = field(repr=False)
+    prediction_observation_variance: float | None
+    log_likelihood_normalization: float
 
     def __init__(
         self,
@@ -163,6 +167,10 @@ class CompiledLGM:
         blocks: tuple[LatentBlock, ...],
         extra_constraints: np.ndarray | None = None,
         extra_constraint_rhs: np.ndarray | None = None,
+        prediction_design: csr_matrix | None = None,
+        prediction_offset: np.ndarray | None = None,
+        prediction_observation_variance: float | None = None,
+        log_likelihood_normalization: float = 0.0,
     ) -> None:
         y = _numeric_array(y, "y", 1, require_finite=False)
         observed = _array(observed, "observed")
@@ -258,6 +266,25 @@ class CompiledLGM:
                 raise ModelValidationError(
                     "constraints must match the latent blocks and extra constraints"
                 )
+        if prediction_design is None:
+            prediction_design = design
+        prediction_design = _numeric_csr(prediction_design, "prediction design")
+        if prediction_design.shape[1] != width:
+            raise ModelValidationError("prediction design must align with the latent width")
+        if prediction_offset is None:
+            prediction_offset = offset
+        prediction_offset = _numeric_array(prediction_offset, "prediction offset", 1)
+        if prediction_offset.size != prediction_design.shape[0]:
+            raise ModelValidationError("prediction offset must align with prediction design rows")
+        if prediction_observation_variance is not None and (
+            not np.isfinite(prediction_observation_variance)
+            or prediction_observation_variance < 0
+        ):
+            raise ModelValidationError(
+                "prediction observation variance must be finite and non-negative"
+            )
+        if not np.isfinite(log_likelihood_normalization):
+            raise ModelValidationError("log likelihood normalization must be finite")
         object.__setattr__(self, "_y", _readonly_array(y))
         object.__setattr__(self, "_observed", _readonly_array(observed))
         object.__setattr__(self, "_offset", _readonly_array(offset))
@@ -269,6 +296,14 @@ class CompiledLGM:
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "likelihood", likelihood)
         object.__setattr__(self, "blocks", blocks)
+        object.__setattr__(self, "_prediction_design", _readonly_csr_matrix(prediction_design))
+        object.__setattr__(self, "_prediction_offset", _readonly_array(prediction_offset))
+        object.__setattr__(
+            self, "prediction_observation_variance", prediction_observation_variance
+        )
+        object.__setattr__(
+            self, "log_likelihood_normalization", float(log_likelihood_normalization)
+        )
 
     @property
     def y(self) -> np.ndarray:
@@ -303,6 +338,21 @@ class CompiledLGM:
     def constraint_rhs(self) -> np.ndarray:
         """Right-hand side ``e`` aligned with ``constraints`` rows (0 for block rows)."""
         return _readonly_array(self._constraint_rhs)
+
+    @property
+    def extra_constraint_rhs(self) -> np.ndarray:
+        """Right-hand side for model-level constraint rows only."""
+        rows = self._extra_constraints.shape[0]
+        return _readonly_array(self._constraint_rhs[-rows:] if rows else np.empty(0))
+
+    @property
+    def prediction_design(self) -> csr_matrix:
+        """Design used for returned predictions; normally identical to ``design``."""
+        return _readonly_csr_matrix(self._prediction_design)
+
+    @property
+    def prediction_offset(self) -> np.ndarray:
+        return _readonly_array(self._prediction_offset)
 
     @property
     def sigma(self) -> float:

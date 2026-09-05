@@ -198,9 +198,12 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     n_observed = int(np.count_nonzero(observed))
     log_marginal_likelihood = -0.5 * (
         n_observed * np.log(2 * np.pi * variance) - logdet_prior + logdet_posterior + quadratic
-    )
-    predictive_mean = np.asarray(offset + design @ mean).reshape(-1)
-    design_dense = design.toarray()
+    ) + model.log_likelihood_normalization
+    prediction_design = model.prediction_design
+    predictive_mean = np.asarray(
+        model.prediction_offset + prediction_design @ mean
+    ).reshape(-1)
+    design_dense = prediction_design.toarray()
     predictive_variance = np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense)
 
     _require_finite("posterior mean", mean)
@@ -215,7 +218,11 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
-        observation_variance=variance,
+        observation_variance=(
+            variance
+            if model.prediction_observation_variance is None
+            else model.prediction_observation_variance
+        ),
         block_slices=_block_slices(model),
         diagnostics={
             "latent_dimension": int(latent_size),
@@ -235,7 +242,7 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
 
     variance = float(model.likelihood.variance)
     fit = sparse_constrained_gaussian(model)
-    predictive_variance = fit.posterior.predictive_variances(model.design)
+    predictive_variance = fit.posterior.predictive_variances(model.prediction_design)
     _require_finite("posterior mean", fit.mean)
     _require_finite("log marginal likelihood", fit.log_marginal_likelihood)
     _require_finite("predictive mean", fit.predictive_mean)
@@ -247,7 +254,11 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
         log_marginal_likelihood=fit.log_marginal_likelihood,
         predictive_mean=fit.predictive_mean,
         predictive_variance=predictive_variance,
-        observation_variance=variance,
+        observation_variance=(
+            variance
+            if model.prediction_observation_variance is None
+            else model.prediction_observation_variance
+        ),
         block_slices=fit.block_slices,
         diagnostics=fit.diagnostics,
         sparse_posterior=fit.posterior,
