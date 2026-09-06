@@ -525,12 +525,15 @@ class Weighted(_ComposableEffect):
                 "Weighted effect is already weighted; two weight columns on one "
                 "block is their product, so multiply them into a single column"
             )
-        # Replicated has no `index` of its own -- same reason Weighted itself
-        # doesn't (see Replicated.__post_init__): giving it one would silently
-        # make joint.Shared's `hasattr(effect, "index")` gate accept
-        # Shared(Replicated(...)), which is not supported. So it is named
-        # explicitly here rather than caught by the generic hasattr check.
-        if not hasattr(self.effect, "index") and not isinstance(self.effect, Replicated):
+        # Replicated and Grouped have no `index` of their own -- same reason
+        # Weighted itself doesn't (see Replicated.__post_init__): giving one an
+        # index would silently make joint.Shared's `hasattr(effect, "index")`
+        # gate accept Shared(Replicated(...)) / Shared(Grouped(...)), which is
+        # not supported. So they are named explicitly here rather than caught
+        # by the generic hasattr check.
+        if not hasattr(self.effect, "index") and not isinstance(
+            self.effect, (Replicated, Grouped)
+        ):
             raise TypeError(
                 f"Weighted requires an indexed effect, got "
                 f"{type(self.effect).__name__}, which has no index. A Fixed effect "
@@ -538,6 +541,80 @@ class Weighted(_ComposableEffect):
                 "the formula instead."
             )
         object.__setattr__(self, "by", _non_empty_string(self.by, "by"))
+
+    @property
+    def name(self) -> str:
+        return self.effect.name
+
+
+@dataclass(frozen=True)
+class Grouped(_ComposableEffect):
+    """``G`` *correlated* copies of an effect, with a between-group structure.
+
+    ``Grouped(Besag("s", index="district", graph=g), over="year",
+    structure=AR1Structure(rho=0.8))`` is one spatial field per year, with the
+    years tied together by an AR1. This is R-INLA's ``f(index, model=...,
+    group=g, control.group=list(model=...))``.
+
+    The precision becomes ``Q_S (x) Q_E``. Contrast ``Replicated``, whose
+    copies are independent: ``I_R (x) Q_E``, the special case where the
+    between-group structure is the identity.
+
+    Constraints follow the null space of the product, which is *not* one
+    constraint per group: ``null(Q_S (x) Q_E)`` picks up ``null(Q_S) (x) R^E``
+    as well, and the two spans overlap.
+    """
+
+    effect: object
+    over: str
+    structure: object
+
+    def __post_init__(self) -> None:
+        if isinstance(self.effect, Grouped):
+            raise TypeError(
+                "Grouped effect is already grouped; two group columns is one "
+                "group over their cross product, so combine them into a single "
+                "column"
+            )
+        if isinstance(self.effect, Replicated):
+            raise TypeError(
+                "Grouped cannot wrap a Replicated: R-INLA allows `group` and "
+                "`replicate` on one term, but pyLGM does not, because the "
+                "labels would become 'replicate@group@level' and the predict "
+                "path resolves exactly one pair. Use one or the other."
+            )
+        if getattr(self.effect, "replicate", None) is not None:
+            raise TypeError(
+                f"{type(self.effect).__name__} already replicates itself through "
+                "its own `replicate` argument; combining it with a group would "
+                "give two copy mechanisms on one effect with no defined "
+                "interaction"
+            )
+        object.__setattr__(self, "over", _non_empty_string(self.over, "over"))
+        if not all(
+            hasattr(self.structure, method)
+            for method in ("levels", "precision", "null_basis")
+        ):
+            raise TypeError(
+                "Grouped requires a between-group structure (IIDStructure, "
+                "AR1Structure, RW1Structure, RW2Structure, BesagStructure), got "
+                f"{type(self.structure).__name__}"
+            )
+        # Resolve the index THROUGH a Weighted wrapper, for the same reason
+        # Replicated does: giving Weighted an `index` of its own turns
+        # joint.Shared's "wrapper, cannot be shared" guard into dead code.
+        target = self.effect.effect if isinstance(self.effect, Weighted) else self.effect
+        if not hasattr(target, "index"):
+            raise TypeError(
+                f"Grouped requires an indexed effect, got "
+                f"{type(self.effect).__name__}, which has no index."
+            )
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                "Grouped cannot wrap a Copy: a copy is a term referencing "
+                "another term, not an indexed effect of its own. Group the "
+                "target effect instead."
+            )
 
     @property
     def name(self) -> str:
@@ -570,6 +647,13 @@ class Replicated(_ComposableEffect):
                 "Replicated effect is already replicated; two replicate columns "
                 "is one replicate over their cross product, so combine them into "
                 "a single column"
+            )
+        if isinstance(self.effect, Grouped):
+            raise TypeError(
+                "Replicated cannot wrap a Grouped: R-INLA allows `group` and "
+                "`replicate` on one term, but pyLGM does not, because the "
+                "labels would become 'replicate@group@level' and the predict "
+                "path resolves exactly one pair. Use one or the other."
             )
         if getattr(self.effect, "replicate", None) is not None:
             raise TypeError(
@@ -619,6 +703,7 @@ EffectSpec: TypeAlias = (
     | SpaceTime
     | Weighted
     | Replicated
+    | Grouped
 )
 
 
