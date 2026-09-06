@@ -19,6 +19,7 @@ from pylgm.effects import (
     Copy,
     DynamicSpatialPanel,
     Fixed,
+    Grouped,
     IID,
     MIDAS,
     MIDASParametric,
@@ -47,7 +48,12 @@ from pylgm.effects import (
     seasonal_penalty,
     normalize_graph,
 )
-from pylgm.effects.replicate import replicate_levels, replicated_block
+from pylgm.effects.replicate import (
+    grouped_block,
+    group_levels,
+    replicate_levels,
+    replicated_block,
+)
 from pylgm.effects.ar1 import ar1_structure
 from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
 from pylgm.effects.sar import (
@@ -461,6 +467,27 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
                 weights = _weight_vector(frame, inner_spec)
                 block = _scaled_design_block(block, weights)
             return (block, precision)
+        elif isinstance(effect, Grouped):
+            inner_spec = effect.effect
+            # Same Weighted unwrap as the Replicated branch: a Weighted carries
+            # no `index` of its own, and its `by` column lives on the real
+            # frame, not on the one-row-per-level frame that the inner effect
+            # is built against.
+            target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+            index = target.index
+            # Keep the column's OWN dtype: an integer `year` would otherwise be
+            # ordered 1, 10, 11, 2 by RW1/RW2/Seasonal/AR1.
+            levels = tuple(frame[index].dropna().unique())
+            groups = group_levels(frame, effect.name, effect.over, effect.structure)
+            structural, precision = _build_effect_block(
+                target, _levels_frame(index, levels, frame[index].dtype)
+            )
+            block = grouped_block(
+                structural, frame, index, effect.over, groups, effect.structure
+            )
+            if isinstance(inner_spec, Weighted):
+                block = _scaled_design_block(block, _weight_vector(frame, inner_spec))
+            return (block, precision)
         elif isinstance(effect, Fixed):
             block = build_fixed(frame, effect.formula, effect.prior_precision)
             precision = None
@@ -844,6 +871,11 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         # Delegate: replicates share the inner effect's hyperparameters, so an
         # unfound one would silently pin at its initial value.
         return _effect_hyperparameters(effect.effect)
+    if isinstance(effect, Grouped):
+        # Delegate: groups share the inner effect's hyperparameters, and the
+        # structure's own parameters are fixed in this slice. An unfound inner
+        # Hyperparameter would silently pin at its initial value.
+        return _effect_hyperparameters(effect.effect)
     if isinstance(effect, Copy):
         return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
     found: list[Hyperparameter] = []
@@ -1192,6 +1224,38 @@ def _replicated_family_block(item, frame, effect, replicates, index):
     return ScalableBlock(composed, item.parameter, item.scale)
 
 
+def _grouped_family_block(item, frame, effect, groups, index):
+    """Compose one family block into ``G`` correlated copies. ``Replicated``'s sibling.
+
+    Same rebuild-per-draw reasoning as ``_replicated_family_block``: a
+    ``ScalableBlock``'s precision is a scalar multiple, which commutes with
+    the Kronecker product, so the template composes once, while a
+    ``ParametricBlock`` rebuilds a structure per draw and must be re-composed
+    with the between-group precision on every rebuild.
+
+    The ``ParametricDesignBlock`` rejection is checked before composing, not
+    after: composing first can raise ``grouped_block``'s own "level(s) absent"
+    ``ValueError``, which would mask this ``CompilationError``.
+    """
+    if isinstance(item, ParametricDesignBlock):
+        raise CompilationError(
+            f"effect {effect.name!r} is grouped and its design is itself a "
+            "function of hyperparameters; that combination is not supported, "
+            "because the rebuilt design spans the level set rather than the "
+            "grouped row space"
+        )
+    composed = grouped_block(item.block, frame, index, effect.over, groups, effect.structure)
+    outer_precision = effect.structure.precision(groups)
+    if isinstance(item, ParametricBlock):
+        def build(values, inner_build=item.build, outer_precision=outer_precision):
+            return csr_matrix(
+                kron(outer_precision, inner_build(values), format="csr")
+            )
+
+        return ParametricBlock(composed, item.parameters, build)
+    return ScalableBlock(composed, item.parameter, item.scale)
+
+
 def _append_family_blocks(
     effect,
     frame,
@@ -1230,6 +1294,29 @@ def _append_family_blocks(
         for position in range(first, len(scalable)):
             scalable[position] = _replicated_family_block(
                 scalable[position], frame, effect, replicates, index
+            )
+        if isinstance(inner_spec, Weighted):
+            weights = _compiled_block(effect.name, _weight_vector, frame, inner_spec)
+            for position in range(first, len(scalable)):
+                scalable[position] = _weighted_family_block(scalable[position], weights)
+        return
+    if isinstance(effect, Grouped):
+        inner_spec = effect.effect
+        # Same Weighted unwrap as the Replicated branch above.
+        target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+        index = target.index
+        # Keep the column's own dtype -- see _build_effect_block's Grouped branch.
+        levels = tuple(frame[index].dropna().unique())
+        groups = group_levels(frame, effect.name, effect.over, effect.structure)
+        level_frame = _levels_frame(index, levels, frame[index].dtype)
+        first = len(scalable)
+        _append_family_blocks(
+            target, level_frame, scalable, parameter_names,
+            parameter_bounds, parameter_priors,
+        )
+        for position in range(first, len(scalable)):
+            scalable[position] = _grouped_family_block(
+                scalable[position], frame, effect, groups, index
             )
         if isinstance(inner_spec, Weighted):
             weights = _compiled_block(effect.name, _weight_vector, frame, inner_spec)
@@ -1908,6 +1995,21 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
             # dispatch reapplies the weights. Without this the weighting is
             # silently dropped: replicated_structured's own payload carries no
             # weight information at all.
+            entry = ("weighted", (entry, inner_spec.by))
+        return entry
+    if isinstance(effect, Grouped):
+        inner_spec = effect.effect
+        target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+        group_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
+        level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
+        entry = (
+            "grouped_structured",
+            (effect.name, effect.over, target.index, group_labels, level_labels),
+        )
+        if isinstance(inner_spec, Weighted):
+            # Same nesting Weighted(Grouped(...)) produces above: build the
+            # grouped entry from the unwrapped effect, then wrap it so
+            # _design_block_for's recursive dispatch reapplies the weights.
             entry = ("weighted", (entry, inner_spec.by))
         return entry
     return ("structured", (effect.name, effect.index, block.labels))
