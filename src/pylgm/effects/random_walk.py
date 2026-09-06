@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix, diags
 
 from pylgm.data.scalars import ordered_observed_levels
+from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.ir.model import LatentBlock
 
 
@@ -23,6 +24,18 @@ def difference_operator(n: int, order: Literal[1, 2]) -> csr_matrix:
         shape=(n - 2, n),
         format="csr",
     )
+
+
+def rw_structure(level_count: int, order: Literal[1, 2], scale: bool = True) -> np.ndarray:
+    """Sørbye-Rue-scaled RW structure ``DᵀD`` over ``level_count`` points.
+
+    Lives here rather than in spacetime.py, which is where it started: both the
+    space-time interaction and the between-group structures need it, and both
+    already depend on this module for ``difference_operator``.
+    """
+    difference = difference_operator(level_count, order)
+    r = (difference.T @ difference).toarray()
+    return sorbye_rue_scale(r, null_dim=order) if scale else r
 
 
 def build_random_walk(

@@ -12,20 +12,11 @@ from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects.besag import _scaled_structure
 from pylgm.effects.graph import normalize_graph
 from pylgm.effects.kronecker import kron_block
-from pylgm.effects.random_walk import difference_operator
-from pylgm.effects.scaling import sorbye_rue_scale
+from pylgm.effects.random_walk import rw_structure
 from pylgm.ir.model import LatentBlock
 
 _SPACE_STRUCTURED = {"III", "IV"}
 _TIME_STRUCTURED = {"II", "IV"}
-
-
-def _rw_structure(level_count: int, order: int, scale: bool) -> np.ndarray:
-    """Sørbye-Rue-scaled temporal RW structure ``DᵀD`` (order 1 or 2)."""
-    # Reuse the shared difference operator (MIDAS/S1 exposed it in random_walk).
-    difference = difference_operator(level_count, order)
-    r = (difference.T @ difference).toarray()
-    return sorbye_rue_scale(r, null_dim=order) if scale else r
 
 
 def _space_null_basis(interaction: str, w, area_count: int) -> np.ndarray:
@@ -93,7 +84,7 @@ def build_spacetime(
     else:
         k_s = identity(S, format="csr")
     if interaction in _TIME_STRUCTURED:
-        k_t = csr_matrix(_rw_structure(T, order, scale))
+        k_t = csr_matrix(rw_structure(T, order, scale))
     else:
         k_t = identity(T, format="csr")
     area_pos = {area: i for i, area in enumerate(areas)}
