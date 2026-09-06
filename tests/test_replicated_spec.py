@@ -56,6 +56,13 @@ def test_replicated_rejects_an_ar1_that_already_replicates_itself():
         Replicated(AR1("t", index="year", replicate="firm"), over="country")
 
 
+def test_replicated_rejects_a_weighted_ar1_that_already_replicates_itself():
+    with pytest.raises(TypeError, match="replicate"):
+        Replicated(
+            Weighted(AR1("t", index="year", replicate="firm"), by="z"), over="country"
+        )
+
+
 def test_replicated_may_wrap_a_weighted_effect():
     # Weighted touches only the design, Replicated only precision and indexing,
     # so the two compose; the spec asserts they commute.

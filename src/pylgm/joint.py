@@ -92,7 +92,7 @@ class Shared:
                 "must be indexed (IID, RW1/RW2, AR1, Seasonal, Besag, ProperCAR, "
                 "SAR, BYM2), so it can be summed across sub-models over a common "
                 "level set. Fixed/MIDAS/MIDASParametric/SpaceTime/"
-                "DynamicSpatialPanel effects cannot be shared."
+                "DynamicSpatialPanel/Replicated/Grouped effects cannot be shared."
             )
         if not isinstance(self.allow_ragged, bool):
             raise TypeError("Shared allow_ragged must be a bool")

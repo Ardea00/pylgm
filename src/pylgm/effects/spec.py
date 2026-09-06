@@ -583,13 +583,6 @@ class Grouped(_ComposableEffect):
                 "labels would become 'replicate@group@level' and the predict "
                 "path resolves exactly one pair. Use one or the other."
             )
-        if getattr(self.effect, "replicate", None) is not None:
-            raise TypeError(
-                f"{type(self.effect).__name__} already replicates itself through "
-                "its own `replicate` argument; combining it with a group would "
-                "give two copy mechanisms on one effect with no defined "
-                "interaction"
-            )
         object.__setattr__(self, "over", _non_empty_string(self.over, "over"))
         if not all(
             hasattr(self.structure, method)
@@ -608,6 +601,13 @@ class Grouped(_ComposableEffect):
             raise TypeError(
                 f"Grouped requires an indexed effect, got "
                 f"{type(self.effect).__name__}, which has no index."
+            )
+        if getattr(target, "replicate", None) is not None:
+            raise TypeError(
+                f"{type(target).__name__} already replicates itself through "
+                "its own `replicate` argument; combining it with a group would "
+                "give two copy mechanisms on one effect with no defined "
+                "interaction"
             )
         if isinstance(self.effect, Copy):
             raise TypeError(
@@ -655,12 +655,6 @@ class Replicated(_ComposableEffect):
                 "labels would become 'replicate@group@level' and the predict "
                 "path resolves exactly one pair. Use one or the other."
             )
-        if getattr(self.effect, "replicate", None) is not None:
-            raise TypeError(
-                f"{type(self.effect).__name__} already replicates itself through "
-                "its own `replicate` argument; wrapping it would give two "
-                "replication mechanisms on one effect with no defined interaction"
-            )
         # Resolve the index THROUGH a Weighted wrapper rather than giving
         # Weighted an `index` of its own: joint.Shared distinguishes "wrapper,
         # cannot be shared" from "no index at all" by hasattr(effect, "index"),
@@ -671,6 +665,12 @@ class Replicated(_ComposableEffect):
             raise TypeError(
                 f"Replicated requires an indexed effect, got "
                 f"{type(self.effect).__name__}, which has no index."
+            )
+        if getattr(target, "replicate", None) is not None:
+            raise TypeError(
+                f"{type(target).__name__} already replicates itself through "
+                "its own `replicate` argument; wrapping it would give two "
+                "replication mechanisms on one effect with no defined interaction"
             )
         if isinstance(self.effect, Copy):
             raise TypeError(
@@ -749,6 +749,7 @@ __all__ = [
     "Copy",
     "DynamicSpatialPanel",
     "Fixed",
+    "Grouped",
     "IID",
     "MIDAS",
     "MIDASParametric",

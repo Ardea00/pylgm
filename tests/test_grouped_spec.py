@@ -5,6 +5,7 @@ from pylgm import (
     RW1Structure, Weighted,
 )
 from pylgm.effects.spec import Predictor
+from pylgm.joint import Shared
 
 GRAPH = {"a": ["b"], "b": ["a"]}
 
@@ -57,7 +58,7 @@ def test_grouped_rejects_wrapping_a_replicated():
     split("@", 1) and the single-inner-index assumption would have to be
     generalised. Recorded as an f() parity gap, not half-implemented.
     """
-    with pytest.raises(TypeError, match="replicate"):
+    with pytest.raises(TypeError, match="Use one or the other"):
         Grouped(
             Replicated(IID("u", index="t"), over="firm"),
             over="year", structure=IIDStructure(),
@@ -65,7 +66,7 @@ def test_grouped_rejects_wrapping_a_replicated():
 
 
 def test_replicated_rejects_wrapping_a_grouped():
-    with pytest.raises(TypeError, match="group"):
+    with pytest.raises(TypeError, match="Use one or the other"):
         Replicated(
             Grouped(IID("u", index="t"), over="r", structure=IIDStructure()),
             over="firm",
@@ -77,8 +78,16 @@ def test_grouped_rejects_an_ar1_that_already_replicates_itself():
         Grouped(AR1("t", index="year", replicate="firm"), over="r", structure=IIDStructure())
 
 
+def test_grouped_rejects_a_weighted_ar1_that_already_replicates_itself():
+    with pytest.raises(TypeError, match="replicate"):
+        Grouped(
+            Weighted(AR1("t", index="year", replicate="firm"), by="z"),
+            over="r", structure=IIDStructure(),
+        )
+
+
 def test_grouped_rejects_wrapping_a_copy():
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="Copy"):
         Grouped(Copy("u", index="j"), over="r", structure=IIDStructure())
 
 
@@ -94,3 +103,15 @@ def test_weighted_may_wrap_a_grouped_effect():
         Grouped(IID("u", index="t"), over="r", structure=IIDStructure()), by="z"
     )
     assert wrapped.name == "u"
+
+
+def test_grouped_has_no_index_so_shared_s_wrapper_guard_stays_alive():
+    """joint.Shared tells "wrapper" from "no index at all" by hasattr(effect, "index").
+
+    A previous slice gave a wrapper an index as a shortcut and silently turned
+    that guard into dead code. This pins the shape, not just the behaviour.
+    """
+    grouped = Grouped(IID("u", index="t"), over="r", structure=IIDStructure())
+    assert not hasattr(grouped, "index")
+    with pytest.raises(TypeError, match="index"):
+        Shared(grouped)
