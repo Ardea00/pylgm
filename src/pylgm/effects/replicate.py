@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import identity
 
+from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects.kronecker import kron_block
 from pylgm.ir.model import LatentBlock
 
@@ -65,12 +66,20 @@ def group_levels(frame: pd.DataFrame, name: str, over: str, structure) -> tuple[
 
     The structure has the last word: a ``BesagStructure`` returns its graph's
     nodes, so a node with no observations still gets its cell.
+
+    Order comes from the column's own dtype via ``ordered_observed_levels`` --
+    the same helper the index side relies on through ``_levels_frame`` -- not
+    from a lexical string sort. An outer structure with real order
+    (``RW1Structure``, ``RW2Structure``, ``AR1Structure``) builds its chain
+    over whatever order ``observed`` arrives in, so sorting the stringified
+    values would silently scramble an int64 or ordered-categorical group
+    column (e.g. 1, 10, 11, 12, 2, ...) before the structure ever sees it.
     """
     if over not in frame.columns:
         raise ValueError(f"{name} group column {over!r} not found")
     if frame[over].isna().any():
         raise ValueError(f"{name} group column {over!r} must not contain null values")
-    observed = tuple(sorted({str(value) for value in frame[over]}))
+    observed = tuple(str(value) for value in ordered_observed_levels(frame[over]))
     return structure.levels(observed)
 
 

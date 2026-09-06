@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from pylgm import (
-    BesagStructure, Fixed, Grouped, IID, IIDStructure, LGM, Poisson,
+    AR1, BesagStructure, Fixed, Grouped, IID, IIDStructure, LGM, Poisson,
     Replicated, RW1, RW1Structure, Weighted,
 )
 from pylgm.compiler import _build_effect_block
@@ -59,6 +59,11 @@ def test_an_iid_structure_reduces_grouped_to_replicated():
     assert grouped.labels == replicated.labels
     assert np.allclose(grouped.design.toarray(), replicated.design.toarray())
     assert np.allclose(grouped.precision.toarray(), replicated.precision.toarray())
+    # F5: constraints are exactly what the two paths build differently --
+    # structure.null_basis(groups) versus np.zeros((R, 0)) -- so the
+    # reduction claim is incomplete without checking them too.
+    assert grouped.constraints.shape == replicated.constraints.shape
+    assert np.allclose(grouped.constraints, replicated.constraints)
 
 
 def test_a_single_group_level_reduces_to_the_bare_effect():
@@ -112,11 +117,45 @@ def test_a_missing_group_column_is_named():
         )
 
 
-def test_a_structure_whose_size_disagrees_with_the_levels_is_rejected():
+def test_a_single_group_level_is_rejected_by_rw1_itself_not_the_shape_guard():
+    """Despite its old name, this fires ``RW1Structure.precision``'s own "needs
+    more than 1 group level(s)" message before ``grouped_block``'s shape guard
+    ever runs -- see ``test_a_malformed_duck_typed_structure_is_rejected``
+    below for a test that actually exercises the shape guard.
+    """
     with pytest.raises((CompilationError, ValueError), match="level"):
         _build_effect_block(
             Grouped(IID("u", index="t"), over="region", structure=RW1Structure()),
             pd.DataFrame({"region": ["only"], "t": ["a"], "y": [1.0]}),
+        )
+
+
+def test_a_malformed_duck_typed_structure_is_rejected():
+    """F4: ``grouped_block``'s own shape guard, not any individual structure's.
+
+    ``Grouped.__post_init__`` duck-types a structure by the presence of
+    ``levels``/``precision``/``null_basis`` alone, so a user-supplied
+    structure can reach ``grouped_block`` with all three methods present but
+    a ``precision`` that returns the wrong shape -- there is no built-in
+    structure that does this, so it has to be constructed by hand.
+    """
+    from scipy.sparse import identity as sparse_identity
+
+    class _MismatchedStructure:
+        def levels(self, observed):
+            return observed
+
+        def precision(self, levels):
+            # Deliberately one row/column too many for `levels`.
+            return sparse_identity(len(levels) + 1, format="csr")
+
+        def null_basis(self, levels):
+            return np.zeros((len(levels), 0))
+
+    with pytest.raises((CompilationError, ValueError), match="shape"):
+        _build_effect_block(
+            Grouped(IID("u", index="t"), over="region", structure=_MismatchedStructure()),
+            _frame(),
         )
 
 
@@ -187,6 +226,102 @@ def test_an_integer_index_keeps_its_numeric_level_order_in_the_family_path():
         f"u:{r}@{y}" for r in ("r1", "r2", "r3") for y in range(1, 13)
     )
     assert tuple(compiled.labels[-36:]) == expected
+
+
+def test_an_integer_group_column_orders_numerically_not_lexically():
+    """F1: ``group_levels`` used to sort the group column as strings, silently
+    permuting an ordered outer structure's neighbourhood -- 1, 10, 11, 12, 2,
+    ... instead of 1, 2, ..., 12. Needs >= 12 levels so 1/2/10/11/12
+    discriminate a numeric sort from a lexical one.
+    """
+    rows = [
+        {"yr": yr, "t": t, "y": 0.0}
+        for yr in range(1, 13) for t in ("a", "b")
+    ]
+    frame = pd.DataFrame(rows)
+    outer, _ = _build_effect_block(
+        Grouped(IID("u", index="t"), over="yr", structure=RW1Structure()),
+        frame,
+    )
+    expected = tuple(f"{yr}@{t}" for yr in range(1, 13) for t in ("a", "b"))
+    assert outer.labels == expected
+
+
+def test_grouped_family_rebuild_uses_the_structure_precision_not_identity():
+    """F2: the ParametricBlock rebuild closure built in ``_grouped_family_block``
+    must re-Kron the inner rebuild against the *structure's* precision on
+    every hyperparameter draw. Swap in an identity there instead and every
+    other test in this file still passes -- the family would silently ship
+    uncorrelated groups while the hyperparameter stays estimated and
+    reported.
+
+    ``rho`` is the estimated hyperparameter (with ``transform="logit"``, so
+    the optimizer's unconstrained draws land back inside (-1, 1)) because it
+    enters the AR1 structure itself rather than multiplying it -- unlike a
+    scalar precision, which would commute with the Kronecker product
+    regardless of which factor the bug put it on, and so could not
+    distinguish a real structure from an identity.
+    """
+    from pylgm.compiler import compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+    from pylgm.effects.ar1 import ar1_structure
+
+    periods = 4
+    rows = [
+        {"region": r, "t": t, "y": 0.0}
+        for r in ("r1", "r2", "r3") for t in range(periods)
+    ]
+    frame = pd.DataFrame(rows)
+    frame["row"] = range(len(frame))
+    structure = BesagStructure(GRAPH)
+    groups = structure.levels(("r1", "r2", "r3"))
+    outer = structure.precision(groups).toarray()
+
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Grouped(
+            AR1("u", index="t", rho=Hyperparameter("rho", initial=0.1, transform="logit")),
+            over="region", structure=structure,
+        ),
+    )
+    panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y", panel=())
+    )
+    family = compile_family(model, panel)
+    candidates = [
+        item for item in family.blocks
+        if item.block.name == "u" and hasattr(item, "build")
+    ]
+    assert len(candidates) == 1
+    build = candidates[0].build
+    for rho in (0.1, 0.85):
+        composed = build({"rho": rho}).toarray()
+        expected = np.kron(outer, ar1_structure(periods, rho).toarray())
+        assert np.allclose(composed, expected)
+
+
+def test_an_unobserved_graph_node_still_gets_a_cell():
+    """F3: ``group_levels`` calls ``structure.levels(observed)`` -- not
+    ``observed`` unchanged -- so a ``BesagStructure`` node with no
+    observations still gets a cell (see its docstring: the graph is the
+    universe, not the observed levels). Mutating that call to
+    ``return observed`` passes every other test in this file.
+    """
+    frame = pd.DataFrame({
+        "region": ["r1", "r1", "r2", "r2"],
+        "t": ["a", "b", "a", "b"],
+        "y": [1.0, 2.0, 3.0, 4.0],
+    })
+    outer, _ = _build_effect_block(
+        Grouped(IID("u", index="t"), over="region", structure=BesagStructure(GRAPH)),
+        frame,
+    )
+    assert outer.labels == ("r1@a", "r1@b", "r2@a", "r2@b", "r3@a", "r3@b")
+    assert outer.precision.shape == (6, 6)
+    design = outer.design.toarray()
+    # r3 has no rows in the frame, so its two columns get no observations.
+    assert np.allclose(design[:, 4:6], 0.0)
 
 
 def test_a_grouped_model_fits_end_to_end():
