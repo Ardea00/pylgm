@@ -68,7 +68,14 @@ def test_a_subset_of_groups_still_scores():
         frame,
     )
     subset = frame[frame["region"] == "r2"]
-    assert np.isfinite(result.predict(subset).predictive_mean).all()
+    predicted = result.predict(subset).predictive_mean
+    assert np.isfinite(predicted).all()
+    # `isfinite` alone survives every mutation of the design, including zeroing
+    # it, and so does comparing against the full frame's *prediction* -- both
+    # sides would go through the same broken path. The fitted values do not:
+    # they come from the fit, never from _design_block_for.
+    fitted = result.predictive_mean[frame["region"].to_numpy() == "r2"]
+    assert np.allclose(predicted, fitted, rtol=1e-12, atol=1e-12)
 
 
 def test_an_unseen_level_is_rejected():

@@ -43,13 +43,20 @@ def _frame():
 
 
 def _same_span(first: np.ndarray, second: np.ndarray) -> bool:
-    """Two constraint matrices span the same row space."""
+    """Two constraint matrices span the same row space.
+
+    Symmetric on purpose. Testing only ``rowspace(second) <= rowspace(first)``
+    is safe here solely because ``reference.constraints`` happens to be full
+    row rank; were the arguments ever swapped, a degenerate or zero ``first``
+    would pass silently. Requiring both ranks to equal the stacked rank costs
+    one call and removes the dependence on argument order.
+    """
     if first.shape != second.shape:
         return False
     if first.shape[0] == 0:
         return True
-    stacked = np.vstack([first, second])
-    return np.linalg.matrix_rank(stacked) == np.linalg.matrix_rank(first)
+    rank = np.linalg.matrix_rank(np.vstack([first, second]))
+    return rank == np.linalg.matrix_rank(first) == np.linalg.matrix_rank(second)
 
 
 def _rw_scale_ratio(time_count: int, order: int) -> float:
@@ -92,7 +99,7 @@ def test_grouped_reproduces_the_knorr_held_interaction(interaction, order):
     if interaction in ("II", "IV"):
         # RW-based: precision matches up to the one global Sørbye-Rue scalar
         # documented at module level -- never a hard-coded literal.
-        ratio = _rw_scale_ratio(time_count=5, order=order)
+        ratio = _rw_scale_ratio(time_count=frame["t"].nunique(), order=order)
         assert np.allclose(grouped.precision.toarray() * ratio, reference.precision.toarray())
     else:
         assert np.allclose(grouped.precision.toarray(), reference.precision.toarray())
@@ -140,3 +147,11 @@ def test_the_rw_scaling_discrepancy_is_real_and_not_yet_reconciled():
         Grouped(RW1("st", index="t"), over="s", structure=IIDStructure()), frame
     )
     assert not np.allclose(grouped.precision.toarray(), reference.precision.toarray())
+
+
+def test_same_span_rejects_a_degenerate_first_argument():
+    """The asymmetry that used to make a zero constraint matrix pass."""
+    real = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    degenerate = np.zeros((2, 3))
+    assert not _same_span(degenerate, real)
+    assert not _same_span(real, degenerate)
