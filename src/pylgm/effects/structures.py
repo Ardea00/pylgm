@@ -162,9 +162,20 @@ class BesagStructure:
         return csr_matrix(_scaled_structure(w, nodes, scale=True))
 
     def null_basis(self, levels: tuple[str, ...]) -> np.ndarray:
+        """One constant column per connected component of size >= 2.
+
+        An isolated node (no neighbours) has no null direction: ``precision``
+        treats it as an independent unit-variance IID node (see
+        ``_scaled_structure``), which is already proper. Mirrors
+        ``_component_constraints`` in ``besag.py``.
+        """
         nodes, w = self._checked(levels)
-        count, membership = connected_components(w, directed=False)
-        basis = np.zeros((len(nodes), count))
-        for component in range(count):
-            basis[membership == component, component] = 1.0
-        return basis
+        n_components, membership = connected_components(w, directed=False)
+        columns = [
+            (membership == component).astype(float)
+            for component in range(n_components)
+            if np.count_nonzero(membership == component) > 1
+        ]
+        if not columns:
+            return np.zeros((len(nodes), 0))
+        return np.column_stack(columns)
