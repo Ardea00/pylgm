@@ -51,7 +51,8 @@ class PredictionContext:
     ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
     ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
     ``("replicated_structured", (block_name, over, index, replicate_labels,
-    level_labels))``,
+    level_labels))``, ``("grouped_structured", (block_name, over, index,
+    group_labels, level_labels))``,
     ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
     models only -- a shared field's predict-time design is ``scale * incidence``),
     ``("weighted", (inner_entry, by_column))`` -- rebuilds ``inner_entry``'s
@@ -272,6 +273,25 @@ def _replicated_block(
     )
 
 
+def _grouped_block(
+    entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
+) -> np.ndarray:
+    """Rebuild a grouped effect's design on (group, level) pairs.
+
+    Group-major, matching ``grouped_block``'s ``group * n_levels + level``
+    layout. The correlation between groups lives entirely in the precision, so
+    the design is the same shape as a replicated one.
+    """
+    name, over, index_column, group_labels, level_labels = entry
+    return _paired_cell_block(
+        name, over, index_column, group_labels, level_labels, new_data,
+        block_label="grouped",
+        pair_label="group/level",
+        hint="To score a new group or level, include those rows at fit time "
+             "with a NaN response instead.",
+    )
+
+
 def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     """Rebuild a shared field's design for one outcome: scale_k * incidence.
 
@@ -365,6 +385,8 @@ def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.n
         return _dynamic_spatial_panel_block(payload, new_data)
     elif kind == "replicated_structured":
         return _replicated_block(payload, new_data)
+    elif kind == "grouped_structured":
+        return _grouped_block(payload, new_data)
     elif kind == "shared":
         return _shared_design_block(payload, new_data)
     elif kind == "weighted":
