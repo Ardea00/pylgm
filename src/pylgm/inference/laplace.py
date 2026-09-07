@@ -10,7 +10,7 @@ from pylgm.inference.gaussian import (
     _require_finite,
     preflight_dense_reference,
 )
-from pylgm.inference.result import LaplaceResult
+from pylgm.inference.result import LaplaceResult, quadratic_form_diagonal
 from pylgm.ir.model import CompiledLGM
 
 
@@ -145,8 +145,7 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
     )
 
     predictive_mean = np.asarray(offset + design @ mean).reshape(-1)
-    design_dense = design.toarray()
-    predictive_variance = np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense)
+    predictive_variance = quadratic_form_diagonal(design, covariance)
     fitted_mean = likelihood.response_prediction(predictive_mean, predictive_variance)
 
     _require_finite("posterior mean", mean)
