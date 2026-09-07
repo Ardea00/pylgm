@@ -1,11 +1,30 @@
 name: docs
 
-# Builds the MkDocs site and deploys it to GitHub Pages on every push to main.
+# Builds the MkDocs site for every documented branch and deploys them together
+# to GitHub Pages, with Material's version selector switching between them.
+#
+# Layout published at https://ardea00.github.io/pylgm/ :
+#   /            -> redirect to /main/
+#   /versions.json
+#   /main/            docs built from `main`           (alias: latest)
+#   /research-tier/   docs built from `research-tier`
+#
+# `main` carries the `latest` alias, so Material shows its "outdated" banner --
+# overridden in overrides/main.html -- on every other version. That is the
+# point: a reader arriving at research-tier from a search engine is told the
+# results there are not verified against published work.
+#
+# Every documented branch needs mkdocs.yml's `extra.version` block, the
+# overrides/ directory, and this workflow file, since GitHub runs the workflow
+# definition from the branch that was pushed.
+#
 # One-time setup: enable Pages for the repo with "GitHub Actions" as the source
-# (Settings -> Pages). Site URL: https://ardea00.github.io/pylgm/
+# (Settings -> Pages). No gh-pages branch and no `mike` package are involved --
+# Material's selector only needs versions.json at the site root.
 on:
   push:
-    branches: [main]
+    branches: [main, research-tier]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,16 +36,75 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  BASE_URL: https://ardea00.github.io/pylgm
+  # First entry is the default landing version and carries the `latest` alias.
+  # Order here is the order in the dropdown.
+  VERSIONS: main research-tier
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: python -m pip install .[docs]
-      - run: mkdocs build --strict
+
+      - name: Build every documented branch
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          for branch in $VERSIONS; do
+            echo "::group::building $branch"
+            git worktree add "../$branch" "origin/$branch"
+            # Each branch is built with its OWN mkdocs.yml and overrides, so a
+            # branch that has not yet adopted the version block simply ships
+            # without a selector rather than breaking the others.
+            ( cd "../$branch" \
+              && SITE_URL="$BASE_URL/$branch/" mkdocs build --strict \
+                   -d "$GITHUB_WORKSPACE/site/$branch" )
+            echo "::endgroup::"
+          done
+
+      - name: Write versions.json and the root redirect
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib
+
+          titles = {
+              "main": "main · verified",
+              "research-tier": "research-tier · frontier",
+          }
+          versions = os.environ["VERSIONS"].split()
+          default = versions[0]
+          entries = [
+              {
+                  "version": v,
+                  "title": titles.get(v, v),
+                  # `latest` on the default is what makes Material show the
+                  # "you are reading unverified docs" banner on every other one.
+                  "aliases": ["latest"] if v == default else [],
+              }
+              for v in versions
+          ]
+          site = pathlib.Path("site")
+          (site / "versions.json").write_text(json.dumps(entries, indent=2) + "\n")
+          (site / "index.html").write_text(
+              '<!doctype html><meta charset="utf-8">\n'
+              f'<meta http-equiv="refresh" content="0; url=./{default}/">\n'
+              f'<link rel="canonical" href="./{default}/">\n'
+              "<title>pyLGM</title>\n"
+              f'<p>Redirecting to the <a href="./{default}/">pyLGM '
+              "documentation</a>.</p>\n"
+          )
+          print(json.dumps(entries, indent=2))
+          PY
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

@@ -3,8 +3,14 @@ site_description: General-purpose latent Gaussian models for Python
 repo_url: https://github.com/Ardea00/pylgm
 repo_name: Ardea00/pylgm
 
+# Each documented branch is published under its own path, so the canonical URL
+# differs per build. The workflow sets SITE_URL; the default is what a local
+# `mkdocs serve` wants.
+site_url: !ENV [SITE_URL, "https://ardea00.github.io/pylgm/"]
+
 theme:
   name: material
+  custom_dir: overrides
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -51,6 +57,14 @@ nav:
   - Internals & release policy: internals.md
   - Roadmap: roadmap.md
   - Development: development.md
+
+# Branch switcher. Material's `mike` provider only needs a versions.json at the
+# site root -- the workflow writes one -- so the mike package is not a
+# dependency here.
+extra:
+  version:
+    provider: mike
+    default: main
 
 markdown_extensions:
   - admonition
