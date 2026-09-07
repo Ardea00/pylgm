@@ -36,7 +36,7 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
     }
 
     assert expected.issubset(set(pylgm.__all__))
-    assert pylgm.__version__ == "0.6.0"
+    assert pylgm.__version__ == "0.6.1"
     assert metadata["project"]["version"] == pylgm.__version__
 
 
@@ -49,7 +49,7 @@ def test_docs_do_not_claim_a_different_version_than_the_package() -> None:
     import re
 
     root = Path(__file__).parents[1]
-    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.6.0" -> "0.6"
+    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.6.1" -> "0.6"
     roadmap = (root / "docs" / "roadmap.md").read_text(encoding="utf-8")
 
     claimed = set(re.findall(r"(?:pyLGM|Shipped in) (\d+\.\d+)", roadmap))
