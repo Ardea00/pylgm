@@ -335,3 +335,26 @@ def test_a_grouped_model_fits_end_to_end():
     ).fit(frame, engine="laplace")
     assert np.isfinite(result.log_marginal_likelihood)
     assert len(result.labels) == 1 + 6
+
+
+def test_an_estimated_inner_precision_scales_every_group():
+    from pylgm.compiler import compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+
+    frame = _frame()
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Grouped(
+            IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)),
+            over="region", structure=BesagStructure(GRAPH),
+        ),
+    )
+    panel = CanonicalPanel.from_frame(frame, DataConfig(time="row", response="y", panel=()))
+    family = compile_family(model, panel)
+    assert family is not None and "tau" in family.parameter_names
+    low = [b for b in family.materialize({"tau": 1.0}).blocks if b.name == "u"][0]
+    high = [b for b in family.materialize({"tau": 50.0}).blocks if b.name == "u"][0]
+    nonzero = low.precision.toarray() != 0
+    assert np.allclose(high.precision.toarray()[nonzero] / low.precision.toarray()[nonzero], 50.0)
+    assert low.precision.shape == (6, 6)

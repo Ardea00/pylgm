@@ -222,3 +222,84 @@ effect, one per level of `over`: precision `I_R ⊗ Q`, design on
   `MIDAS`, `MIDASParametric`, `SpaceTime` and `DynamicSpatialPanel`, and it
   drops even `AR1(replicate=)`'s replicate column. It is recorded here rather
   than fixed because the fix belongs to that helper, across all of them.
+
+---
+
+## `Grouped` effects (correlated copies with a between-group structure) — RESEARCH
+
+`Grouped(effect, over, structure)` builds `R` *correlated* copies of any
+indexed effect, one per level of `over`, tied by a between-group precision
+`Q_S`: `Q_S ⊗ Q_E`. This is R-INLA's `f(index, model=..., group=g,
+control.group=list(model=...))`. `Replicated` is the special case
+`structure=IIDStructure()`. See [Grouped](effects.md#grouped).
+
+### What is verified
+
+| Claim | Evidence |
+|---|---|
+| The precision is exactly the Kronecker product of the structure's and the inner effect's | Checked against a hand-built `np.kron(structure, inner)` (`tests/test_grouped_compile.py::test_precision_is_the_kronecker_product_of_structure_and_inner`). |
+| An `IIDStructure` reduces `Grouped` exactly to `Replicated` | Same labels, design, precision, and constraints, checked directly (`tests/test_grouped_compile.py::test_an_iid_structure_reduces_grouped_to_replicated`). |
+| A single group level reduces to the bare inner effect | `tests/test_grouped_compile.py::test_a_single_group_level_reduces_to_the_bare_effect`. |
+| An unobserved graph node still gets a cell | `BesagStructure`'s graph is the universe, not the observed levels, matching `Besag`/`build_spacetime` (`tests/test_grouped_compile.py::test_an_unobserved_graph_node_still_gets_a_cell`). |
+| Constraints span the null space of the composed precision, not one per group | Checked by rank, since `null(Q_S) ⊗ R^E` overlaps any null space the inner effect already carries (`tests/test_grouped_compile.py::test_constraints_span_the_null_space_of_the_composed_precision`). |
+| An integer index keeps its numeric level order, on both the plain and the family (estimated-hyperparameter) compile path | Regression guard for the ordering bug this project has shipped before; verified non-vacuous by mutation in this slice (`tests/test_grouped_compile.py`, two tests). |
+| The family-path rebuild re-Krons against the structure's own precision on every hyperparameter draw, not an identity | `tests/test_grouped_compile.py::test_grouped_family_rebuild_uses_the_structure_precision_not_identity`. |
+| An estimated inner precision scales every group's block by exactly that factor in the family path | `tau=1.0` vs. `tau=50.0` changes every nonzero precision entry by exactly `50.0`, added and verified non-vacuous in this slice (`tests/test_grouped_compile.py::test_an_estimated_inner_precision_scales_every_group`). |
+| It commutes with `Weighted` | `tests/test_grouped_compile.py::test_grouped_and_weighted_commute`. |
+| A full Poisson/Laplace fit runs end to end and returns a finite log marginal likelihood | `tests/test_grouped_compile.py::test_a_grouped_model_fits_end_to_end`. |
+| Prediction round-trips on the fit rows, including with `Weighted` inside or outside the group and with a subset of groups | `tests/test_grouped_predict.py`. |
+| `Grouped` reproduces all four Knorr-Held `SpaceTime` interaction types (I-IV) bit for bit on design, and on precision up to one pre-existing global scalar for the RW-based types (II, IV) — see below | `tests/test_grouped_spacetime_oracle.py`, checked against `build_spacetime`, an implementation that predates this slice. |
+| Every declared hyperparameter on a `Grouped` effect actually affects the fit | Covered by the project's structural cross-check for the "registered but dead" failure mode, for `Grouped(IID(precision))`, `Grouped(AR1(rho))`, and `Grouped(Weighted(IID(precision)))`, each over a `BesagStructure` (`tests/test_hyperparameter_effectiveness.py`); verified non-vacuous by mutation in this slice (neutering `_effect_hyperparameters`'s `Grouped` delegation to `return []` makes these models declare zero hyperparameters and fail at collection, since `compile_family` then returns `None`). |
+
+### What is NOT verified
+
+- **No validation against published results on real data, and no
+  known-parameter recovery test on simulated data either** (unlike `Weighted`
+  and `Copy`, which each recover a known ground-truth coefficient). Everything
+  above is internal consistency or exact agreement with an independent
+  implementation (`build_spacetime`).
+- **The RW scaling divergence — the most important gap here.**
+  `build_spacetime` always builds its RW time factor Sørbye-Rue *scaled*
+  (`rw_structure(T, order, scale=True)`); `Grouped`'s inner `RW1`/`RW2`
+  compiles through the ordinary, *unscaled* `build_random_walk` — the same
+  builder every standalone `RW1`/`RW2` effect in this library uses. The two
+  differ by exactly one global scalar on every nonzero precision entry: for
+  `T=5, order=1` the ratio (unscaled precision / scaled precision) is
+  `1.36979319`, the reciprocal of `sorbye_rue_scale`'s factor. **Consequence a
+  user must be told: someone writing `Grouped(RW1(...), over=..., structure=...)`
+  expecting R-INLA's `group=` on a scaled `rw1` gets an unscaled one instead —
+  a different model under the same nominal `precision`.** This is a
+  pre-existing inconsistency between `RW1`/`RW2` and `build_spacetime`'s
+  internal convention, not something this slice introduced, and it is
+  recorded rather than fixed because reconciling it changes already-released
+  numerics for both `RW1`/`RW2` and `SpaceTime`. Today only a test docstring
+  states it; `tests/test_grouped_spacetime_oracle.py` pins both drift
+  directions (that the two disagree by this factor, and that the factor is
+  never zero, i.e. the discrepancy is real).
+- **No YAML/config surface.** Unlike `SpaceTime`, which has one, there is no
+  `type: grouped` in the config schema and no YAML block in
+  [effects.md](effects.md); the Python API is the only way to declare one.
+- **Not supported on Spark.** `_required_columns` in `data/spark.py` reads
+  `effect.index` unconditionally; a `Grouped` model raises a bare
+  `AttributeError: 'Grouped' object has no attribute 'index'`, and `over` is
+  never added to the projection either — so a future fix must add it or the
+  group column is silently projected away and the failure moves from loud to
+  silent. Pre-existing gap in a helper already blind to `MIDAS`, `SpaceTime`,
+  `DynamicSpatialPanel`, and `AR1(replicate=)`'s replicate column.
+- **`group` and `replicate` together are rejected**, which R-INLA permits on
+  one `f()` term. `Grouped(Replicated(...), ...)`, `Replicated(Grouped(...),
+  ...)`, and wrapping an effect that already declares its own `replicate=`
+  all raise `TypeError` at construction. An f() parity gap, recorded rather
+  than half-implemented, since the label scheme (`replicate@group@level`) and
+  the predict path both assume exactly one pairing.
+- **A `Hyperparameter` on a structure's own parameters is not supported.**
+  `AR1Structure(rho)` takes a fixed float only; passing a `Hyperparameter`
+  raises `TypeError` at construction. Only the *inner* effect's own
+  hyperparameters are estimated.
+- **`Grouped` inside a `Joint` is untested**, though it does work: a `Grouped`
+  effect used as an ordinary (non-shared) effect inside one `Joint` sub-model
+  compiles and fits without error. No test exercises the combination.
+  `Shared(Grouped(...))` is rejected by design, not merely untested —
+  `Grouped` exposes no `.index`, so it fails `Shared`'s "must be indexed"
+  guard the same way `Weighted`, `Fixed`, `MIDAS`, `SpaceTime`, and
+  `DynamicSpatialPanel` already do.

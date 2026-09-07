@@ -18,6 +18,7 @@ Each structured effect takes a fixed `precision` or a declared
 | `Weighted(effect, by)` | Modulates an indexed effect by a numeric column — spatially-varying coefficients | [Weighted](#weighted-effects) |
 | `Copy(name, index, scale=)` | A second occurrence of an existing field at another index, optionally rescaled | [Copy](#copy) |
 | `Replicated(effect, over=)` | `R` independent copies of any indexed effect, sharing its hyperparameters | [Replicated](#replicated) |
+| `Grouped(effect, over=, structure=)` | `R` **correlated** copies of any indexed effect, tied by a between-group structure | [Grouped](#grouped) |
 | `MIDAS(name, columns)` | Mixed-frequency distributed lag, smoothness-penalised | [MIDAS](#midas-smooth-lag-effect) |
 | `MIDASParametric(...)` | Restricted lag curve (exp-Almon / Beta kernel) | [restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) |
 | `SpaceTime(name, space, time, interaction=)` | Knorr-Held space-time interaction, types I–IV | [SpaceTime](#spacetime-effect-knorr-held-interaction) |
@@ -487,6 +488,96 @@ still works, folded into `AR1(replicate=)` with a `DeprecationWarning`; prefer
 `AR1(replicate=)` for a single AR1 panel, or `Replicated(AR1(...), over=...)`
 when it reads more consistently alongside other replicated effects in the
 same model.
+
+## Grouped
+
+`Grouped(effect, over, structure)` builds `R` **correlated** copies of any
+indexed effect, one per level of `over`, tied together by a between-group
+precision `Q_S`. This is R-INLA's `f(index, model=..., group=g,
+control.group=list(model=...))`. Where `Replicated` gives independent copies
+(`I_R ⊗ Q_E`), `Grouped` gives copies correlated across groups
+(`Q_S ⊗ Q_E`) — `Replicated` is exactly the special case `structure=
+IIDStructure()`.
+
+```
+log mu_i = alpha + u_{g(i), s(i)},    u ~ N(0, (Q_S (x) Q_E)^-1)
+```
+
+for group `g(i)` and level `s(i)` of row `i`: `R` correlated draws of the
+inner field, correlated across groups by `Q_S` and within each group by the
+inner effect's own precision `Q_E`.
+
+```python
+from pylgm import BesagStructure, Fixed, IID, LGM, Poisson, Grouped
+from pylgm.parameters import Hyperparameter
+
+# ... a frame whose `region` is IID's own index, `group` the between-group
+# column, `W` a neighbour graph over `group`'s levels, and `y` the Poisson
+# response ...
+result = LGM(
+    response="y", likelihood=Poisson(),
+    predictor=Fixed("1") + Grouped(
+        IID("u", index="region", precision=Hyperparameter("tau", initial=1.0)),
+        over="group", structure=BesagStructure(W),
+    ),
+).fit(frame, engine="laplace")
+```
+
+**Five between-group structures.** `structure` is any of `IIDStructure()`,
+`RW1Structure()` / `RW2Structure()`, `BesagStructure(graph)`, or
+`AR1Structure(rho)` (rho fixed). The first three, paired with the inner
+effect's own precision, reproduce all four Knorr-Held space-time interaction
+types — `structure` plays the role of `K_s` (the `over`/space factor) and the
+inner effect's own precision plays `K_t` (the time factor), exactly as in
+[`SpaceTime`](#spacetime-effect-knorr-held-interaction):
+
+| `structure` | inner effect | Knorr-Held reading |
+|---|---|---|
+| `IIDStructure()` | `IID` | type I — unstructured, `Grouped` reduces exactly to `Replicated` |
+| `IIDStructure()` | `RW1`/`RW2` | type II — each group its own independent temporal trend |
+| `BesagStructure(graph)` | `IID` | type III — each level its own independent spatial pattern |
+| `BesagStructure(graph)` | `RW1`/`RW2` | type IV — inseparable: neighbours tied in both factors |
+
+`AR1Structure(rho)` has no direct Knorr-Held type; it is the panel analogue
+(groups correlated by a stationary AR1, `rho` fixed), used the same way `AR1`
+is used as a temporal main effect outside the Knorr-Held family. This
+equivalence to `SpaceTime` is checked directly, matrix for matrix, in
+`tests/test_grouped_spacetime_oracle.py` — **except that the RW-based types
+(II and IV) match only up to one global scalar on the precision**: `Grouped`'s
+inner `RW1`/`RW2` compiles through the library's ordinary, *unscaled*
+random-walk builder, while `SpaceTime` always builds its time factor
+Sørbye-Rue *scaled*. See [research status](research-status.md) for the exact
+ratio and what it means for a model that mixes the two.
+
+**Structure: `Q_S ⊗ Q_E`, group-major labels.** The precision is the
+Kronecker product of the structure's precision over `over`'s levels and the
+inner effect's own precision. Labels are `"<group>@<level>"` pairs, laid out
+group-major — the same convention `Replicated` uses (`cell = group_index *
+n_levels + level_index`).
+
+**Constraints follow the null space of the product, not one per group.**
+`null(Q_S ⊗ Q_E)` picks up `null(Q_S) ⊗ R^E` in addition to any null space the
+inner effect itself carries, and the two spans can overlap — unlike
+`Replicated`, where each replicate's constraint is independent of the others.
+
+**It commutes with `Weighted`.** `Grouped(Weighted(effect, by=...),
+over=..., structure=...)` and `Weighted(Grouped(effect, over=...,
+structure=...), by=...)` compile to the same block.
+
+**`group` and `replicate` cannot combine on one effect.** R-INLA allows both
+modifiers on a single `f()` term; pyLGM does not — `Grouped(Replicated(...),
+...)`, `Replicated(Grouped(...), ...)`, and wrapping an effect that already
+declares its own `replicate=` all raise `TypeError` at construction. Use one
+or the other, or fold the two columns into a single grouping column.
+
+**The between-group structure's own parameters are fixed, not estimated.**
+`AR1Structure(rho)` takes a plain float; a declared `Hyperparameter` there is
+rejected. Only the *inner* effect's hyperparameters (`precision`, `rho`,
+`phi`, ...) are estimated — matching the restriction `Shared` effects carry
+today.
+
+**`Grouped` has no YAML block.** Unlike `SpaceTime`, there is no `type:
+grouped` in the config schema; declare it from the Python API only.
 
 ## MIDAS smooth-lag effect
 

@@ -35,9 +35,11 @@ import pytest
 from pylgm import (
     AR1,
     Besag,
+    BesagStructure,
     BYM2,
     Copy,
     Fixed,
+    Grouped,
     Hyperparameter,
     IID,
     LGM,
@@ -81,11 +83,17 @@ def _frame(seed=0, n_rows=90):
         "z": rng.normal(1.0, 0.1, n_rows),
         "y": rng.poisson(3.0, n_rows).astype(float),
         "row": range(n_rows),
+        # Group column for the Grouped(...) rows below -- FRAME has no other
+        # column whose levels are meant to align with a graph, so this is
+        # additive; no existing row references it.
+        "group": rng.choice(["g0", "g1", "g2"], n_rows),
     })
 
 
 FRAME = _frame()
 PANEL = CanonicalPanel.from_frame(FRAME, DataConfig(time="row", response="y", panel=()))
+
+_EFFECTIVENESS_GRAPH = {"g0": ["g1"], "g1": ["g0", "g2"], "g2": ["g1"]}
 
 
 def _tau(name="u.tau"):
@@ -222,6 +230,31 @@ MODEL_TABLE = [
         _model(Fixed("1") + Replicated(
             Weighted(IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), by="z"),
             over="firm")),
+    ),
+    (
+        "grouped_iid_precision",
+        _model(Fixed("1") + Grouped(
+            IID("u", index="i", precision=Hyperparameter("u.precision", initial=1.0)),
+            over="group", structure=BesagStructure(_EFFECTIVENESS_GRAPH),
+        )),
+    ),
+    (
+        "grouped_ar1_rho",
+        _model(Fixed("1") + Grouped(
+            AR1("u", index="i", precision=1.0,
+                rho=Hyperparameter("u.rho", initial=0.2, transform="logit")),
+            over="group", structure=BesagStructure(_EFFECTIVENESS_GRAPH),
+        )),
+    ),
+    (
+        "grouped_weighted_precision",
+        _model(Fixed("1") + Grouped(
+            Weighted(
+                IID("u", index="i", precision=Hyperparameter("u.precision", initial=1.0)),
+                by="w",
+            ),
+            over="group", structure=BesagStructure(_EFFECTIVENESS_GRAPH),
+        )),
     ),
 ]
 
