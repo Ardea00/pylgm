@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{#-
+  Shown by Material whenever the version being viewed is not the one aliased
+  `latest` in versions.json -- i.e. on every version except `main`.
+
+  This project keeps `main` for results verified against something outside
+  pyLGM and `research-tier` for frontier work with internal or partial
+  validation. A reader arriving from a search engine has no way to know which
+  one they landed on, so the banner says it and offers the way back.
+-#}
+{% block outdated %}
+  You are reading the <strong>research-tier</strong> documentation: frontier
+  work, validated internally or against an independent implementation, but not
+  against published results on real data.
+  <a href="{{ '../' ~ base_url }}">
+    <strong>Switch to the verified docs</strong>
+  </a>
+{% endblock %}
