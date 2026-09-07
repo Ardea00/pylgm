@@ -433,6 +433,38 @@ predictor:
     - {name: influence, type: sar, index: bank, rho: 0.5, precision: 1.0, graph: {...}}
 ```
 
+## One spatial field per period: `Replicated` and `Grouped`
+
+Every effect on this page is a *single* field over one graph. To give each
+period (or firm, or cohort) its own copy of that field, wrap it — the wrappers
+work on any indexed effect, so nothing here needs its own panel variant:
+
+```python
+from pylgm import AR1Structure, Besag, Grouped, Replicated
+
+spatial = Besag("u", index="district", graph=W)
+
+Replicated(spatial, over="year")                                # independent years
+Grouped(spatial, over="year", structure=AR1Structure(rho=0.9))  # persistent years
+```
+
+`Replicated` builds `I_R ⊗ Q` — the years share `precision` but nothing else,
+so each is smoothed only within itself. `Grouped` replaces that identity with a
+real between-group precision, `Q_S ⊗ Q_E`, so a district also borrows from its
+own past and future. On a persistent spatial pattern that is a large amount of
+extra information:
+[`examples/grouped_panel`](https://github.com/Ardea00/pylgm/tree/main/examples/grouped_panel)
+recovers the latent field about a quarter more accurately than the independent
+fit, on every seed tried.
+
+With `structure=BesagStructure(graph)` and an inner `RW1`/`RW2`, `Grouped`
+reproduces the Knorr-Held space-time interaction types that
+[`SpaceTime`](effects.md#spacetime-effect-knorr-held-interaction) provides in
+curated form; `AR1Structure` is outside that family. See
+[Grouped](effects.md#grouped) for the full reference, including the Sørbye-Rue
+scaling caveat when a plain `RW1`/`RW2` and an `RW1Structure` appear in the
+same model.
+
 ## Dynamic spatial panel (SDPD)
 
 `DynamicSpatialPanel(name, unit, time, graphs, rho, gamma=0.0, eta=0.0, precision=1.0)`

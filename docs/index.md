@@ -48,7 +48,8 @@ print(result.fitted_mean.round(3).tolist())
 |---|---|
 | [How it works](how-it-works.md) | One `fit()` call end to end — compile, engine, solve, hyperparameters — then prediction and forecasting |
 | [Likelihoods](likelihoods.md) | Gaussian (exact), Poisson, Bernoulli, Binomial, negative-binomial, Gamma, Beta, Weibull/exponential survival |
-| [Effects](effects.md) | `Fixed`, `IID`, `RW1`/`RW2`, `AR1` (optionally group-wise), `Seasonal`, `MIDAS`, `SpaceTime` |
+| [Effects](effects.md) | `Fixed`, `IID`, `RW1`/`RW2`, `AR1` (optionally replicated), `Seasonal`, `MIDAS`, `SpaceTime` |
+| [Effects → Modifiers](effects.md#weighted-effects) | R-INLA's `f()` arguments as wrappers: `Weighted` (`weights`), `Copy` (`copy`), `Replicated` (`replicate`), `Grouped` (`group` + `control.group`) |
 | [Spatial effects](spatial-effects.md) | `Besag`, `ProperCAR`, `BYM2`, weighted graphs, directed `SAR`, dynamic `DynamicSpatialPanel` |
 | [Effects → Constraints](effects.md#linear-constraints-extraconstr) | Arbitrary linear constraints `A x = e` (R-INLA `extraconstr`) |
 | [Empirical Bayes and priors](empirical-bayes.md) | Type-II ML, MAP-II priors, bounded hyperparameters |
