@@ -4,7 +4,7 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve, null_space
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, UnsupportedEngineError
-from pylgm.inference.result import GaussianResult
+from pylgm.inference.result import GaussianResult, quadratic_form_diagonal
 from pylgm.ir.model import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -200,8 +200,7 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         n_observed * np.log(2 * np.pi * variance) - logdet_prior + logdet_posterior + quadratic
     )
     predictive_mean = np.asarray(offset + design @ mean).reshape(-1)
-    design_dense = design.toarray()
-    predictive_variance = np.einsum("ij,jk,ik->i", design_dense, covariance, design_dense)
+    predictive_variance = quadratic_form_diagonal(design, covariance)
 
     _require_finite("posterior mean", mean)
     _require_finite("posterior covariance", covariance)
