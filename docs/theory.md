@@ -200,10 +200,15 @@ only geographic adjacency.
 
 **Scaling matters.** The precision \(\tau\) is only interpretable, and priors
 only transfer between graphs, if the effect is **scaled** so that the geometric
-mean of its marginal variances equals 1 (Sørbye & Rue, 2014). pyLGM applies this
-scaling by default. Computing it correctly requires discarding exactly the one
-null eigenvalue per connected component — a step subtle enough to have been a
-real bug in this library, fixed and regression-tested (see the
+mean of its marginal variances equals 1 (Sørbye & Rue, 2014). `Besag` applies
+this scaling by default, as do `SpaceTime`'s spatial and temporal factors and
+`Grouped`'s `BesagStructure`/`RW1Structure`/`RW2Structure` between-group
+factors. The plain `RW1`/`RW2` effects do **not** scale by default, nor does
+`Grouped`'s *inner* `RW1`/`RW2` — see [research status](research-status.md)
+for the resulting divergence when the two appear in the same model. Computing
+the scaling correctly requires discarding exactly the one null eigenvalue per
+connected component — a step subtle enough to have been a real bug in this
+library, fixed and regression-tested (see the
 [disease-mapping example](examples-disease-mapping.md)).
 
 **Proper CAR.** `ProperCAR` adds a spatial-dependence parameter \(\rho\),

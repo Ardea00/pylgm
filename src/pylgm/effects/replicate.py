@@ -121,5 +121,8 @@ def grouped_block(
         levels, inner.precision, inner.constraints.T,
         np.array([group_position[str(g)] for g in frame[over]]),
         np.array([level_position[t] for t in keys]),
+        # orthonormalise is inert here either way (see kron_null_constraints):
+        # unlike replicated_block above, grouped_block has no released output
+        # to preserve bit-for-bit, so this False is just a fixed convention.
         separator="@", orthonormalise=False,
     )

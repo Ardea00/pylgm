@@ -52,12 +52,46 @@ def test_ar1_rejects_a_rho_outside_the_stationary_range():
         AR1Structure(rho=1.0)
 
 
+def test_ar1_structure_rejects_a_hyperparameter_for_rho():
+    """Claimed in docs/effects.md and docs/research-status.md ('A Hyperparameter
+    on a structure's own parameters is not supported') but untested until now.
+    """
+    from pylgm.parameters import Hyperparameter
+
+    with pytest.raises(TypeError, match="real number"):
+        AR1Structure(rho=Hyperparameter("rho", initial=0.5))
+
+
 @pytest.mark.parametrize("structure,null_dim", [(RW1Structure(), 1), (RW2Structure(), 2)])
 def test_random_walk_null_dimension_matches_its_order(structure, null_dim):
     q = structure.precision(LEVELS).toarray()
     basis = structure.null_basis(LEVELS)
     assert basis.shape == (4, null_dim)
     assert_valid_null_basis(q, basis)
+
+
+def test_rw_structure_matches_the_sorbye_rue_scaled_builder():
+    """F2's mirror of ``test_ar1_structure_matches_the_ar1_effect_builder``:
+    without this, ``RW1Structure``/``RW2Structure`` are the one structure
+    with no oracle pinning ``scale=True`` -- flipping it to ``scale=False``
+    at ``structures.py:91`` passed every test in the repository. Confirmed by
+    mutation to fail here (and only here) before this test existed.
+    """
+    from pylgm.effects.random_walk import rw_structure
+    for structure, order in ((RW1Structure(), 1), (RW2Structure(), 2)):
+        assert np.allclose(
+            structure.precision(LEVELS).toarray(),
+            rw_structure(len(LEVELS), order, scale=True),
+        )
+
+
+def test_rw_structure_order_is_not_a_constructor_argument():
+    """``order`` used to be a plain dataclass field, so ``RW1Structure(2)``
+    silently built an RW2 -- it is now a ``ClassVar``, so passing it raises."""
+    with pytest.raises(TypeError):
+        RW1Structure(2)
+    with pytest.raises(TypeError):
+        RW2Structure(1)
 
 
 def test_rw2_null_is_the_constant_and_the_centred_ramp():

@@ -32,9 +32,12 @@ def kron_null_constraints(
 ) -> np.ndarray:
     """Constraint rows spanning ``null(Q_out (x) Q_in)``, shape ``(k, n_out*n_in)``.
 
-    ``orthonormalise`` governs the **one-part** case only, and exists to
-    preserve two released outputs rather than for any modelling reason -- both
-    settings span the same subspace, so no fit changes either way:
+    ``orthonormalise`` governs the **one-part** case only -- both settings span
+    the same subspace, so no fit changes either way. It exists to preserve two
+    released outputs (``replicated_block`` and ``build_spacetime``); a third
+    caller with no released output to preserve, such as ``grouped_block``, gets
+    no modelling benefit from either setting and should say so at its call site
+    rather than leave a bare ``orthonormalise=False`` unexplained:
 
     - ``False`` returns the raw ``kron(I_out, N_in).T``, which is the literal
       ``kron(I_R, C)`` ``Replicated`` has always produced and whose bit-for-bit

@@ -47,14 +47,21 @@ def test_labels_are_group_major_pairs_with_the_replicated_separator():
 
 
 def test_an_iid_structure_reduces_grouped_to_replicated():
-    frame = _frame()
+    """F5's constraint check needs an inner effect with a null space -- IID is
+    proper, so both sides were vacuously ``(0, 12)`` regardless of ordering.
+    RW1 (needs >1 level, so 4 here) makes the comparison real: ``(3, 12)``.
+    """
+    frame = pd.DataFrame(
+        {"region": r, "t": t, "y": 1.0}
+        for r in ("r1", "r2", "r3") for t in range(4)
+    )
     grouped, _ = _build_effect_block(
-        Grouped(IID("u", index="t", precision=1.5), over="region",
+        Grouped(RW1("u", index="t", precision=1.5), over="region",
                 structure=IIDStructure()),
         frame,
     )
     replicated, _ = _build_effect_block(
-        Replicated(IID("u", index="t", precision=1.5), over="region"), frame
+        Replicated(RW1("u", index="t", precision=1.5), over="region"), frame
     )
     assert grouped.labels == replicated.labels
     assert np.allclose(grouped.design.toarray(), replicated.design.toarray())
@@ -62,7 +69,7 @@ def test_an_iid_structure_reduces_grouped_to_replicated():
     # F5: constraints are exactly what the two paths build differently --
     # structure.null_basis(groups) versus np.zeros((R, 0)) -- so the
     # reduction claim is incomplete without checking them too.
-    assert grouped.constraints.shape == replicated.constraints.shape
+    assert grouped.constraints.shape == replicated.constraints.shape == (3, 12)
     assert np.allclose(grouped.constraints, replicated.constraints)
 
 
@@ -338,16 +345,30 @@ def test_a_grouped_model_fits_end_to_end():
 
 
 def test_an_estimated_inner_precision_scales_every_group():
+    """F1: also pins the *outer* factor -- the family path's ordinary
+    ScalableBlock branch (``_grouped_family_block``) composes ``item.block``
+    once, up front, against ``effect.structure``'s precision; only the
+    ParametricBlock rebuild closure is covered elsewhere
+    (``test_grouped_family_rebuild_uses_the_structure_precision_not_identity``,
+    which only exercises an AR1 structure hyperparameter). Swapping
+    ``effect.structure`` for ``IIDStructure()`` in that composed = grouped_block(...)
+    call materialises a literal identity between groups -- confirmed by
+    mutation to fail this test (and no other test in this file's IID-precision
+    family) before this strengthening, and to keep failing after.
+    """
     from pylgm.compiler import compile_family
     from pylgm.config.schema import DataConfig
     from pylgm.data.panel import CanonicalPanel
 
     frame = _frame()
+    structure = BesagStructure(GRAPH)
+    groups = structure.levels(("r1", "r2", "r3"))
+    outer = structure.precision(groups).toarray()
     model = LGM(
         response="y", likelihood=Poisson(),
         predictor=Fixed("1") + Grouped(
             IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)),
-            over="region", structure=BesagStructure(GRAPH),
+            over="region", structure=structure,
         ),
     )
     panel = CanonicalPanel.from_frame(frame, DataConfig(time="row", response="y", panel=()))
@@ -358,3 +379,7 @@ def test_an_estimated_inner_precision_scales_every_group():
     nonzero = low.precision.toarray() != 0
     assert np.allclose(high.precision.toarray()[nonzero] / low.precision.toarray()[nonzero], 50.0)
     assert low.precision.shape == (6, 6)
+    # The inner IID precision template is tau * I_2; the outer factor must be
+    # the Besag structure's precision, not an identity -- r1 and r2 couple.
+    assert np.allclose(low.precision.toarray(), np.kron(outer, 1.0 * np.eye(2)))
+    assert not np.allclose(low.precision.toarray()[0:2, 2:4], 0.0)

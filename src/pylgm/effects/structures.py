@@ -13,6 +13,7 @@ without an eigendecomposition, so every structure states its own.
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 from scipy.sparse import csr_matrix, identity
@@ -77,7 +78,7 @@ class _RandomWalkStructure:
     a fieldless frozen dataclass reading ``self.order`` would read as a defect.
     """
 
-    order: int
+    order: ClassVar[int]
 
     def levels(self, observed: tuple[str, ...]) -> tuple[str, ...]:
         return observed
@@ -103,14 +104,14 @@ class _RandomWalkStructure:
 class RW1Structure(_RandomWalkStructure):
     """First-order random walk between groups: null is the constant."""
 
-    order: int = 1
+    order: ClassVar[int] = 1
 
 
 @dataclass(frozen=True)
 class RW2Structure(_RandomWalkStructure):
     """Second-order random walk between groups: null is the constant and ramp."""
 
-    order: int = 2
+    order: ClassVar[int] = 2
 
 
 @dataclass(frozen=True)

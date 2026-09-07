@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from pylgm import Fixed, IID, LGM, Poisson, Replicated, Weighted
+from pylgm.parameters import Hyperparameter
 
 
 def _data(seed=13, n=72):
@@ -156,3 +157,42 @@ def test_round_trip_holds_when_sorted_and_first_seen_level_order_differ():
     assert result.predict(frame).predictive_mean == pytest.approx(
         result.predictive_mean, rel=1e-12, abs=1e-12
     )
+
+
+def test_family_path_applies_weighted_like_the_plain_path():
+    """F4: with a Hyperparameter on the inner effect, ``Replicated(Weighted(...))``
+    compiles through ``_replicated_family_block`` and its own re-application of
+    the weighting (compiler.py, guarded by ``if isinstance(inner_spec,
+    Weighted):`` right after the family-block loop), not through the plain
+    ``_build_effect_block`` path that ``test_replicated_weighted_round_trips_on_
+    the_fit_rows`` above exercises. Guarding that re-application with
+    ``if False and ...`` drops the weighting silently -- the hyperparameter
+    stays estimated and the shape is unchanged, only the spatially-varying
+    coefficient itself goes missing. There is no live defect today: this pins
+    that the plain and family-path designs agree, weight column and all.
+    """
+    from pylgm.compiler import _build_effect_block, compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+
+    frame = _weighted_data()
+    plain, _ = _build_effect_block(
+        Replicated(Weighted(IID("u", index="t", precision=1.0), by="z"), over="firm"),
+        frame,
+    )
+    model = LGM(
+        response="y", likelihood=Poisson(),
+        predictor=Fixed("1") + Replicated(
+            Weighted(IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), by="z"),
+            over="firm",
+        ),
+    )
+    panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y", panel=())
+    )
+    family = compile_family(model, panel)
+    materialized = family.materialize({"tau": 1.0})
+    family_block = [b for b in materialized.blocks if b.name == "u"][0]
+    assert np.allclose(family_block.design.toarray(), plain.design.toarray())
+    # Not a vacuous scaling-by-one comparison: z is non-constant across rows.
+    assert frame["z"].nunique() > 1

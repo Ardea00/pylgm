@@ -5,6 +5,7 @@ import pytest
 from pylgm import (
     BesagStructure, Fixed, Gaussian, Grouped, IID, LGM, Weighted,
 )
+from pylgm.parameters import Hyperparameter
 
 GRAPH = {"r1": ["r2"], "r2": ["r1", "r3"], "r3": ["r2"]}
 
@@ -76,6 +77,48 @@ def test_a_subset_of_groups_still_scores():
     # they come from the fit, never from _design_block_for.
     fitted = result.predictive_mean[frame["region"].to_numpy() == "r2"]
     assert np.allclose(predicted, fitted, rtol=1e-12, atol=1e-12)
+
+
+def test_family_path_applies_weighted_like_the_plain_path():
+    """F4: with a Hyperparameter on the inner effect, ``Grouped(Weighted(...))``
+    compiles through ``_grouped_family_block`` and its own re-application of
+    the weighting (compiler.py, guarded by ``if isinstance(inner_spec,
+    Weighted):`` right after the family-block loop), not through the plain
+    ``_build_effect_block`` path that
+    ``test_prediction_round_trips_with_weights_inside_the_group`` above
+    exercises. Guarding that re-application with ``if False and ...`` drops
+    the weighting silently -- the hyperparameter stays estimated and the
+    shape is unchanged, only the spatially-varying coefficient itself goes
+    missing. There is no live defect today: this pins that the plain and
+    family-path designs agree, weight column and all.
+    """
+    from pylgm.compiler import _build_effect_block, compile_family
+    from pylgm.config.schema import DataConfig
+    from pylgm.data.panel import CanonicalPanel
+
+    frame = _frame()
+    frame["row"] = range(len(frame))
+    plain, _ = _build_effect_block(
+        Grouped(Weighted(IID("u", index="t", precision=1.0), by="z"),
+                over="region", structure=BesagStructure(GRAPH)),
+        frame,
+    )
+    model = LGM(
+        response="y", likelihood=Gaussian(sigma=0.5),
+        predictor=Fixed("1") + Grouped(
+            Weighted(IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), by="z"),
+            over="region", structure=BesagStructure(GRAPH),
+        ),
+    )
+    panel = CanonicalPanel.from_frame(
+        frame, DataConfig(time="row", response="y", panel=())
+    )
+    family = compile_family(model, panel)
+    materialized = family.materialize({"tau": 1.0})
+    family_block = [b for b in materialized.blocks if b.name == "u"][0]
+    assert np.allclose(family_block.design.toarray(), plain.design.toarray())
+    # Not a vacuous scaling-by-one comparison: z is non-constant across rows.
+    assert frame["z"].nunique() > 1
 
 
 def test_an_unseen_level_is_rejected():

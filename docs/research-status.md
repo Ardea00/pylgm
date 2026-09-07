@@ -243,7 +243,7 @@ control.group=list(model=...))`. `Replicated` is the special case
 | An unobserved graph node still gets a cell | `BesagStructure`'s graph is the universe, not the observed levels, matching `Besag`/`build_spacetime` (`tests/test_grouped_compile.py::test_an_unobserved_graph_node_still_gets_a_cell`). |
 | Constraints span the null space of the composed precision, not one per group | Checked by rank, since `null(Q_S) ⊗ R^E` overlaps any null space the inner effect already carries (`tests/test_grouped_compile.py::test_constraints_span_the_null_space_of_the_composed_precision`). |
 | An integer index keeps its numeric level order, on both the plain and the family (estimated-hyperparameter) compile path | Regression guard for the ordering bug this project has shipped before; verified non-vacuous by mutation in this slice (`tests/test_grouped_compile.py`, two tests). |
-| The family-path rebuild re-Krons against the structure's own precision on every hyperparameter draw, not an identity | `tests/test_grouped_compile.py::test_grouped_family_rebuild_uses_the_structure_precision_not_identity`. |
+| The family path composes against the structure's own precision, not an identity, on **both** its branches: the `ParametricBlock` rebuild closure (a structure hyperparameter, e.g. `AR1`'s `rho`) and the ordinary `ScalableBlock` branch (a plain inner precision, e.g. `IID`'s) | `ParametricBlock` branch: `tests/test_grouped_compile.py::test_grouped_family_rebuild_uses_the_structure_precision_not_identity`. `ScalableBlock` branch: `tests/test_grouped_compile.py::test_an_estimated_inner_precision_scales_every_group`, which pins the materialised precision against `np.kron(structure.precision(groups), inner_template)`; verified non-vacuous by mutation (`composed = grouped_block(...)` with `effect.structure` swapped for `IIDStructure()` — the most likely user path, and the project's signature failure mode — fails only this test). |
 | An estimated inner precision scales every group's block by exactly that factor in the family path | `tau=1.0` vs. `tau=50.0` changes every nonzero precision entry by exactly `50.0`, added and verified non-vacuous in this slice (`tests/test_grouped_compile.py::test_an_estimated_inner_precision_scales_every_group`). |
 | It commutes with `Weighted` | `tests/test_grouped_compile.py::test_grouped_and_weighted_commute`. |
 | A full Poisson/Laplace fit runs end to end and returns a finite log marginal likelihood | `tests/test_grouped_compile.py::test_a_grouped_model_fits_end_to_end`. |
@@ -265,17 +265,35 @@ control.group=list(model=...))`. `Replicated` is the special case
   builder every standalone `RW1`/`RW2` effect in this library uses. The two
   differ by exactly one global scalar on every nonzero precision entry: for
   `T=5, order=1` the ratio (unscaled precision / scaled precision) is
-  `1.36979319`, the reciprocal of `sorbye_rue_scale`'s factor. **Consequence a
-  user must be told: someone writing `Grouped(RW1(...), over=..., structure=...)`
-  expecting R-INLA's `group=` on a scaled `rw1` gets an unscaled one instead —
-  a different model under the same nominal `precision`.** This is a
-  pre-existing inconsistency between `RW1`/`RW2` and `build_spacetime`'s
-  internal convention, not something this slice introduced, and it is
-  recorded rather than fixed because reconciling it changes already-released
-  numerics for both `RW1`/`RW2` and `SpaceTime`. Today only a test docstring
-  states it; `tests/test_grouped_spacetime_oracle.py` pins both drift
-  directions (that the two disagree by this factor, and that the factor is
-  never zero, i.e. the discrepancy is real).
+  `1.36979319`, the reciprocal of `sorbye_rue_scale`'s factor. **The pyLGM
+  facts, stated precisely rather than against another library's default:**
+  a standalone `RW1(...)`/`RW2(...)` and `Grouped(RW1(...), ...)`'s inner
+  factor are unscaled; `Grouped(..., structure=RW1Structure())`'s outer
+  factor and every `SpaceTime` RW factor are Sørbye-Rue scaled (`RW1Structure`
+  and `RW2Structure` are pinned against `rw_structure(n, order, scale=True)`
+  directly — see `tests/test_structures.py`, added this slice). R-INLA's
+  `rw1`/`rw2` take an explicit `scale.model` argument that does not scale
+  unless the caller asks — pyLGM does not claim to match whatever a
+  particular R-INLA version defaults `scale.model` to, so check your own R
+  call: a user who wrote `scale.model=TRUE` there, or who compares against
+  pyLGM's own `SpaceTime`, is the one who gets a different model under the
+  same nominal `precision` from pyLGM's unscaled `RW1`/`RW2`.
+  This is a pre-existing inconsistency between `RW1`/`RW2` and
+  `build_spacetime`'s internal convention, not something this slice
+  introduced, and it is recorded rather than fixed because reconciling it
+  changes already-released numerics for both `RW1`/`RW2` and `SpaceTime`.
+  `tests/test_grouped_spacetime_oracle.py` pins both drift directions (that
+  the two disagree by this factor, and that the factor is never zero, i.e.
+  the discrepancy is real).
+- **The same divergence recurs *inside a single `Grouped` call*, between its
+  own two factors.** `Grouped(RW1("u", index="t"), over="g",
+  structure=RW1Structure())` compiles to exactly
+  `kron(rw_structure(G, 1, scale=True), rw_structure(T, 1, scale=False))` —
+  verified numerically in this slice. The outer `RW1Structure` factor is
+  Sørbye-Rue scaled; the inner `RW1` factor, spelled with the same name in
+  the same call, is not. This is not only a `Grouped`-versus-`SpaceTime`
+  question: two things called "RW1" in one line of code are two different
+  matrices.
 - **No YAML/config surface.** Unlike `SpaceTime`, which has one, there is no
   `type: grouped` in the config schema and no YAML block in
   [effects.md](effects.md); the Python API is the only way to declare one.
