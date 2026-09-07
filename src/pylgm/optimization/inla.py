@@ -16,6 +16,7 @@ from pylgm.inference.result import (
     ModelCriteria,
     SkewNormalMarginals,
     TabulatedMarginals,
+    quadratic_form_diagonal,
 )
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 
@@ -38,7 +39,7 @@ def _conditional_predictive_variances(fit, dense_design) -> np.ndarray:
     if posterior is not None and fit._covariance is None:
         return posterior.predictive_variances(dense_design)
     cov = np.asarray(fit.covariance, float)
-    return np.einsum("ij,jk,ik->i", dense_design, cov, dense_design)
+    return quadratic_form_diagonal(dense_design, cov)
 
 
 def _solve_omega(r: np.ndarray) -> np.ndarray:
@@ -101,7 +102,7 @@ def _simplified_laplace_marginals(design, offset, y, grid):
         eta_mean = offset + dense @ m
         d3 = np.asarray(likelihood.third_derivative(eta_mean, y), float)   # (n,)
         cx_eta = cov @ dense.T                                             # (p, n) cov(x_i, eta_j)
-        eta_var = np.clip(np.einsum("ij,jk,ik->i", dense, cov, dense), 0.0, None)  # (n,)
+        eta_var = np.clip(quadratic_form_diagonal(dense, cov), 0.0, None)  # (n,)
         sigma_eta = np.sqrt(eta_var)
         safe_si = np.where(sigma > 0, sigma, 1.0)
         # gamma3_i = (1/sigma_i^3) sum_j d3_j cov(x_i,eta_j)^3
