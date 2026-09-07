@@ -36,7 +36,7 @@ from pandas.api.types import is_numeric_dtype
 from formulaic import ModelSpec
 
 from pylgm.exceptions import NumericalError
-from pylgm.inference.result import _readonly_array
+from pylgm.inference.result import _readonly_array, quadratic_form_diagonal
 
 
 @dataclass(frozen=True)
@@ -477,7 +477,7 @@ def predict_from(
     offset = _offset_for(context, new_data)
 
     eta = np.asarray(design @ mean + offset, dtype=float)
-    predictive_variance = np.einsum("ij,jk,ik->i", design, covariance, design)
+    predictive_variance = quadratic_form_diagonal(design, covariance)
 
     likelihood = _prediction_likelihood(context, new_data)
     fitted_mean = np.asarray(likelihood.response_prediction(eta, predictive_variance), dtype=float)

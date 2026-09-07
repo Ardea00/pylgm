@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 from scipy.integrate import cumulative_trapezoid
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
 from scipy.special import owens_t
 from scipy.stats import norm
 
@@ -201,6 +201,20 @@ def latent_marginals_from(
     return GaussianMarginals(mean[selection], np.diag(selected_covariance))
 
 
+def quadratic_form_diagonal(weights, covariance) -> np.ndarray:
+    """diag(W Sigma W^T), one entry per row of ``weights``.
+
+    Contract in two steps. A three-operand ``np.einsum("ij,jk,ik->i", ...)``
+    never reaches BLAS -- NumPy runs its naive O(n p^2) scalar kernel -- while
+    ``W @ Sigma`` is a single GEMM (or a sparse matmul when ``W`` is sparse)
+    followed by an O(n p) row-wise reduction.
+    """
+    projected = np.asarray(weights @ covariance)
+    if issparse(weights):
+        return np.asarray(weights.multiply(projected).sum(axis=1)).reshape(-1)
+    return np.einsum("ij,ij->i", projected, np.asarray(weights))
+
+
 def linear_combinations_from(
     mean: np.ndarray,
     covariance: np.ndarray,
@@ -224,18 +238,8 @@ def linear_combinations_from(
         raise ValueError("weights must have one column per latent dimension")
     with np.errstate(over="ignore", invalid="ignore"):
         result_mean = np.asarray(weights @ mean).reshape(-1)
-        projected_covariance = np.asarray(weights @ covariance)
-        if isinstance(weights, csr_matrix):
-            variance = np.asarray(
-                weights.multiply(projected_covariance).sum(axis=1)
-            ).reshape(-1)
-        else:
-            variance = np.einsum(
-                "ij,ij->i", projected_covariance, weights
-            )
-    if not np.isfinite(projected_covariance).all() or not np.isfinite(
-        variance
-    ).all():
+        variance = quadratic_form_diagonal(weights, covariance)
+    if not np.isfinite(variance).all():
         raise ValueError("propagated covariance must be finite")
     roundoff_tolerance = _roundoff_tolerances(weights, covariance)
     variance[(variance < 0) & (variance >= -roundoff_tolerance)] = 0.0
