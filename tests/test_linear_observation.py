@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.sparse import eye
 
 from pylgm import AR1, Fixed, Gaussian, Hyperparameter, IID, LGM, LinearConstraint
 from pylgm import LinearObservation
 from pylgm.exceptions import ModelValidationError
+from pylgm.observations import _constraint_rows
 
 
 def _grid(with_response=False):
@@ -60,6 +62,26 @@ def test_incompatible_predictor_constraints_fail_before_inference():
     constraint = LinearConstraint([[1.0, 1.0], [2.0, 2.0]], [10.0, 21.0])
     with pytest.raises(ModelValidationError, match="mutually inconsistent"):
         _model().fit(_grid(), constraints=[constraint])
+
+
+def test_large_sparse_constraints_fail_before_dense_rank_reduction():
+    width = 10_000
+    model = type(
+        "Model",
+        (),
+        {
+            "prediction_design": eye(width, format="csr"),
+            "prediction_offset": np.zeros(width),
+            "constraints": np.empty((0, width)),
+            "constraint_rhs": np.empty(0),
+            "extra_constraints": np.empty((0, width)),
+            "extra_constraint_rhs": np.empty(0),
+        },
+    )()
+    constraint = LinearConstraint(eye(width, format="csr"), np.zeros(width))
+
+    with pytest.raises(ModelValidationError, match="dense workspace"):
+        _constraint_rows(model, (constraint,))
 
 
 @pytest.mark.parametrize("mode", ["optimize", "integrate"])

@@ -11,6 +11,9 @@ from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian
 
 
+_MAX_DENSE_CONSTRAINT_WORKSPACE_BYTES = 64 * 1024 * 1024
+
+
 def _matrix(value: object, name: str) -> csr_matrix:
     if issparse(value):
         if not np.issubdtype(value.dtype, np.number) or not np.isrealobj(value.data):
@@ -112,10 +115,26 @@ def _constraint_rows(model: CompiledLGM, constraints: tuple[LinearConstraint, ..
             model.prediction_design.shape[0],
             "LinearConstraint operator",
         )
-        rows.append((operator @ model.prediction_design).toarray())
+        rows.append(operator @ model.prediction_design)
         rhs.append(constraint.rhs - np.asarray(operator @ model.prediction_offset).reshape(-1))
-    proposed = np.vstack(rows)
+    proposed = vstack(rows, format="csr")
     proposed_rhs = np.concatenate(rhs)
+
+    dense_bytes = (
+        (model.constraints.shape[0] + proposed.shape[0])
+        * proposed.shape[1]
+        * np.dtype(float).itemsize
+    )
+    if model.constraints.shape[0]:
+        dense_bytes += proposed.shape[1] ** 2 * np.dtype(float).itemsize
+    if dense_bytes > _MAX_DENSE_CONSTRAINT_WORKSPACE_BYTES:
+        raise ModelValidationError(
+            "LinearConstraint rank reduction requires up to "
+            f"{dense_bytes / 1024**2:.1f} MiB of dense workspace for a "
+            f"{model.constraints.shape[0] + proposed.shape[0]}x{proposed.shape[1]} "
+            "constraint matrix; reduce or split the constraints"
+        )
+    proposed = proposed.toarray()
 
     combined = np.vstack([model.constraints, proposed])
     combined_rhs = np.concatenate([model.constraint_rhs, proposed_rhs])
@@ -124,8 +143,7 @@ def _constraint_rows(model: CompiledLGM, constraints: tuple[LinearConstraint, ..
     if np.max(np.abs(combined @ solution - combined_rhs), initial=0.0) > 1e-9 * scale:
         raise ModelValidationError("linear constraints are mutually inconsistent")
 
-    free = null_space(model.constraints) if model.constraints.shape[0] else np.eye(combined.shape[1])
-    reduced = proposed @ free
+    reduced = proposed @ null_space(model.constraints) if model.constraints.shape[0] else proposed
     rank = np.linalg.matrix_rank(reduced)
     if rank:
         keep = np.sort(qr(reduced.T, mode="economic", pivoting=True)[2][:rank])
