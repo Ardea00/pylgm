@@ -496,8 +496,10 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         - logdet_prior
         + logdet_posterior
         + quadratic
-    )
-    predictive_mean = np.asarray(model.offset + design @ mean).reshape(-1)
+    ) + model.log_likelihood_normalization
+    predictive_mean = np.asarray(
+        model.prediction_offset + model.prediction_design @ mean
+    ).reshape(-1)
 
     posterior = SparsePosterior(
         latent_size=latent_size,
