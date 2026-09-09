@@ -418,14 +418,50 @@ def test_auto_keeps_the_grid_when_it_is_affordable():
     assert auto.log_marginal_likelihood == grid.log_marginal_likelihood
 
 
-def test_auto_switches_to_ccd_when_the_grid_would_blow_the_budget():
+def test_auto_switches_to_a_design_when_the_grid_would_blow_the_budget():
     family = _one_hyperparameter_family()
     bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
     # A budget the one-dimensional grid cannot meet forces the alternative.
     result = integrate_inla(family, bounds, fit=fit_gaussian, max_grid_points=3)
-    assert result.diagnostics["inla_int_strategy"] == "ccd"
+    assert result.diagnostics["inla_int_strategy"] == "korobov"
     assert np.isfinite(result.mean).all()
     assert np.isfinite(result.log_marginal_likelihood)
+
+
+@pytest.mark.parametrize("count", [64, 256])
+def test_korobov_lattice_fills_the_gaussian(count):
+    """A lattice rule buys accuracy with equidistribution rather than polynomial
+    exactness, so its weights are equal and positive and its second moments are
+    only approximately right -- which is the trade that lets `count` tune
+    accuracy without changing the design."""
+    from pylgm.optimization.inla import _korobov_design
+
+    for d in (2, 6, 12):
+        points, weights = _korobov_design(d, count=count)
+        assert len(points) == count
+        np.testing.assert_allclose(weights, 1.0 / count)   # equal and positive
+        assert weights.sum() == pytest.approx(1.0)
+        second = np.einsum("i,ij,ik->jk", weights, points, points)
+        assert np.abs(second - np.eye(d)).max() < 0.5
+        assert np.isfinite(points).all()                   # no inverse-CDF poles
+
+
+def test_korobov_is_reproducible_and_refinable():
+    """Seeded shift, so a fit is reproducible; and more points is the knob a
+    fixed design does not have."""
+    from pylgm.optimization.inla import _korobov_design
+
+    first, _ = _korobov_design(4, count=64)
+    again, _ = _korobov_design(4, count=64)
+    np.testing.assert_array_equal(first, again)
+    assert len(_korobov_design(4, count=256)[0]) == 256
+
+
+def test_korobov_rejects_a_degenerate_point_count():
+    from pylgm.optimization.inla import _korobov_design
+
+    with pytest.raises(ValueError, match="four points"):
+        _korobov_design(3, count=2)
 
 
 def test_int_strategy_is_validated():

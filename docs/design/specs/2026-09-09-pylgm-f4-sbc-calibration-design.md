@@ -476,9 +476,82 @@ only to tens of percent — worst of all, because `θ = e^u` is nowhere near
 quadratic. So CCD is a fallback, not an upgrade: where the grid is affordable it
 stays, and where CCD runs the alternative is not a better answer but no answer.
 
-**Still open:** Korobov lattices and Smolyak sparse grids, which would sit between
-these two — more accurate than a second-order design, cheaper than filling a
-region. The `int_strategy` switch is the seam to add them at.
+### F5, fourth part: a Korobov lattice, and a Smolyak rule that was rejected
+
+Both candidates were implemented and measured. **The lattice ships; the sparse
+grid does not.**
+
+**Smolyak, rejected.** A level-2 sparse grid of Gauss-Hermite rules needs `2d+1`
+points — fewer than a CCD's `~4d` — and is exact to degree five *per coordinate*,
+which on an idealised log-gamma posterior beat CCD by one to two orders of
+magnitude. On real models it did not: it tied CCD, and at four hyperparameters it
+**crashed**, producing a non-finite CPO.
+
+The crash is the disqualifying part and it is structural, not a bug to fix.
+Smolyak subtracts lower-level rules, so its weights carry signs — the centre
+weight is `1 − d/3`, negative from `d = 4` — and the model criteria treat the
+integration weights as a probability mixture. A negative weight makes `CPO`
+non-finite. Making it work would mean either clipping the weights, which destroys
+the exactness that was the whole point, or redefining the criteria for signed
+measures. The cancellation is real too: `Σ|w|` grows about like `d/3`, reaching 7
+at twelve dimensions.
+
+**Korobov, shipped.** A randomly shifted rank-1 lattice buys accuracy by
+*equidistribution* rather than polynomial exactness: `count` points spread evenly
+through the Gaussian, each with weight `1/count`. That makes it the only candidate
+whose weights are all positive and equal, which matters for three reasons — the
+criteria stay finite, there is no cancellation, and **accuracy is tuned by raising
+`count`** rather than by moving to a fundamentally more expensive design. The
+generating vector is Korobov's `(1, a, a², …) mod count`, with `a` chosen by a
+small spectral search that runs on the lattice alone and costs no conditional
+fits. The shift is seeded, so fits stay reproducible.
+
+`int_strategy="auto"` now selects `korobov` where the grid will not fit, and
+sixteen hyperparameters integrate in under five seconds:
+
+| hyperparameters | before | strategy | fits |
+|---|---|---|---|
+| 5 | error | grid | 3528 |
+| 6 | error | **korobov** | 277 |
+| 12 | error | **korobov** | 623 |
+| 16 | error | **korobov** | 929 |
+
+Cost past the design is dominated by the `O(d²)` finite-difference Hessian, not by
+the lattice's fixed `count`.
+
+### A correction, and a larger finding
+
+The CCD slice above reported accuracy "against the dense grid" and concluded CCD
+was a fallback rather than an upgrade. **That comparison used a biased reference.**
+The grid truncates its integration weights at `log_density_drop`, whose default of
+2.5 keeps only the points within about 2.2 standard deviations of the mode — and
+for a skewed hyperparameter posterior that discards enough mass to dominate every
+other error. Against a *converged* reference (fine step, no truncation) the
+ranking inverts:
+
+| rule | rel. error, latent means (d=2 / d=3) | \|Δ lml\| |
+|---|---|---|
+| grid, shipped defaults | 0.22 / 0.60 | 0.55 / 1.03 |
+| ccd | 0.043 / 0.074 | 0.062 / 0.019 |
+| korobov, 128 points | 0.030 / 0.040 | 0.029 / 0.055 |
+| korobov, 512 points | **0.020 / 0.031** | 0.023 / 0.049 |
+
+The designed rules are five to twenty times *more* accurate than the shipped grid,
+not less. Isolating the one variable confirms the cause — holding step and extent
+fixed and varying only the truncation:
+
+| `log_density_drop` | 2.5 | 5 | 8 | 12 | 20 |
+|---|---|---|---|---|---|
+| rel. latent error (d=3) | 0.60 | 0.19 | 0.072 | 0.025 | 0.024 |
+
+**So `log_density_drop = 2.5` is the single largest accuracy lever in the
+integrator**, worth one to two orders of magnitude, and it converges by about 12.
+Raising it is *not* done here: it changes released numerics for every `integrate`
+fit and multiplies the point count (50 → 560 at `d = 3`), which is a scope and
+cost decision rather than a bug fix. It is the obvious next slice.
+
+Note the reference itself only converges to about `7e-3`, so it ranks these rules
+but does not resolve differences below roughly one percent.
 
 ## Architecture
 

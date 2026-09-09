@@ -7,6 +7,7 @@ from numpy.polynomial.hermite import hermgauss
 from scipy.interpolate import CubicSpline
 from scipy.linalg import cho_factor
 from scipy.special import logsumexp
+from scipy.stats import norm
 
 from pylgm.exceptions import NumericalError, OptimizationError, UnsupportedEngineError
 from pylgm.inference import LaplaceResult, fit_gaussian
@@ -488,10 +489,75 @@ def _predicted_grid_points(d, *, depth, prune_drop, grid_step, max_radius, cap=2
     )
 
 
+def _designed_grid(center, hessian, evaluate, design, weights, *,
+                   internal_lower, internal_upper):
+    """Evaluate a fixed design, returning ``(grid, payloads, z_sq, weights)``."""
+    center = np.asarray(center, dtype=float)
+    directions = _whitening_directions(hessian)
+    grid, payloads, z_sq, kept = [], [], [], []
+    for z, weight in zip(design, weights, strict=True):
+        u = center + directions @ z
+        if not (np.all(u >= internal_lower) and np.all(u <= internal_upper)):
+            # Outside the declared domain the transform is not invertible.
+            continue
+        grid.append(u)
+        payloads.append(evaluate(u))
+        z_sq.append(float(z @ z))
+        kept.append(weight)
+    if not grid:
+        raise OptimizationError("the integration design lies entirely outside the bounds")
+    return np.asarray(grid), payloads, np.asarray(z_sq), np.asarray(kept)
+
+
+def _korobov_design(d: int, count: int = 128, seed: int = 0):
+    """A randomly shifted rank-1 lattice mapped to ``N(0, I_d)``: points, weights.
+
+    Where CCD and Smolyak buy accuracy with polynomial exactness, a lattice rule
+    buys it with *equidistribution*: ``count`` points spread to fill the Gaussian
+    evenly, each with weight ``1/count``. That makes it the only one of the three
+    whose weights are all positive and equal, which matters here for two reasons
+    beyond conditioning -- the model criteria treat the integration weights as a
+    probability mixture, and a negative weight makes CPO non-finite; and accuracy
+    is tuned by raising ``count`` rather than by moving to a fundamentally more
+    expensive design.
+
+    The generating vector is Korobov's ``(1, a, a^2, ...) mod count``. ``a`` is
+    chosen by a small search maximising the minimum spectral distance, which is
+    cheap here because it runs on the lattice alone -- no conditional fits.
+
+    A random shift keeps the rule from aligning with any structure in the
+    integrand; the shift is seeded, so a fit stays reproducible.
+    """
+    if d < 1:
+        raise ValueError("a lattice needs at least one dimension")
+    if count < 4:
+        raise ValueError("a lattice needs at least four points")
+    best_a, best_score = 1, -np.inf
+    candidates = [a for a in range(2, count) if math.gcd(a, count) == 1]
+    for a in candidates[: 512]:
+        powers = np.array([pow(a, j, count) for j in range(d)], dtype=float)
+        # spectral-style score: keep the generator away from small-index aliases
+        k = np.arange(1, min(count, 64))
+        residues = np.minimum((np.outer(k, powers) % count) / count,
+                              1.0 - (np.outer(k, powers) % count) / count)
+        score = float(np.min(residues.sum(axis=1)))
+        if score > best_score:
+            best_a, best_score = a, score
+    powers = np.array([pow(best_a, j, count) for j in range(d)], dtype=float)
+    indices = np.arange(count, dtype=float)[:, None]
+    shift = np.random.default_rng(seed).random(d)[None, :]
+    unit = np.mod(indices * powers[None, :] / count + shift, 1.0)
+    # Keep the inverse CDF away from its poles; the endpoints map to +-infinity.
+    unit = np.clip(unit, 1.0 / (2 * count), 1.0 - 1.0 / (2 * count))
+    points = norm.ppf(unit)
+    weights = np.full(count, 1.0 / count)
+    return points, weights
+
+
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=2.5,
-    prune_slack=4.0, int_strategy="auto", ccd_f0=1.1,
+    prune_slack=4.0, int_strategy="auto", ccd_f0=1.1, korobov_points=128,
     max_grid_points=4096, latent_strategy="gaussian",
 ) -> INLAResult:
     names = tuple(family.parameter_names)
@@ -534,19 +600,19 @@ def integrate_inla(
     # posterior instead of truncating it.
     depth = explore_drop if len(names) == 1 else log_density_drop
     prune_drop = max(depth, log_density_drop) + prune_slack
-    if int_strategy not in ("auto", "grid", "ccd"):
-        raise ValueError("int_strategy must be 'auto', 'grid' or 'ccd'")
+    if int_strategy not in ("auto", "grid", "ccd", "korobov"):
+        raise ValueError("int_strategy must be 'auto', 'grid', 'ccd' or 'korobov'")
     if int_strategy == "auto":
         predicted = _predicted_grid_points(
             len(names), depth=depth, prune_drop=prune_drop,
             grid_step=grid_step, max_radius=max_radius,
         )
-        int_strategy = "ccd" if predicted > max_grid_points else "grid"
+        int_strategy = "korobov" if predicted > max_grid_points else "grid"
 
     def jacobian(u):
         return float(sum(transforms[i].log_abs_jacobian(u[i]) for i in range(len(names))))
 
-    if int_strategy == "ccd":
+    if int_strategy in ("ccd", "korobov"):
         # The design integrates a Gaussian, so it must be centred on the density
         # it is actually integrating. `u_star` is the mode of `s` alone, but the
         # posterior *in u* is exp(s + jacobian) -- and for the usual log transform
@@ -564,10 +630,14 @@ def integrate_inla(
             forward[i] += step
             backward[i] -= step
             gradient[i] = (jacobian(forward) - jacobian(backward)) / (2.0 * step)
-        ccd_center = u_star + np.linalg.solve(-hessian, gradient)
-        grid, points, z_sq, design_weights = _ccd_grid(
-            ccd_center, hessian, evaluate,
-            internal_lower=internal_lower, internal_upper=internal_upper, f0=ccd_f0,
+        design_center = u_star + np.linalg.solve(-hessian, gradient)
+        if int_strategy == "ccd":
+            design, design_weights = _ccd_design(len(names), ccd_f0)
+        else:
+            design, design_weights = _korobov_design(len(names), korobov_points)
+        grid, points, z_sq, design_weights = _designed_grid(
+            design_center, hessian, evaluate, design, design_weights,
+            internal_lower=internal_lower, internal_upper=internal_upper,
         )
         # Every design point is kept: dropping any would break the balance that
         # gives the design its weights, and the density enters through the
@@ -577,11 +647,18 @@ def integrate_inla(
                 for u, (s, cond, theta, compiled) in zip(grid, points, strict=True)]
         # The design integrates the Gaussian implied by the Hessian, so dividing
         # by that Gaussian -- adding 0.5*||z||^2 in logs -- leaves the true
-        # posterior. Without it CCD would just echo the Laplace approximation.
+        # posterior. Without it the design would echo the Laplace approximation
+        # back and the evaluated densities would do no work.
         log_weights = np.array([
-            np.log(w) + s + jacobian(u) + 0.5 * zz
+            np.log(abs(w)) + s + jacobian(u) + 0.5 * zz
             for (u, s, _, _, _), w, zz in zip(kept, design_weights, z_sq, strict=True)
         ])
+        # Both shipped designs have positive weights, but the signs travel
+        # explicitly: a signed rule (a Smolyak sparse grid, say) would otherwise
+        # be silently absolute-valued here, and -- worse -- a negative weight
+        # makes the CPO criterion non-finite, because the criteria treat the
+        # integration weights as a probability mixture.
+        weight_signs = np.sign(design_weights)
         volume_element = 0.5 * len(names) * np.log(2.0 * np.pi)
     else:
         grid, points = _explore_grid(
@@ -601,9 +678,16 @@ def integrate_inla(
             raise NumericalError("INLA grid retained no points above the density threshold")
         # importance-weight Jacobian: log|d theta / d u| summed over parameters
         log_weights = np.array([s + jacobian(u) for (u, s, _, _, _) in kept])
+        weight_signs = np.ones(len(kept))
         volume_element = len(names) * np.log(grid_step)
 
-    weights = np.exp(log_weights - logsumexp(log_weights))
+    total_log, total_sign = logsumexp(log_weights, b=weight_signs, return_sign=True)
+    if total_sign <= 0:
+        raise NumericalError(
+            "integration weights summed to a non-positive total; the design's "
+            "negative weights overwhelmed its positive ones"
+        )
+    weights = weight_signs * np.exp(log_weights - total_log)
 
     reference = kept[0][2]
     is_laplace = isinstance(reference, LaplaceResult)
@@ -662,8 +746,7 @@ def integrate_inla(
 
     eigenvalues = np.clip(np.linalg.eigvalsh(-hessian), 1e-6, None)
     integrated_lml = float(
-        logsumexp(log_weights) + volume_element
-        - 0.5 * float(np.sum(np.log(eigenvalues)))
+        total_log + volume_element - 0.5 * float(np.sum(np.log(eigenvalues)))
     )
 
     diagnostics = {
