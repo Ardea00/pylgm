@@ -89,15 +89,24 @@ The `LatentMarginals` protocol (:170) declares `mean/variance/std/quantile` and
 omits `cdf` — so the CDF is available on two of three implementations by
 accident rather than by contract.
 
-**And the two that have it disagree.** `SkewNormalMarginals.cdf(x)` is
+**And the two that had it disagreed.** `SkewNormalMarginals.cdf(x)` was
 *elementwise*, returning `F_i(x_i)` with shape `(p,)`; `TabulatedMarginals.cdf(x)`
-returns the *cross product* `F_i(x_j)` with shape `(p, len(x))`. Verified by
-running both. Generic code written against the protocol will be silently wrong
-against one of them. This spec does **not** fix it — that is a behaviour change to
-a shipped, tested class and belongs in its own slice — but the new
-`GaussianMarginals.cdf` adopts the elementwise convention (2 of 3), and the
-harness normalises the shapes in one place with the inconsistency named in a
-comment.
+returned the *cross product* `F_i(x_j)` with shape `(p, len(x))`. Generic code
+written against the protocol would be silently wrong against one of them — it
+would read component `j`'s CDF where component `i`'s was meant.
+
+**Since reconciled.** `TabulatedMarginals.pdf` and `.cdf` are now elementwise
+too, so all three representations are interchangeable behind the protocol, and
+`pit` calls `cdf` directly instead of normalising shapes. The elementwise
+convention won because two of three classes already used it, because
+`SkewNormalMarginals.quantile` depends on it internally, and because it is what
+the rest of the protocol implies — `mean`, `variance`, `std` and `quantile` are
+all per-component `(p,)`.
+
+The cross product had no callers in `src/` or `tests/`; for the plotting case it
+served, `TabulatedMarginals` exposes `.x` and `.density` directly, which *is* the
+tabulation. Mismatched input is now a `ValueError` rather than a silently
+differently-shaped result.
 
 **Change:** add `cdf` to `GaussianMarginals` (`norm.cdf((x - mean)/std)`, mirroring
 `quantile`'s validation) and add `def cdf(self, x: np.ndarray) -> np.ndarray: ...`

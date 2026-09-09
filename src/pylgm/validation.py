@@ -209,13 +209,7 @@ class _PriorSampler:
 
 def pit(marginals, truth: np.ndarray) -> np.ndarray:
     """``F_i(truth_i)`` for every component of a latent-marginal object."""
-    values = np.asarray(marginals.cdf(np.asarray(truth, dtype=float)), dtype=float)
-    # GaussianMarginals.cdf and SkewNormalMarginals.cdf are elementwise and
-    # return (p,); TabulatedMarginals.cdf returns the (p, len(x)) cross product.
-    # The library is inconsistent here, so normalise rather than assume.
-    if values.ndim == 2:
-        values = np.diagonal(values)
-    return np.asarray(values, dtype=float)
+    return np.asarray(marginals.cdf(np.asarray(truth, dtype=float)), dtype=float)
 
 
 @dataclass(frozen=True)

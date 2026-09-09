@@ -177,8 +177,11 @@ def test_simulate_latent_recovers_the_prior_covariance():
 
 
 def test_pit_is_elementwise_for_every_marginal_representation():
-    """Guards a real inconsistency: SkewNormalMarginals.cdf returns (p,) while
-    TabulatedMarginals.cdf returns the (p, len(x)) cross product."""
+    """All three representations share one cdf convention: elementwise (p,).
+
+    They did not always -- TabulatedMarginals returned the (p, len(x)) cross
+    product -- so this pins the convention that pit() now relies on directly.
+    """
     x = np.array([-1.0, 0.0, 1.0])
     expected = norm.cdf(x)
     p, grid = 3, 5

@@ -173,6 +173,12 @@ class LatentMarginals(Protocol):
     The three implementations differ irreducibly -- a Gaussian mean/variance
     pair, a grid-weighted mixture of skew-normals, and a tabulated density --
     so this documents the contract rather than sharing an implementation.
+
+    Every array-valued member is **per component**: with ``p`` components,
+    ``mean``/``variance``/``std`` are ``(p,)``, ``quantile(q)`` is ``(p,)``, and
+    ``cdf(x)`` takes an ``(p,)`` array and returns ``F_i(x_i)`` elementwise as
+    ``(p,)`` -- not the ``(p, len(x))`` cross product. The same holds for the
+    ``pdf`` that two of the three implementations also provide.
     """
 
     @property
@@ -516,19 +522,34 @@ class TabulatedMarginals:
             result[i] = mu3 / (std[i] ** 3)
         return _readonly_array(result)
 
-    def pdf(self, x0: np.ndarray) -> np.ndarray:
-        x0 = np.asarray(x0, dtype=float).reshape(-1, 1)
-        result = np.zeros((self._density.shape[0], x0.shape[0]))
+    def _elementwise(self, x: np.ndarray, name: str) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        if x.shape != (self._density.shape[0],):
+            raise ValueError(
+                f"{name} must match the marginal shape "
+                f"({self._density.shape[0]},), got {x.shape}"
+            )
+        return x
+
+    def pdf(self, x: np.ndarray) -> np.ndarray:
+        """Elementwise ``f_i(x_i)``.
+
+        To plot a component's whole density, read ``.x`` and ``.density`` (or
+        ``select`` a component first) -- they are the tabulation itself.
+        """
+        x = self._elementwise(x, "x")
+        result = np.zeros(self._density.shape[0])
         for i in range(self._density.shape[0]):
-            result[i] = np.interp(x0.reshape(-1), self._x[i], self._density[i], left=0.0, right=0.0)
+            result[i] = np.interp(x[i], self._x[i], self._density[i], left=0.0, right=0.0)
         return _readonly_array(result)
 
-    def cdf(self, x0: np.ndarray) -> np.ndarray:
-        x0 = np.asarray(x0, dtype=float).reshape(-1)
-        result = np.zeros((self._density.shape[0], len(x0)))
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """Elementwise ``F_i(x_i)``."""
+        x = self._elementwise(x, "x")
+        result = np.zeros(self._density.shape[0])
         for i in range(self._density.shape[0]):
-            cdf_values = cumulative_trapezoid(self._density[i], self._x[i], initial=0.0)
-            result[i] = np.interp(x0, self._x[i], cdf_values, left=0.0, right=1.0)
+            cumulative = cumulative_trapezoid(self._density[i], self._x[i], initial=0.0)
+            result[i] = np.interp(x[i], self._x[i], cumulative, left=0.0, right=1.0)
         return _readonly_array(result)
 
     def quantile(self, p: float) -> np.ndarray:
