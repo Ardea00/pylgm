@@ -556,7 +556,7 @@ def _korobov_design(d: int, count: int = 128, seed: int = 0):
 
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
-    grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=2.5,
+    grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=12.0,
     prune_slack=4.0, int_strategy="auto", ccd_f0=1.1, korobov_points=128,
     max_grid_points=4096, latent_strategy="gaussian",
 ) -> INLAResult:
@@ -598,7 +598,9 @@ def integrate_inla(
     # the tabulated hyperparameter marginal, which exists only for a single
     # hyperparameter; there, the extra depth is what makes the marginal cover the
     # posterior instead of truncating it.
-    depth = explore_drop if len(names) == 1 else log_density_drop
+    # Explore at least as deep as the weighting will keep, or the grid would be
+    # asked for points it never evaluated.
+    depth = max(log_density_drop, explore_drop if len(names) == 1 else 0.0)
     prune_drop = max(depth, log_density_drop) + prune_slack
     if int_strategy not in ("auto", "grid", "ccd", "korobov"):
         raise ValueError("int_strategy must be 'auto', 'grid', 'ccd' or 'korobov'")

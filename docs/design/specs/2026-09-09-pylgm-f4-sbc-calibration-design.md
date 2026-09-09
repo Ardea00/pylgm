@@ -546,12 +546,60 @@ fixed and varying only the truncation:
 
 **So `log_density_drop = 2.5` is the single largest accuracy lever in the
 integrator**, worth one to two orders of magnitude, and it converges by about 12.
-Raising it is *not* done here: it changes released numerics for every `integrate`
-fit and multiplies the point count (50 → 560 at `d = 3`), which is a scope and
-cost decision rather than a bug fix. It is the obvious next slice.
 
 Note the reference itself only converges to about `7e-3`, so it ranks these rules
 but does not resolve differences below roughly one percent.
+
+### F5, fifth part: integrate deep enough to be right
+
+`log_density_drop` rises from **2.5 to 12**. It sets how far down the log density
+the integration weights reach, and 2.5 kept only what lay within about 2.2
+standard deviations of the mode — for a skewed hyperparameter posterior, throwing
+away enough mass to dominate every other error in the integrator.
+
+Every surface scenario moves toward an integration converged by refinement, by one
+to three orders of magnitude:
+
+| scenario | latent mean, before → after | log-marginal likelihood |
+|---|---|---|
+| `gaussian_iid_integrate` | 3.5e-2 → 6.0e-4 | 5.6e-2 → 7.0e-4 |
+| `gaussian_ar1_integrate_fixed_rho` | 7.3e-3 → **3.8e-6** | 8.6e-3 → 7.4e-7 |
+| `poisson_iid_laplace_integrate_simplified_laplace` | 5.8e-1 → 8.8e-3 | 5.2e-1 → 8.9e-3 |
+| `poisson_besag_laplace_integrate` | 7.3e-1 → 2.0e-2 | 5.6e-1 → 2.0e-2 |
+| `bernoulli_ar1_laplace_integrate_full_laplace` | 7.3e-1 → 2.2e-2 | 5.9e-1 → 2.1e-2 |
+
+Latent means on the count scenarios were previously wrong by up to **73%**.
+
+**The cost is better than it looks, and at some sizes it is negative.** Raising the
+depth makes the grid larger, which makes `auto` reach the point of switching to a
+lattice sooner — and a lattice is both cheaper and more accurate than the
+truncated grid it replaces. Conditional fits per `integrate` fit:
+
+| hyperparameters | before | after |
+|---|---|---|
+| 1 | grid, 23 | grid, 23 |
+| 2 | grid, 81 | grid, 123 |
+| 3 | grid, 258 | grid, 717 |
+| 4 | grid, 956 (1.7s) | **korobov, 209 (0.4s)** |
+| 5 | grid, 3528 (7.2s) | **korobov, 233 (0.7s)** |
+| 6+ | korobov | unchanged |
+
+So the whole cost is two and three hyperparameters; four and five get *cheaper* and
+more accurate at once. That is the earlier finding restated as a default: filling a
+region and then discarding the mass that matters is worse than either filling it
+properly or not filling it at all.
+
+Exploration depth is now `max(log_density_drop, …)`, since a weighting that keeps
+points to depth 12 must not be handed a grid explored only to 10.
+
+The calibration harness — the gate this whole thread was built around — passes
+before and after, with the worst latent p-value improving from 0.0015 to 0.0061.
+
+`tests/inference/result_surface_baseline.json` moves 1004 leaves across the five
+`integrate` scenarios, and the criteria snapshot in
+`test_predictive_variance_convention.py` moves with it. Both were verified against
+a converged run rather than accepted: those criteria were off by 0.42 (DIC), 0.53
+(WAIC) and 0.29 (log-CPO), and are now off by 0.0063, 0.0080 and 0.0047.
 
 ## Architecture
 

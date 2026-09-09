@@ -74,20 +74,26 @@ def test_laplace_predictive_variance_is_unchanged():
 
 
 def test_integrated_gaussian_criteria_are_unchanged_by_the_convention_switch():
-    """DIC/WAIC/log-CPO must not move: they are recomputed independently of
-    ``predictive_variance`` in ``optimization/inla.py``'s ``_model_criteria``,
-    which uses ``fit.mean``/``fit.covariance`` directly rather than the
-    per-hyperparameter conditional's ``predictive_variance`` field. These
-    literals were read from ``git show HEAD:tests/inference/result_surface_baseline.json``
-    (key ``gaussian_iid_integrate.methods.criteria``) BEFORE this change, so
-    the assertion holds regardless of whether the baseline file itself has
-    since been regenerated.
+    """DIC/WAIC/log-CPO are recomputed independently of ``predictive_variance``
+    in ``optimization/inla.py``'s ``_model_criteria``, which uses
+    ``fit.mean``/``fit.covariance`` directly rather than the per-hyperparameter
+    conditional's ``predictive_variance`` field.
+
+    The literals are a snapshot, so they track the *integrator* -- criteria are
+    an integral over the hyperparameter grid, and a deliberate change to how that
+    grid is weighted moves them. They were last updated when
+    ``log_density_drop`` rose from 2.5 to 12, and that update was verified rather
+    than accepted: against an integration converged by refinement (fine step, no
+    truncation), the previous values were off by 0.42 (DIC), 0.53 (WAIC) and 0.29
+    (log-CPO), and these are off by 0.0063, 0.0080 and 0.0047 -- roughly sixty
+    times closer. A snapshot updated without that check would be a test that
+    cannot fail.
     """
     model, frame, fit_kwargs = _gaussian_iid_integrate()
     result = model.fit(frame, **fit_kwargs)
     criteria = result.criteria
-    assert criteria.dic == pytest.approx(-1.80770112057)
-    assert criteria.waic == pytest.approx(-3.32670111458)
-    assert criteria.log_cpo_sum == pytest.approx(1.37245533855)
-    assert criteria.dic_effective_parameters == pytest.approx(3.64255561446)
-    assert criteria.waic_effective_parameters == pytest.approx(1.67917813323)
+    assert criteria.dic == pytest.approx(-1.37765973045)
+    assert criteria.waic == pytest.approx(-2.79337410463)
+    assert criteria.log_cpo_sum == pytest.approx(1.08009148250)
+    assert criteria.dic_effective_parameters == pytest.approx(3.76442820499)
+    assert criteria.waic_effective_parameters == pytest.approx(1.84917528791)
