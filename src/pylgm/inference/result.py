@@ -173,6 +173,12 @@ class LatentMarginals(Protocol):
     The three implementations differ irreducibly -- a Gaussian mean/variance
     pair, a grid-weighted mixture of skew-normals, and a tabulated density --
     so this documents the contract rather than sharing an implementation.
+
+    Every array-valued member is **per component**: with ``p`` components,
+    ``mean``/``variance``/``std`` are ``(p,)``, ``quantile(q)`` is ``(p,)``, and
+    ``cdf(x)`` takes an ``(p,)`` array and returns ``F_i(x_i)`` elementwise as
+    ``(p,)`` -- not the ``(p, len(x))`` cross product. The same holds for the
+    ``pdf`` that two of the three implementations also provide.
     """
 
     @property
@@ -181,6 +187,7 @@ class LatentMarginals(Protocol):
     def variance(self) -> np.ndarray: ...
     @property
     def std(self) -> np.ndarray: ...
+    def cdf(self, x: np.ndarray) -> np.ndarray: ...
     def quantile(self, probability: float) -> np.ndarray: ...
 
 
@@ -302,6 +309,25 @@ class GaussianMarginals:
     @property
     def std(self) -> np.ndarray:
         return _readonly_array(np.sqrt(self._variance))
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """Elementwise ``F_i(x_i)``, matching ``SkewNormalMarginals.cdf``.
+
+        A zero-variance component is a point mass, so its CDF is the step at the
+        mean; ``quantile`` already degrades gracefully there and this matches it
+        rather than dividing by zero.
+        """
+        x = np.asarray(x, dtype=float)
+        if x.shape != self._mean.shape:
+            raise ValueError("x must match the marginal shape")
+        degenerate = self._variance == 0.0
+        scale = np.where(degenerate, 1.0, np.sqrt(self._variance))
+        values = np.where(
+            degenerate,
+            (x >= self._mean).astype(float),
+            norm.cdf((x - self._mean) / scale),
+        )
+        return _readonly_array(values)
 
     def quantile(self, probability: float) -> np.ndarray:
         if not isinstance(probability, (int, float, np.number)) or not 0 < probability < 1:
@@ -496,19 +522,34 @@ class TabulatedMarginals:
             result[i] = mu3 / (std[i] ** 3)
         return _readonly_array(result)
 
-    def pdf(self, x0: np.ndarray) -> np.ndarray:
-        x0 = np.asarray(x0, dtype=float).reshape(-1, 1)
-        result = np.zeros((self._density.shape[0], x0.shape[0]))
+    def _elementwise(self, x: np.ndarray, name: str) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        if x.shape != (self._density.shape[0],):
+            raise ValueError(
+                f"{name} must match the marginal shape "
+                f"({self._density.shape[0]},), got {x.shape}"
+            )
+        return x
+
+    def pdf(self, x: np.ndarray) -> np.ndarray:
+        """Elementwise ``f_i(x_i)``.
+
+        To plot a component's whole density, read ``.x`` and ``.density`` (or
+        ``select`` a component first) -- they are the tabulation itself.
+        """
+        x = self._elementwise(x, "x")
+        result = np.zeros(self._density.shape[0])
         for i in range(self._density.shape[0]):
-            result[i] = np.interp(x0.reshape(-1), self._x[i], self._density[i], left=0.0, right=0.0)
+            result[i] = np.interp(x[i], self._x[i], self._density[i], left=0.0, right=0.0)
         return _readonly_array(result)
 
-    def cdf(self, x0: np.ndarray) -> np.ndarray:
-        x0 = np.asarray(x0, dtype=float).reshape(-1)
-        result = np.zeros((self._density.shape[0], len(x0)))
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """Elementwise ``F_i(x_i)``."""
+        x = self._elementwise(x, "x")
+        result = np.zeros(self._density.shape[0])
         for i in range(self._density.shape[0]):
-            cdf_values = cumulative_trapezoid(self._density[i], self._x[i], initial=0.0)
-            result[i] = np.interp(x0, self._x[i], cdf_values, left=0.0, right=1.0)
+            cumulative = cumulative_trapezoid(self._density[i], self._x[i], initial=0.0)
+            result[i] = np.interp(x[i], self._x[i], cumulative, left=0.0, right=1.0)
         return _readonly_array(result)
 
     def quantile(self, p: float) -> np.ndarray:
@@ -744,7 +785,7 @@ class _BaseResult:
             raise NotImplementedError(_NO_POSTERIOR)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
-    def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
+    def hyperparameter_marginals(self) -> Mapping[str, LatentMarginals]:
         return MappingProxyType({})
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
@@ -986,16 +1027,22 @@ class LaplaceResult(_BaseResult):
 
 
 def _readonly_hyperparameter_marginals(
-    values: Mapping[str, GaussianMarginals],
-) -> Mapping[str, GaussianMarginals]:
+    values: Mapping[str, LatentMarginals],
+) -> Mapping[str, LatentMarginals]:
     if not isinstance(values, Mapping):
         raise TypeError("hyperparameter_marginals must be a mapping")
     resolved = {}
     for name, value in values.items():
         if not isinstance(name, str) or not name:
             raise TypeError("hyperparameter_marginals keys must be non-empty strings")
-        if not isinstance(value, GaussianMarginals):
-            raise TypeError("hyperparameter_marginals values must be GaussianMarginals")
+        # Widened from GaussianMarginals: a single hyperparameter now gets its
+        # marginal tabulated from the integration grid rather than moment-matched.
+        # The protocol is what callers actually use -- mean, std, quantile, cdf.
+        if not isinstance(value, LatentMarginals):
+            raise TypeError(
+                "hyperparameter_marginals values must be LatentMarginals "
+                f"(mean/variance/std/cdf/quantile); got {type(value).__name__}"
+            )
         resolved[name] = value
     return MappingProxyType(resolved)
 
@@ -1009,7 +1056,7 @@ class INLAResult(_BaseResult):
     observation_variance: float | None
     _ENGINE = "inla"
 
-    _hyperparameter_marginals: Mapping[str, GaussianMarginals] = field(repr=False)
+    _hyperparameter_marginals: Mapping[str, LatentMarginals] = field(repr=False)
     _criteria: ModelCriteria = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
@@ -1024,7 +1071,7 @@ class INLAResult(_BaseResult):
         log_marginal_likelihood: float,
         predictive_mean: np.ndarray,
         predictive_variance: np.ndarray,
-        hyperparameter_marginals: Mapping[str, GaussianMarginals],
+        hyperparameter_marginals: Mapping[str, LatentMarginals],
         *,
         criteria: ModelCriteria,
         fitted_mean: np.ndarray | None = None,
@@ -1119,7 +1166,7 @@ class INLAResult(_BaseResult):
             )
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
-    def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
+    def hyperparameter_marginals(self) -> Mapping[str, LatentMarginals]:
         return self._hyperparameter_marginals
 
     @property
