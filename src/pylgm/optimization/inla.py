@@ -238,25 +238,81 @@ def _whitening_directions(hessian: np.ndarray, *, ridge: float = 1e-6) -> np.nda
     return eigenvectors @ np.diag(1.0 / np.sqrt(clamped))
 
 
-def _build_grid(
-    center: np.ndarray, hessian: np.ndarray, *,
-    grid_step: float = 1.0, radius: int = 3, max_grid_points: int = 4096,
-) -> np.ndarray:
+def _explore_grid(
+    center: np.ndarray, hessian: np.ndarray, evaluate, *,
+    internal_lower: np.ndarray, internal_upper: np.ndarray,
+    grid_step: float = 1.0, max_radius: int = 10, explore_drop: float = 10.0,
+    max_grid_points: int = 4096,
+):
+    """Explore outward from the mode until the log density drops, and return
+    ``(grid, payloads)`` for every point evaluated inside the declared domain.
+
+    This is the grid strategy of Rue, Martino & Chopin (2009, sec. 3.1): step
+    along each whitened direction from the mode and stop when the log density
+    has fallen ``explore_drop`` below it. The extent is therefore set by the
+    posterior rather than by a fixed radius, which matters because the two
+    disagree badly for a weakly identified hyperparameter: the curvature at the
+    mode understates a long tail, and a fixed radius truncates it.
+
+    A fixed radius is also wasteful in the other direction -- it evaluates the
+    whole ``(2r+1)^d`` box and then discards whatever falls below the weighting
+    threshold, paying a full conditional fit for each discarded point.
+
+    Every evaluation is cached by lattice index, so the axis probes that measure
+    the extent are reused as grid points rather than recomputed.
+    """
     center = np.asarray(center, dtype=float)
     d = center.size
-    candidate_count = (2 * radius + 1) ** d
-    if candidate_count > max_grid_points:
+    directions = _whitening_directions(hessian)
+    cache: dict[tuple[int, ...], object] = {}
+
+    def at(z: tuple[int, ...]):
+        if z not in cache:
+            offset = grid_step * directions @ np.asarray(z, dtype=float)
+            u = center + offset
+            inside = bool(np.all(u >= internal_lower) and np.all(u <= internal_upper))
+            # A point outside the declared domain would clip to the same boundary
+            # theta as its neighbours, where dtheta/du is zero and the correct
+            # Jacobian contribution is zero too; including it with the raw `u` as
+            # if the mapping stayed invertible over-weights the boundary.
+            cache[z] = (u, evaluate(u)) if inside else None
+        return cache[z]
+
+    origin = at((0,) * d)
+    if origin is None:
+        raise OptimizationError("the empirical-Bayes mode lies outside the declared bounds")
+    s_mode = origin[1][0]
+
+    extents = np.zeros((d, 2), dtype=int)
+    for axis in range(d):
+        for slot, sign in ((0, -1), (1, 1)):
+            reach = 0
+            for step in range(1, max_radius + 1):
+                z = [0] * d
+                z[axis] = sign * step
+                probe = at(tuple(z))
+                if probe is None:
+                    break
+                reach = step
+                if probe[1][0] < s_mode - explore_drop:
+                    break
+            extents[axis, slot] = reach
+
+    total = int(np.prod([extents[a, 0] + extents[a, 1] + 1 for a in range(d)]))
+    if total > max_grid_points:
         raise OptimizationError(
-            f"INLA grid would need {candidate_count} points for {d} hyperparameters; "
+            f"INLA grid would need {total} points for {d} hyperparameters; "
             f"exceeds max_grid_points={max_grid_points}"
         )
-    directions = _whitening_directions(hessian)
-    offsets = range(-radius, radius + 1)
-    points = [
-        center + grid_step * directions @ np.asarray(z, dtype=float)
-        for z in product(offsets, repeat=d)
-    ]
-    return np.asarray(points)
+
+    grid, payloads = [], []
+    for z in product(*(range(-extents[a, 0], extents[a, 1] + 1) for a in range(d))):
+        entry = at(z)
+        if entry is None:
+            continue
+        grid.append(entry[0])
+        payloads.append(entry[1])
+    return np.asarray(grid), payloads
 
 
 def _theta_marginals(names, grid, s_values, transforms, theta_mean, theta_sq, points=513):
@@ -309,8 +365,8 @@ def _theta_marginals(names, grid, s_values, transforms, theta_mean, theta_sq, po
 
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
-    grid_step=1.0, radius=3, log_density_drop=2.5, max_grid_points=4096,
-    latent_strategy="gaussian",
+    grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=2.5,
+    max_grid_points=4096, latent_strategy="gaussian",
 ) -> INLAResult:
     names = tuple(family.parameter_names)
     conditional_fit = fit if fit is not None else fit_gaussian
@@ -341,22 +397,24 @@ def integrate_inla(
         [transforms[i].to_internal(eb.parameters[name]) for i, name in enumerate(names)]
     )
     hessian = _finite_difference_hessian(lambda u: evaluate(u)[0], u_star)
-    grid = _build_grid(
-        u_star, hessian, grid_step=grid_step, radius=radius, max_grid_points=max_grid_points,
-    )
-    # A grid point whose raw internal-u lands outside the declared [lower, upper] domain
-    # gets clipped to the same boundary theta as its neighbours: dθ/du is zero there, so
-    # its correct Jacobian contribution is zero too. Including it with the raw `u` as if
-    # the mapping stayed invertible double-counts (and, as radius grows, exponentially
-    # over-weights) the boundary — drop such points before weighting instead.
     internal_lower = np.array([transforms[i].to_internal(lower[i]) for i in range(len(names))])
     internal_upper = np.array([transforms[i].to_internal(upper[i]) for i in range(len(names))])
-    in_domain = grid[np.all((grid >= internal_lower) & (grid <= internal_upper), axis=1)]
-    if in_domain.size == 0:
-        in_domain = u_star.reshape(1, -1)
-    grid = in_domain
-
-    points = [evaluate(u) for u in grid]
+    # Explore only as deep as something consumes. The integration weights drop
+    # every point below `log_density_drop`, so exploring past it buys them
+    # nothing -- and at d > 1 the extra depth costs (2r+1)^d conditional fits for
+    # points that are then discarded. The one consumer that wants the tails is
+    # the tabulated hyperparameter marginal, which exists only for a single
+    # hyperparameter; there, the extra depth is what makes the marginal cover the
+    # posterior instead of truncating it.
+    depth = explore_drop if len(names) == 1 else log_density_drop
+    grid, points = _explore_grid(
+        u_star, hessian, evaluate,
+        internal_lower=internal_lower, internal_upper=internal_upper,
+        grid_step=grid_step, max_radius=max_radius, explore_drop=depth,
+        max_grid_points=max_grid_points,
+    )
+    if not len(grid):
+        grid, points = u_star.reshape(1, -1), [evaluate(u_star)]
     s_values = np.array([s for s, _, _, _ in points])
     s_max = float(s_values.max())
     kept = [(u, s, cond, theta, compiled)
@@ -435,6 +493,7 @@ def integrate_inla(
 
     diagnostics = {
         "inla_grid_points": int(len(kept)),
+        "inla_grid_evaluated": int(len(grid)),
         "inla_effective_weight": float(1.0 / np.sum(weights**2)),
         "inla_conditional_engine": "laplace" if is_laplace else "exact_gaussian",
         "inla_active_bounds": ",".join(eb.diagnostics.active_bounds),

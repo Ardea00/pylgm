@@ -504,22 +504,25 @@ def test_skew_normal_marginals_are_better_calibrated_than_the_gaussian_collapse(
     )
 
 
-def test_hyperparameter_marginals_are_reported_and_checked():
-    """Phase 3: the drawn theta is PIT'd against its own reported marginal.
+def test_hyperparameter_marginals_are_calibrated():
+    """The drawn theta is PIT'd against its own reported marginal.
 
-    Not asserted as calibrated -- it is not. The INLA grid spans roughly three
-    Hessian-implied standard deviations around the empirical-Bayes mode, and for
-    a weakly identified precision the posterior's right tail runs well past that,
-    so the reported marginal is truncated and the truth lands high too often.
-    That is a coverage limitation of the grid, measured in
-    docs/design/specs/2026-09-09-pylgm-f4-sbc-calibration-design.md, and it is
-    what the harness exists to surface.
+    This asserted only that the check ran until the INLA grid learned to explore
+    outward by density instead of to a fixed radius. Before that, the grid spanned
+    about three Hessian-implied standard deviations around the empirical-Bayes
+    mode, which for a weakly identified precision truncates the posterior's long
+    right tail: the truth landed high too often and the PIT mean sat at 0.62.
+
+    So this is a regression test for the grid as much as a calibration check --
+    it is the measurement that drove the change, and it fails again if the
+    exploration depth stops tracking the posterior.
     """
-    report = calibrate(_hyper_model(), _frame(), replicates=64, seed=23)
+    report = calibrate(_hyper_model(), _frame(), replicates=192, seed=23)
     entry = next(e for e in report.entries if e.label == "hyper:tau")
     assert entry.index == -1
-    assert 0.0 <= entry.mean_pit <= 1.0
     assert len(report.entries) == 6          # five latent components plus the hyperparameter
+    assert entry.pvalue >= report.threshold, f"hyperparameter marginal miscalibrated:\n{report}"
+    assert entry.dispersion_pvalue >= report.threshold, f"\n{report}"
 
 
 def test_hyperparameter_entries_are_absent_when_theta_is_fixed():

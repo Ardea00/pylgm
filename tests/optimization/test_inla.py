@@ -13,7 +13,7 @@ from pylgm.inference.gaussian import _fit_dense, _fit_sparse
 import pylgm.inference.gaussian as gaussian_module
 from pylgm.optimization.empirical_bayes import OptimizationBounds
 from pylgm.optimization.inla import (
-    _build_grid,
+    _explore_grid,
     _conditional_latent_variances,
     _finite_difference_hessian,
     integrate_inla,
@@ -32,23 +32,65 @@ def test_finite_difference_hessian_recovers_quadratic():
     np.testing.assert_allclose(H, -A, atol=1e-4)
 
 
-def test_build_grid_centers_and_bounds_count():
-    center = np.array([0.0])
-    hessian = np.array([[-4.0]])  # -H = 4 -> sigma = 0.5 in u-space
-    grid = _build_grid(center, hessian, grid_step=1.0, radius=3)
-    assert grid.shape == (7, 1)
-    # the mode (z=0) is present
-    assert np.any(np.all(np.isclose(grid, center), axis=1))
-    # step of one lattice unit is 1/sqrt(4) = 0.5 in u-space
-    offsets = np.sort(np.unique(np.round(grid[:, 0] - center[0], 6)))
-    np.testing.assert_allclose(offsets, [-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+def _stub_evaluate(log_density):
+    """An `evaluate` returning only a log density; the rest is unused by exploration."""
+    return lambda u: (float(log_density(u)), None, None, None)
 
 
-def test_build_grid_guards_dimensionality():
+_WIDE = (np.array([-np.inf]), np.array([np.inf]))
+
+
+def test_explore_grid_steps_out_until_the_density_drops():
+    """The extent is set by the density, not by a fixed radius.
+
+    -H = 4 gives a whitened step of 1/sqrt(4) = 0.5 in u. A Gaussian log density
+    -0.5 * 4 * u^2 falls `explore_drop`=6 below the mode at |u| = sqrt(3) ~ 1.73,
+    so exploration stops at the first lattice point past it, |u| = 2.0 (z = 4).
+    """
+    grid, points = _explore_grid(
+        np.array([0.0]), np.array([[-4.0]]), _stub_evaluate(lambda u: -0.5 * 4 * u[0] ** 2),
+        internal_lower=_WIDE[0], internal_upper=_WIDE[1],
+        grid_step=1.0, max_radius=20, explore_drop=6.0,
+    )
+    offsets = np.sort(np.round(grid[:, 0], 6))
+    np.testing.assert_allclose(offsets, np.arange(-4, 5) * 0.5)
+    assert len(points) == len(grid) == 9
+
+
+def test_explore_grid_reaches_further_for_a_heavier_tail():
+    """The point of the change: a flatter log density earns a wider grid, which a
+    fixed radius could not give it."""
+    def extent(log_density):
+        grid, _ = _explore_grid(
+            np.array([0.0]), np.array([[-1.0]]), _stub_evaluate(log_density),
+            internal_lower=_WIDE[0], internal_upper=_WIDE[1],
+            grid_step=1.0, max_radius=40, explore_drop=6.0,
+        )
+        return float(np.max(np.abs(grid[:, 0])))
+
+    gaussian = extent(lambda u: -0.5 * u[0] ** 2)
+    heavy = extent(lambda u: -np.log1p(u[0] ** 2))      # Cauchy-like: much flatter
+    assert heavy > 3 * gaussian, (gaussian, heavy)
+
+
+def test_explore_grid_stops_at_the_declared_domain():
+    grid, _ = _explore_grid(
+        np.array([0.0]), np.array([[-1.0]]), _stub_evaluate(lambda u: 0.0),  # flat: never drops
+        internal_lower=np.array([-1.5]), internal_upper=np.array([2.5]),
+        grid_step=1.0, max_radius=50, explore_drop=6.0,
+    )
+    assert grid[:, 0].min() >= -1.5 and grid[:, 0].max() <= 2.5
+
+
+def test_explore_grid_guards_dimensionality():
     center = np.zeros(6)
     hessian = -np.eye(6)
     with pytest.raises(OptimizationError, match="grid"):
-        _build_grid(center, hessian, radius=3, max_grid_points=4096)  # 7**6 >> 4096
+        _explore_grid(
+            center, hessian, _stub_evaluate(lambda u: -0.5 * float(u @ u)),
+            internal_lower=np.full(6, -np.inf), internal_upper=np.full(6, np.inf),
+            max_radius=10, explore_drop=6.0, max_grid_points=4096,
+        )
 
 
 def _one_hyperparameter_family():
@@ -79,7 +121,7 @@ def _one_hyperparameter_family():
 def test_integrate_inla_matches_fine_1d_quadrature():
     family = _one_hyperparameter_family()
     bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
-    result = integrate_inla(family, bounds, fit=fit_gaussian, grid_step=0.75, radius=6)
+    result = integrate_inla(family, bounds, fit=fit_gaussian, grid_step=0.75, max_radius=6)
 
     # independent fine 1-D quadrature over u = log p
     us = np.linspace(np.log(1e-2), np.log(1e2), 1601)
@@ -133,7 +175,7 @@ def test_integrate_inla_matches_fine_1d_quadrature_at_default_grid():
 def test_integrate_inla_produces_a_hyperparameter_distribution():
     family = _one_hyperparameter_family()
     bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
-    result = integrate_inla(family, bounds, fit=fit_gaussian, radius=6)
+    result = integrate_inla(family, bounds, fit=fit_gaussian, max_radius=6)
     # integration explored a genuine posterior (multiple weighted grid points,
     # positive spread on the hyperparameter marginal)
     assert result.diagnostics["inla_grid_points"] >= 3
@@ -148,8 +190,8 @@ def test_integrate_inla_with_explicit_log_transform_matches_default():
     family = _one_hyperparameter_family()
     default_bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
     explicit_bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2, transform=LogTransform())}
-    result_default = integrate_inla(family, default_bounds, fit=fit_gaussian, radius=6)
-    result_explicit = integrate_inla(family, explicit_bounds, fit=fit_gaussian, radius=6)
+    result_default = integrate_inla(family, default_bounds, fit=fit_gaussian, max_radius=6)
+    result_explicit = integrate_inla(family, explicit_bounds, fit=fit_gaussian, max_radius=6)
     np.testing.assert_allclose(result_default.mean, result_explicit.mean)
     np.testing.assert_allclose(result_default.covariance, result_explicit.covariance)
     np.testing.assert_allclose(
@@ -175,13 +217,14 @@ def test_integrate_inla_with_logit_transform_matches_fine_1d_quadrature():
     # strictly wider than the [lower, upper] optimization bounds.
     transform = LogitTransform(0.01, 2.2)
     bounds = {"p": OptimizationBounds(1.0, lower, upper, transform=transform)}
-    # grid_step/radius/log_density_drop wide enough that the u-grid spans the
+    # grid_step/max_radius/explore_drop wide enough that the u-grid spans the
     # full internal-space domain (the whitened grid step is grid_step/sqrt(-H),
-    # so a narrow default radius would truncate the domain well before its
+    # so a narrow exploration would truncate the domain well before its
     # boundary and bias the reference comparison for reasons unrelated to the
     # Jacobian).
     result = integrate_inla(
-        family, bounds, fit=fit_gaussian, grid_step=1.0, radius=12, log_density_drop=10.0,
+        family, bounds, fit=fit_gaussian, grid_step=1.0, max_radius=12,
+        explore_drop=10.0, log_density_drop=10.0,
     )
 
     # independent fine 1-D quadrature directly over theta (natural scale)

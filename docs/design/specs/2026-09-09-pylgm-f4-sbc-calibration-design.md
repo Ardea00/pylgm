@@ -328,11 +328,62 @@ scaled grid does not reach.
 the grid changed nothing, so the latent-marginal error was attributed to the
 summary and F5 ruled out. That holds for the *latent* marginals and does not
 generalise: for the hyperparameter marginal the grid *is* the representation, and
-its coverage is the whole error. An adaptive or low-discrepancy integration
-scheme is the fix; widening `radius` is not, since the cost is `(2r+1)^d`.
+its coverage is the whole error. An adaptive integration scheme is the fix;
+widening `radius` is not, since the cost is `(2r+1)^d`.
 
-Not fixed here. The grid is core inference machinery shared by every `integrate`
-fit, and changing its extent changes released numerics for all of them.
+**Since fixed — see the F5 slice below.**
+
+## F5 (first slice): adaptive grid extent
+
+The grid built the full `(2r+1)^d` lattice at a fixed `radius=3`, evaluated every
+point, then discarded whatever fell below `log_density_drop`. Both halves are
+wrong: it truncates a posterior wider than three curvature units, *and* it pays a
+conditional fit for every point it then throws away.
+
+Replaced with the exploration of Rue, Martino & Chopin (2009, §3.1): step outward
+along each whitened direction from the mode and stop when the log density has
+fallen `explore_drop` below it, so the extent is set by the posterior rather than
+by a guess. Axis probes are cached and reused as grid points.
+
+Measured on the 10-group IID model that exposed the problem (30 datasets against
+brute-force reference posteriors):
+
+| | fixed radius | adaptive |
+|---|---|---|
+| grid edge ÷ true 97.5th pct | 0.18 | **1.37** |
+| covers the true 97.5th pct | 17% | **63%** |
+| reported mean ÷ true mean | 0.32 | **0.86** |
+| median relative quantile error | 0.43 | **0.067** |
+| calibration PIT mean | 0.62 | **0.53** |
+| calibration p(location) | 9e-09 | **0.41** |
+
+**Phase 3's check now passes**, and its test asserts calibration rather than
+documenting the failure — it is a regression test for the grid.
+
+**Depth is gated by what consumes it.** Integration weights drop everything below
+`log_density_drop`, so exploring past that buys them nothing, and at `d > 1` the
+extra depth would cost `(2r+1)^d` fits for points immediately discarded. The one
+consumer that wants the tails is the tabulated hyperparameter marginal, which
+exists only for a single hyperparameter. So the depth is `explore_drop` at `d = 1`
+and `log_density_drop` beyond it. Conditional fits per `integrate` fit:
+
+| hyperparameters | fixed radius | adaptive |
+|---|---|---|
+| 1 | 30 | 27 |
+| 2 | 60 | 85 |
+| 3 | 360 | 307 |
+
+Comparable, and wider only where the posterior genuinely is.
+
+**Integration is untouched.** The `kept` set at `log_density_drop` is identical,
+so weights, latent marginals, `log_marginal_likelihood` and criteria do not move:
+the surface baseline changes 20 leaves, all of them `hyperparameter_marginals`
+and the `repr` that quotes them.
+
+**Not in this slice:** the cost half of F5 as the atlas frames it — Korobov
+lattices and Smolyak sparse grids for `d ≳ 4`. Adaptive extent makes the box fit
+the posterior; it does not change the box's `(2r+1)^d` shape, which is the actual
+barrier at high dimension. That remains open.
 
 ## Architecture
 
