@@ -127,24 +127,31 @@ Draws are taken from the prior **truncated to the hyperparameter's
 `lower`/`upper`**, because that is the prior the engine actually uses.
 
 Each drawn value is also checked against its own reported marginal, listed as
-`hyper:<name>`. **Expect that row to fail.** The reason is measured and is not
-your model's fault:
+`hyper:<name>`, and that row passes.
 
-The INLA grid spans roughly three Hessian-implied standard deviations around the
-empirical-Bayes mode. For a weakly identified precision — few groups, little
-information about the random-effect variance — the posterior's right tail runs
-well past that. On a 10-group IID model the grid's upper edge reached only
-0.14× the true 97.5th percentile, missing it in 85% of datasets, which drags the
-reported mean to 0.28× the truth and puts the PIT mean at 0.61 instead of 0.5.
+It did not always, and the history is worth knowing because it shows what this
+check is for. The INLA grid used to span a fixed three Hessian-implied standard
+deviations around the empirical-Bayes mode. For a weakly identified precision —
+few groups, little information about the random-effect variance — the posterior's
+right tail runs well past that, so the reported marginal was truncated: the grid
+reached 0.18× the true 97.5th percentile, the reported mean was 0.32× the truth,
+and the PIT mean sat at 0.62 instead of 0.5. The grid now explores outward until
+the log density actually drops, so its extent follows the posterior:
 
-Treat a reported hyperparameter interval as informative about location and
-**not** as a calibrated credible interval, particularly its upper end, until the
-integration grid adapts to the posterior rather than to the mode's curvature.
+| | fixed radius | adaptive |
+|---|---|---|
+| grid edge ÷ true 97.5th pct | 0.18 | 1.37 |
+| reported mean ÷ true mean | 0.32 | 0.86 |
+| median quantile error | 0.43 | 0.07 |
+| PIT mean (0.5 is calibrated) | 0.62 | 0.53 |
 
-The marginal itself is tabulated from the grid rather than moment-matched, so its
-*shape* is right where the grid reaches: against a brute-force reference its
-median relative quantile error is 0.04 versus 0.51 for the moment match. That
-fixes the shape, not the coverage.
+The marginal is tabulated from the grid rather than moment-matched, so its shape
+is right too: median relative quantile error 0.04 against a brute-force
+reference, versus 0.51 for a moment-matched Gaussian.
+
+With **two or more** hyperparameters the marginal is still moment-matched — the
+grid is a lattice rotated onto the whitened Hessian's directions, so a single
+axis's marginal cannot be read off it — and it is not checked here.
 
 ### Choosing a latent strategy
 

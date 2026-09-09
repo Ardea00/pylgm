@@ -328,11 +328,230 @@ scaled grid does not reach.
 the grid changed nothing, so the latent-marginal error was attributed to the
 summary and F5 ruled out. That holds for the *latent* marginals and does not
 generalise: for the hyperparameter marginal the grid *is* the representation, and
-its coverage is the whole error. An adaptive or low-discrepancy integration
-scheme is the fix; widening `radius` is not, since the cost is `(2r+1)^d`.
+its coverage is the whole error. An adaptive integration scheme is the fix;
+widening `radius` is not, since the cost is `(2r+1)^d`.
 
-Not fixed here. The grid is core inference machinery shared by every `integrate`
-fit, and changing its extent changes released numerics for all of them.
+**Since fixed — see the F5 slice below.**
+
+## F5 (first slice): adaptive grid extent
+
+The grid built the full `(2r+1)^d` lattice at a fixed `radius=3`, evaluated every
+point, then discarded whatever fell below `log_density_drop`. Both halves are
+wrong: it truncates a posterior wider than three curvature units, *and* it pays a
+conditional fit for every point it then throws away.
+
+Replaced with the exploration of Rue, Martino & Chopin (2009, §3.1): step outward
+along each whitened direction from the mode and stop when the log density has
+fallen `explore_drop` below it, so the extent is set by the posterior rather than
+by a guess. Axis probes are cached and reused as grid points.
+
+Measured on the 10-group IID model that exposed the problem (30 datasets against
+brute-force reference posteriors):
+
+| | fixed radius | adaptive |
+|---|---|---|
+| grid edge ÷ true 97.5th pct | 0.18 | **1.37** |
+| covers the true 97.5th pct | 17% | **63%** |
+| reported mean ÷ true mean | 0.32 | **0.86** |
+| median relative quantile error | 0.43 | **0.067** |
+| calibration PIT mean | 0.62 | **0.53** |
+| calibration p(location) | 9e-09 | **0.41** |
+
+**Phase 3's check now passes**, and its test asserts calibration rather than
+documenting the failure — it is a regression test for the grid.
+
+**Depth is gated by what consumes it.** Integration weights drop everything below
+`log_density_drop`, so exploring past that buys them nothing, and at `d > 1` the
+extra depth would cost `(2r+1)^d` fits for points immediately discarded. The one
+consumer that wants the tails is the tabulated hyperparameter marginal, which
+exists only for a single hyperparameter. So the depth is `explore_drop` at `d = 1`
+and `log_density_drop` beyond it. Conditional fits per `integrate` fit:
+
+| hyperparameters | fixed radius | adaptive |
+|---|---|---|
+| 1 | 30 | 27 |
+| 2 | 60 | 85 |
+| 3 | 360 | 307 |
+
+Comparable, and wider only where the posterior genuinely is.
+
+**Integration is untouched.** The `kept` set at `log_density_drop` is identical,
+so weights, latent marginals, `log_marginal_likelihood` and criteria do not move:
+the surface baseline changes 20 leaves, all of them `hyperparameter_marginals`
+and the `repr` that quotes them.
+
+### F5, second part: prune the box to an ellipsoid
+
+Adaptive extent fits the box to the posterior but leaves its `(2r+1)^d` shape, and
+that shape is nearly all corners. Whitening makes the local Gaussian isotropic, so
+lattice point `z` has a *predicted* log-density drop of exactly
+`0.5·grid_step²·‖z‖²` — and a `d`-dimensional corner sits `√d` further out than an
+axis point with the same per-axis index. Points whose predicted drop clears
+`log_density_drop` by a margin are skipped before evaluation: the integration
+weights would have discarded them anyway.
+
+**This is a cost optimisation, not an approximation, and is tested as one** — the
+integrated mean, covariance and `log_marginal_likelihood` come out *bit-identical*
+to the unpruned grid at every dimension tried.
+
+| hyperparameters | box | pruned | conditional fits before → after |
+|---|---|---|---|
+| 2 | 49 | 45 | 79 → 75 |
+| 3 | 343 | 203 | 394 → 250 |
+| 4 | 2401 | 873 | 2484 → 938 |
+| 5 | 16807 | 3423 | **error → 3451** |
+
+Five hyperparameters were previously not integrable at all: the box needed 16807
+points against a `max_grid_points` of 4096, so `hyperparameters="integrate"`
+raised rather than ran.
+
+A point that has already been *measured* is never pruned. The axis probes keep
+whatever the exploration found, because a heavier-than-Gaussian tail is precisely
+the case where the prediction is wrong, and there the density is known rather than
+assumed.
+
+### F5, third part: stop filling a region (CCD)
+
+Six or more hyperparameters still exceeded the cap after pruning, because pruning
+changes the region's *shape* and not the fact that filling a region costs points
+exponential in `d`. Past a handful of dimensions the only way out is to stop
+filling and start **designing**, which is what R-INLA does
+(`int.strategy="ccd"`; Rue, Martino & Chopin 2009, §6.5).
+
+The design is a rotatable central composite:
+
+- a factorial core taken from `d` columns of a **Sylvester Hadamard matrix**, so
+  the columns are orthogonal and every row is a `±1` vector of norm `√d`. This is
+  what keeps it `O(d)` — a full `2^d` factorial would defeat the purpose;
+- `2d` axial points at `±√d` on each coordinate, sharing that norm;
+- everything off-centre scaled by `f0`, putting the design on one sphere of radius
+  `f0·√d` — rotatable, i.e. equally accurate in every direction.
+
+Weights follow from requiring `Σᵢ wᵢ zᵢ zᵢᵀ = I`: orthogonality makes the
+off-centre sum `f0²·n_p·I`, so those share `1/(f0²·n_p)` and the centre takes
+`1 − 1/f0²`, positive exactly when `f0 > 1`.
+
+**Two corrections the textbook design needs here.**
+
+*The design must be centred on the density it integrates.* `u*` is the mode of `s`
+alone, but the posterior in `u` is `exp(s + jacobian)`, and for the usual log
+transform the Jacobian is `u` — a linear tilt that moves the mode a full standard
+deviation. Centring on `s`'s mode left the design systematically off-target, and a
+few dozen points cannot absorb that; it was the first version's dominant error. One
+Newton step fixes it and costs no conditional fits, since the Jacobian is analytic
+and a linear tilt leaves the curvature alone.
+
+*The evaluated densities must still do work.* The design integrates the Gaussian
+implied by the Hessian, so the weights carry an importance ratio — dividing by
+that Gaussian, i.e. adding `½‖z‖²` in logs. Without it CCD would report the
+Laplace approximation back to itself.
+
+With both, the scheme is **exact to machine precision on an exactly Gaussian
+target** — mean, covariance *and* log-marginal constant, in every dimension tried.
+That test is what separates an implementation bug from the approximation CCD is
+entitled to make, and it is what caught the centring error.
+
+| hyperparameters | before | strategy | conditional fits |
+|---|---|---|---|
+| 4 | 2484 | grid | 956 |
+| 5 | error | grid | 3528 |
+| 6 | error | **ccd** | 170 |
+| 8 | error | **ccd** | 268 |
+| 12 | error | **ccd** | 533 |
+
+Twelve hyperparameters now integrate in about two seconds; six was previously an
+error. Cost past the design itself is dominated by the `O(d²)` finite-difference
+Hessian, not by the design's `O(d)` points.
+
+**CCD is chosen only where the grid cannot run.** `int_strategy="auto"` (the
+default) predicts the pruned grid's size arithmetically — no conditional fits —
+and keeps the grid whenever it fits `max_grid_points`, so nothing about existing
+models changes. `"grid"` and `"ccd"` force the choice.
+
+**The accuracy cost is real and should not be understated.** A second-order design
+integrates quadratics in `u` exactly, and little else. Against the dense grid on
+models where both run: latent means agree to ~1e-3–1e-1 relative, the
+log-marginal likelihood to ~0.1–2 nats, and *natural-scale hyperparameter means*
+only to tens of percent — worst of all, because `θ = e^u` is nowhere near
+quadratic. So CCD is a fallback, not an upgrade: where the grid is affordable it
+stays, and where CCD runs the alternative is not a better answer but no answer.
+
+### F5, fourth part: a Korobov lattice, and a Smolyak rule that was rejected
+
+Both candidates were implemented and measured. **The lattice ships; the sparse
+grid does not.**
+
+**Smolyak, rejected.** A level-2 sparse grid of Gauss-Hermite rules needs `2d+1`
+points — fewer than a CCD's `~4d` — and is exact to degree five *per coordinate*,
+which on an idealised log-gamma posterior beat CCD by one to two orders of
+magnitude. On real models it did not: it tied CCD, and at four hyperparameters it
+**crashed**, producing a non-finite CPO.
+
+The crash is the disqualifying part and it is structural, not a bug to fix.
+Smolyak subtracts lower-level rules, so its weights carry signs — the centre
+weight is `1 − d/3`, negative from `d = 4` — and the model criteria treat the
+integration weights as a probability mixture. A negative weight makes `CPO`
+non-finite. Making it work would mean either clipping the weights, which destroys
+the exactness that was the whole point, or redefining the criteria for signed
+measures. The cancellation is real too: `Σ|w|` grows about like `d/3`, reaching 7
+at twelve dimensions.
+
+**Korobov, shipped.** A randomly shifted rank-1 lattice buys accuracy by
+*equidistribution* rather than polynomial exactness: `count` points spread evenly
+through the Gaussian, each with weight `1/count`. That makes it the only candidate
+whose weights are all positive and equal, which matters for three reasons — the
+criteria stay finite, there is no cancellation, and **accuracy is tuned by raising
+`count`** rather than by moving to a fundamentally more expensive design. The
+generating vector is Korobov's `(1, a, a², …) mod count`, with `a` chosen by a
+small spectral search that runs on the lattice alone and costs no conditional
+fits. The shift is seeded, so fits stay reproducible.
+
+`int_strategy="auto"` now selects `korobov` where the grid will not fit, and
+sixteen hyperparameters integrate in under five seconds:
+
+| hyperparameters | before | strategy | fits |
+|---|---|---|---|
+| 5 | error | grid | 3528 |
+| 6 | error | **korobov** | 277 |
+| 12 | error | **korobov** | 623 |
+| 16 | error | **korobov** | 929 |
+
+Cost past the design is dominated by the `O(d²)` finite-difference Hessian, not by
+the lattice's fixed `count`.
+
+### A correction, and a larger finding
+
+The CCD slice above reported accuracy "against the dense grid" and concluded CCD
+was a fallback rather than an upgrade. **That comparison used a biased reference.**
+The grid truncates its integration weights at `log_density_drop`, whose default of
+2.5 keeps only the points within about 2.2 standard deviations of the mode — and
+for a skewed hyperparameter posterior that discards enough mass to dominate every
+other error. Against a *converged* reference (fine step, no truncation) the
+ranking inverts:
+
+| rule | rel. error, latent means (d=2 / d=3) | \|Δ lml\| |
+|---|---|---|
+| grid, shipped defaults | 0.22 / 0.60 | 0.55 / 1.03 |
+| ccd | 0.043 / 0.074 | 0.062 / 0.019 |
+| korobov, 128 points | 0.030 / 0.040 | 0.029 / 0.055 |
+| korobov, 512 points | **0.020 / 0.031** | 0.023 / 0.049 |
+
+The designed rules are five to twenty times *more* accurate than the shipped grid,
+not less. Isolating the one variable confirms the cause — holding step and extent
+fixed and varying only the truncation:
+
+| `log_density_drop` | 2.5 | 5 | 8 | 12 | 20 |
+|---|---|---|---|---|---|
+| rel. latent error (d=3) | 0.60 | 0.19 | 0.072 | 0.025 | 0.024 |
+
+**So `log_density_drop = 2.5` is the single largest accuracy lever in the
+integrator**, worth one to two orders of magnitude, and it converges by about 12.
+Raising it is *not* done here: it changes released numerics for every `integrate`
+fit and multiplies the point count (50 → 560 at `d = 3`), which is a scope and
+cost decision rather than a bug fix. It is the obvious next slice.
+
+Note the reference itself only converges to about `7e-3`, so it ranks these rules
+but does not resolve differences below roughly one percent.
 
 ## Architecture
 
