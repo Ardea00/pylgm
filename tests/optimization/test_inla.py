@@ -82,6 +82,36 @@ def test_explore_grid_stops_at_the_declared_domain():
     assert grid[:, 0].min() >= -1.5 and grid[:, 0].max() <= 2.5
 
 
+def test_pruning_skips_predictably_negligible_corners():
+    """Whitening makes the local Gaussian isotropic, so a corner is sqrt(d) times
+    further out than an axis point with the same per-axis index -- and its
+    predicted log-density drop is that much larger. The corner is skipped; the
+    axis point at the same index is not."""
+    grid, _ = _explore_grid(
+        np.zeros(2), -np.eye(2), _stub_evaluate(lambda u: -0.5 * float(u @ u)),
+        internal_lower=np.full(2, -np.inf), internal_upper=np.full(2, np.inf),
+        grid_step=1.0, max_radius=10, explore_drop=2.5, prune_drop=3.0,
+    )
+    present = {tuple(np.round(g, 6)) for g in grid}
+    assert (2.0, 0.0) in present          # axis:   predicted drop 0.5*4 = 2.0 <= 3.0
+    assert (2.0, 2.0) not in present      # corner: predicted drop 0.5*8 = 4.0 >  3.0
+
+
+def test_pruning_never_drops_an_already_measured_point():
+    """A heavier-than-Gaussian tail is exactly where the prediction is wrong, so
+    axis probes -- whose density was measured, not assumed -- survive pruning."""
+    heavy = _stub_evaluate(lambda u: -np.log1p(float(u @ u)))   # Cauchy-like
+    grid, _ = _explore_grid(
+        np.zeros(2), -np.eye(2), heavy,
+        internal_lower=np.full(2, -np.inf), internal_upper=np.full(2, np.inf),
+        grid_step=1.0, max_radius=12, explore_drop=6.0, prune_drop=1.0,  # brutal pruning
+    )
+    reach = max(abs(g[0]) for g in grid if abs(g[1]) < 1e-9)
+    # Gaussian prediction would allow |z| <= sqrt(2) with prune_drop=1.0; the
+    # measured probes go far past it because the tail is genuinely flat.
+    assert reach > 3.0, reach
+
+
 def test_explore_grid_guards_dimensionality():
     center = np.zeros(6)
     hessian = -np.eye(6)
@@ -284,3 +314,20 @@ def test_integrate_inla_sparse_conditional_diagonal_integration(monkeypatch):
 
     with pytest.raises(DenseReferenceLimitError):
         sparse_result.covariance
+
+
+def test_pruning_leaves_the_integrated_result_unchanged():
+    """The point of pruning: it removes only points the weighting would discard,
+    so the answer is bit-identical while the cost is not.
+
+    This is what licenses pruning at all -- it is a cost optimisation, not an
+    approximation, and it must be checked as one.
+    """
+    family = _one_hyperparameter_family()
+    bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+    pruned = integrate_inla(family, bounds, fit=fit_gaussian, prune_slack=4.0)
+    unpruned = integrate_inla(family, bounds, fit=fit_gaussian, prune_slack=1e9,
+                              max_grid_points=200_000)
+    np.testing.assert_array_equal(pruned.mean, unpruned.mean)
+    np.testing.assert_array_equal(pruned.covariance, unpruned.covariance)
+    assert pruned.log_marginal_likelihood == unpruned.log_marginal_likelihood

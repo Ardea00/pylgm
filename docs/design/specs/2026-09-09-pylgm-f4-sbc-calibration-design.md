@@ -380,10 +380,41 @@ so weights, latent marginals, `log_marginal_likelihood` and criteria do not move
 the surface baseline changes 20 leaves, all of them `hyperparameter_marginals`
 and the `repr` that quotes them.
 
-**Not in this slice:** the cost half of F5 as the atlas frames it — Korobov
-lattices and Smolyak sparse grids for `d ≳ 4`. Adaptive extent makes the box fit
-the posterior; it does not change the box's `(2r+1)^d` shape, which is the actual
-barrier at high dimension. That remains open.
+### F5, second part: prune the box to an ellipsoid
+
+Adaptive extent fits the box to the posterior but leaves its `(2r+1)^d` shape, and
+that shape is nearly all corners. Whitening makes the local Gaussian isotropic, so
+lattice point `z` has a *predicted* log-density drop of exactly
+`0.5·grid_step²·‖z‖²` — and a `d`-dimensional corner sits `√d` further out than an
+axis point with the same per-axis index. Points whose predicted drop clears
+`log_density_drop` by a margin are skipped before evaluation: the integration
+weights would have discarded them anyway.
+
+**This is a cost optimisation, not an approximation, and is tested as one** — the
+integrated mean, covariance and `log_marginal_likelihood` come out *bit-identical*
+to the unpruned grid at every dimension tried.
+
+| hyperparameters | box | pruned | conditional fits before → after |
+|---|---|---|---|
+| 2 | 49 | 45 | 79 → 75 |
+| 3 | 343 | 203 | 394 → 250 |
+| 4 | 2401 | 873 | 2484 → 938 |
+| 5 | 16807 | 3423 | **error → 3451** |
+
+Five hyperparameters were previously not integrable at all: the box needed 16807
+points against a `max_grid_points` of 4096, so `hyperparameters="integrate"`
+raised rather than ran.
+
+A point that has already been *measured* is never pruned. The axis probes keep
+whatever the exploration found, because a heavier-than-Gaussian tail is precisely
+the case where the prediction is wrong, and there the density is known rather than
+assumed.
+
+**Still not done:** six or more hyperparameters still exceed the cap (12277 points
+after pruning), and closing that needs a genuinely different design — Korobov
+lattices or Smolyak sparse grids, or R-INLA's own CCD, which places `O(d²)` points
+instead of filling a region at all. Pruning changes the region's *shape*; those
+change the *scheme*. That remains open.
 
 ## Architecture
 

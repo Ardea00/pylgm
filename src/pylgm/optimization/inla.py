@@ -242,7 +242,7 @@ def _explore_grid(
     center: np.ndarray, hessian: np.ndarray, evaluate, *,
     internal_lower: np.ndarray, internal_upper: np.ndarray,
     grid_step: float = 1.0, max_radius: int = 10, explore_drop: float = 10.0,
-    max_grid_points: int = 4096,
+    prune_drop: float | None = None, max_grid_points: int = 4096,
 ):
     """Explore outward from the mode until the log density drops, and return
     ``(grid, payloads)`` for every point evaluated inside the declared domain.
@@ -260,6 +260,20 @@ def _explore_grid(
 
     Every evaluation is cached by lattice index, so the axis probes that measure
     the extent are reused as grid points rather than recomputed.
+
+    Filling the box costs ``prod(extent)`` fits, and almost all of that is
+    corners: whitening makes the local Gaussian isotropic, so lattice point ``z``
+    has a *predicted* log-density drop of exactly ``0.5 * grid_step^2 * ||z||^2``,
+    and a corner in ``d`` dimensions is ``sqrt(d)`` times further out than an axis
+    point with the same per-axis index. ``prune_drop`` skips points whose
+    predicted drop exceeds it -- they would be dropped from the integration
+    weights anyway -- which turns the cost from the volume of a box into the
+    volume of an ellipsoid, the difference between the two growing with ``d``.
+
+    A point already measured is never pruned: the axis probes are kept whatever
+    the Gaussian predicts for them, because for those the density is known rather
+    than assumed, and a heavier-than-Gaussian tail is exactly the case where the
+    prediction is wrong.
     """
     center = np.asarray(center, dtype=float)
     d = center.size
@@ -298,7 +312,13 @@ def _explore_grid(
                     break
             extents[axis, slot] = reach
 
-    total = int(np.prod([extents[a, 0] + extents[a, 1] + 1 for a in range(d)]))
+    total = sum(
+        1
+        for z in product(*(range(-extents[a, 0], extents[a, 1] + 1) for a in range(d)))
+        if z in cache
+        or prune_drop is None
+        or 0.5 * grid_step ** 2 * float(np.dot(z, z)) <= prune_drop
+    )
     if total > max_grid_points:
         raise OptimizationError(
             f"INLA grid would need {total} points for {d} hyperparameters; "
@@ -307,6 +327,10 @@ def _explore_grid(
 
     grid, payloads = [], []
     for z in product(*(range(-extents[a, 0], extents[a, 1] + 1) for a in range(d))):
+        if z not in cache and prune_drop is not None:
+            predicted = 0.5 * grid_step ** 2 * float(np.dot(z, z))
+            if predicted > prune_drop:
+                continue
         entry = at(z)
         if entry is None:
             continue
@@ -366,6 +390,7 @@ def _theta_marginals(names, grid, s_values, transforms, theta_mean, theta_sq, po
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=2.5,
+    prune_slack=4.0,
     max_grid_points=4096, latent_strategy="gaussian",
 ) -> INLAResult:
     names = tuple(family.parameter_names)
@@ -411,6 +436,7 @@ def integrate_inla(
         u_star, hessian, evaluate,
         internal_lower=internal_lower, internal_upper=internal_upper,
         grid_step=grid_step, max_radius=max_radius, explore_drop=depth,
+        prune_drop=max(depth, log_density_drop) + prune_slack,
         max_grid_points=max_grid_points,
     )
     if not len(grid):
