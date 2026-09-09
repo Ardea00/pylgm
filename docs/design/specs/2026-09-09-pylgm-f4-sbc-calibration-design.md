@@ -410,11 +410,75 @@ whatever the exploration found, because a heavier-than-Gaussian tail is precisel
 the case where the prediction is wrong, and there the density is known rather than
 assumed.
 
-**Still not done:** six or more hyperparameters still exceed the cap (12277 points
-after pruning), and closing that needs a genuinely different design — Korobov
-lattices or Smolyak sparse grids, or R-INLA's own CCD, which places `O(d²)` points
-instead of filling a region at all. Pruning changes the region's *shape*; those
-change the *scheme*. That remains open.
+### F5, third part: stop filling a region (CCD)
+
+Six or more hyperparameters still exceeded the cap after pruning, because pruning
+changes the region's *shape* and not the fact that filling a region costs points
+exponential in `d`. Past a handful of dimensions the only way out is to stop
+filling and start **designing**, which is what R-INLA does
+(`int.strategy="ccd"`; Rue, Martino & Chopin 2009, §6.5).
+
+The design is a rotatable central composite:
+
+- a factorial core taken from `d` columns of a **Sylvester Hadamard matrix**, so
+  the columns are orthogonal and every row is a `±1` vector of norm `√d`. This is
+  what keeps it `O(d)` — a full `2^d` factorial would defeat the purpose;
+- `2d` axial points at `±√d` on each coordinate, sharing that norm;
+- everything off-centre scaled by `f0`, putting the design on one sphere of radius
+  `f0·√d` — rotatable, i.e. equally accurate in every direction.
+
+Weights follow from requiring `Σᵢ wᵢ zᵢ zᵢᵀ = I`: orthogonality makes the
+off-centre sum `f0²·n_p·I`, so those share `1/(f0²·n_p)` and the centre takes
+`1 − 1/f0²`, positive exactly when `f0 > 1`.
+
+**Two corrections the textbook design needs here.**
+
+*The design must be centred on the density it integrates.* `u*` is the mode of `s`
+alone, but the posterior in `u` is `exp(s + jacobian)`, and for the usual log
+transform the Jacobian is `u` — a linear tilt that moves the mode a full standard
+deviation. Centring on `s`'s mode left the design systematically off-target, and a
+few dozen points cannot absorb that; it was the first version's dominant error. One
+Newton step fixes it and costs no conditional fits, since the Jacobian is analytic
+and a linear tilt leaves the curvature alone.
+
+*The evaluated densities must still do work.* The design integrates the Gaussian
+implied by the Hessian, so the weights carry an importance ratio — dividing by
+that Gaussian, i.e. adding `½‖z‖²` in logs. Without it CCD would report the
+Laplace approximation back to itself.
+
+With both, the scheme is **exact to machine precision on an exactly Gaussian
+target** — mean, covariance *and* log-marginal constant, in every dimension tried.
+That test is what separates an implementation bug from the approximation CCD is
+entitled to make, and it is what caught the centring error.
+
+| hyperparameters | before | strategy | conditional fits |
+|---|---|---|---|
+| 4 | 2484 | grid | 956 |
+| 5 | error | grid | 3528 |
+| 6 | error | **ccd** | 170 |
+| 8 | error | **ccd** | 268 |
+| 12 | error | **ccd** | 533 |
+
+Twelve hyperparameters now integrate in about two seconds; six was previously an
+error. Cost past the design itself is dominated by the `O(d²)` finite-difference
+Hessian, not by the design's `O(d)` points.
+
+**CCD is chosen only where the grid cannot run.** `int_strategy="auto"` (the
+default) predicts the pruned grid's size arithmetically — no conditional fits —
+and keeps the grid whenever it fits `max_grid_points`, so nothing about existing
+models changes. `"grid"` and `"ccd"` force the choice.
+
+**The accuracy cost is real and should not be understated.** A second-order design
+integrates quadratics in `u` exactly, and little else. Against the dense grid on
+models where both run: latent means agree to ~1e-3–1e-1 relative, the
+log-marginal likelihood to ~0.1–2 nats, and *natural-scale hyperparameter means*
+only to tens of percent — worst of all, because `θ = e^u` is nowhere near
+quadratic. So CCD is a fallback, not an upgrade: where the grid is affordable it
+stays, and where CCD runs the alternative is not a better answer but no answer.
+
+**Still open:** Korobov lattices and Smolyak sparse grids, which would sit between
+these two — more accurate than a second-order design, cheaper than filling a
+region. The `int_strategy` switch is the seam to add them at.
 
 ## Architecture
 

@@ -331,3 +331,105 @@ def test_pruning_leaves_the_integrated_result_unchanged():
     np.testing.assert_array_equal(pruned.mean, unpruned.mean)
     np.testing.assert_array_equal(pruned.covariance, unpruned.covariance)
     assert pruned.log_marginal_likelihood == unpruned.log_marginal_likelihood
+
+
+# ---------------------------------------------------------------------------
+# CCD: the design used when filling a region is no longer affordable.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("d", [1, 2, 3, 6, 8, 12])
+def test_ccd_design_reproduces_a_standard_gaussians_moments(d):
+    """The property the weights are derived from: sum_i w_i z_i z_i^T = I.
+
+    Everything else about the design (Hadamard core, axial points, one sphere)
+    exists to make this hold with O(d) points, so this is the check that the
+    construction is what it claims to be rather than merely plausible.
+    """
+    from pylgm.optimization.inla import _ccd_design
+
+    points, weights = _ccd_design(d, f0=1.1)
+    assert weights.sum() == pytest.approx(1.0)
+    assert (weights > 0).all()                      # f0 > 1 keeps the centre positive
+    second = np.einsum("i,ij,ik->jk", weights, points, points)
+    np.testing.assert_allclose(second, np.eye(d), atol=1e-12)
+    radii = np.linalg.norm(points[1:], axis=1)      # rotatable: one sphere
+    np.testing.assert_allclose(radii, radii[0])
+    assert len(points) <= 4 * d + 4                 # O(d), not O(c^d)
+
+
+def test_ccd_weighting_is_exact_for_a_gaussian_target():
+    """Pins the whole scheme -- design, centring, importance ratio and the
+    log-marginal constant -- against a target whose answer is known in closed form.
+
+    With s(u) = -0.5 (u-m)'A(u-m) and a log transform's Jacobian sum(u), the
+    posterior in u is exactly Gaussian, so a second-order design must reproduce
+    its mean, covariance and normalising constant exactly. Any error here is an
+    implementation bug rather than the approximation CCD is entitled to make.
+    """
+    from scipy.special import logsumexp
+
+    from pylgm.optimization.inla import _ccd_design, _whitening_directions
+
+    rng = np.random.default_rng(0)
+    for d in (2, 3, 5):
+        basis = rng.normal(size=(d, d))
+        precision = basis @ basis.T + d * np.eye(d)
+        mode = rng.normal(size=d)
+        ones = np.ones(d)
+
+        true_mean = mode + np.linalg.solve(precision, ones)
+        true_cov = np.linalg.inv(precision)
+        true_lml = (0.5 * d * np.log(2 * np.pi) - 0.5 * np.linalg.slogdet(precision)[1]
+                    + ones @ mode + 0.5 * ones @ np.linalg.solve(precision, ones))
+
+        centre = mode + np.linalg.solve(precision, ones)   # the code's Newton step
+        directions = _whitening_directions(-precision)
+        design, design_weights = _ccd_design(d, 1.1)
+        us = np.array([centre + directions @ z for z in design])
+        s = np.array([-0.5 * (u - mode) @ precision @ (u - mode) for u in us])
+        log_w = (np.log(design_weights) + s + us.sum(axis=1)
+                 + 0.5 * (design * design).sum(axis=1))
+        w = np.exp(log_w - logsumexp(log_w))
+        mean = w @ us
+        cov = np.einsum("i,ij,ik->jk", w, us - mean, us - mean)
+        lml = (logsumexp(log_w) + 0.5 * d * np.log(2 * np.pi)
+               - 0.5 * np.sum(np.log(np.linalg.eigvalsh(precision))))
+
+        np.testing.assert_allclose(mean, true_mean, atol=1e-10)
+        np.testing.assert_allclose(cov, true_cov, atol=1e-10)
+        assert lml == pytest.approx(true_lml, abs=1e-10)
+
+
+def test_ccd_rejects_a_scaling_that_would_starve_the_centre():
+    from pylgm.optimization.inla import _ccd_design
+
+    with pytest.raises(ValueError, match="f0"):
+        _ccd_design(3, f0=1.0)      # centre weight 1 - 1/f0^2 would be zero
+
+
+def test_auto_keeps_the_grid_when_it_is_affordable():
+    """`auto` must not change what small models report -- the grid is the more
+    accurate scheme and stays in charge wherever it fits the budget."""
+    family = _one_hyperparameter_family()
+    bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+    auto = integrate_inla(family, bounds, fit=fit_gaussian, int_strategy="auto")
+    grid = integrate_inla(family, bounds, fit=fit_gaussian, int_strategy="grid")
+    assert auto.diagnostics["inla_int_strategy"] == "grid"
+    np.testing.assert_array_equal(auto.mean, grid.mean)
+    assert auto.log_marginal_likelihood == grid.log_marginal_likelihood
+
+
+def test_auto_switches_to_ccd_when_the_grid_would_blow_the_budget():
+    family = _one_hyperparameter_family()
+    bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+    # A budget the one-dimensional grid cannot meet forces the alternative.
+    result = integrate_inla(family, bounds, fit=fit_gaussian, max_grid_points=3)
+    assert result.diagnostics["inla_int_strategy"] == "ccd"
+    assert np.isfinite(result.mean).all()
+    assert np.isfinite(result.log_marginal_likelihood)
+
+
+def test_int_strategy_is_validated():
+    family = _one_hyperparameter_family()
+    bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}
+    with pytest.raises(ValueError, match="int_strategy"):
+        integrate_inla(family, bounds, fit=fit_gaussian, int_strategy="lattice")

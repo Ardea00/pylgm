@@ -387,10 +387,111 @@ def _theta_marginals(names, grid, s_values, transforms, theta_mean, theta_sq, po
     return {names[0]: TabulatedMarginals(theta[None, :], density[None, :])}
 
 
+def _hadamard(order: int) -> np.ndarray:
+    """Sylvester Hadamard matrix of the given power-of-two order."""
+    matrix = np.ones((1, 1))
+    while matrix.shape[0] < order:
+        matrix = np.block([[matrix, matrix], [matrix, -matrix]])
+    return matrix
+
+
+def _ccd_design(d: int, f0: float = 1.1) -> tuple[np.ndarray, np.ndarray]:
+    """A rotatable central composite design in whitened space: points and weights.
+
+    Filling a region costs points exponential in ``d`` however cleverly the region
+    is shaped, so past a handful of hyperparameters the only way out is to stop
+    filling and start *designing*. This is the design R-INLA switches to
+    (``int.strategy="ccd"``; Rue, Martino & Chopin 2009, sec. 6.5), and it needs
+    ``O(d)`` points rather than ``O(c^d)``.
+
+    The design is a factorial core plus axial points plus the mode:
+
+    * the core is ``d`` columns of a Sylvester Hadamard matrix, so its columns are
+      orthogonal and every row is a ``+-1`` vector of norm ``sqrt(d)``. A Hadamard
+      core needs only the next power of two above ``d``, where a full ``2^d``
+      factorial would defeat the purpose;
+    * the ``2d`` axial points sit at ``+-sqrt(d)`` on each coordinate, so they
+      share that norm;
+    * everything off-centre is then scaled by ``f0``, putting the whole design on
+      one sphere of radius ``f0 * sqrt(d)`` -- what makes it *rotatable*, i.e.
+      equally accurate in every direction.
+
+    The weights follow from requiring the design to reproduce a standard Gaussian's
+    second moment, ``sum_i w_i z_i z_i^T = I``. Orthogonality makes the off-centre
+    sum ``f0^2 * n_p * I``, so those points share ``w = 1 / (f0^2 * n_p)`` and the
+    centre takes the remainder ``1 - 1/f0^2`` -- positive exactly when ``f0 > 1``,
+    which is why ``f0`` is set slightly above one.
+    """
+    if d < 1:
+        raise ValueError("CCD needs at least one dimension")
+    if f0 <= 1.0:
+        raise ValueError("f0 must exceed 1 so the centre keeps positive weight")
+    order = 1
+    while order < d + 1:
+        order *= 2
+    # column 0 of a Sylvester Hadamard matrix is all ones; skip it so the core is
+    # centred, and take d of the remaining mutually orthogonal columns.
+    core = _hadamard(order)[:, 1:d + 1]
+    axial = np.sqrt(d) * np.vstack([np.eye(d), -np.eye(d)])
+    offcentre = f0 * np.vstack([core, axial])
+    count = offcentre.shape[0]
+    points = np.vstack([np.zeros((1, d)), offcentre])
+    weights = np.concatenate([[1.0 - 1.0 / f0 ** 2], np.full(count, 1.0 / (f0 ** 2 * count))])
+    return points, weights
+
+
+def _ccd_grid(center, hessian, evaluate, *, internal_lower, internal_upper, f0=1.1):
+    """Evaluate a CCD design, returning ``(grid, payloads, z_sq, design_weights)``.
+
+    ``z_sq`` is each point's squared whitened radius, which the caller needs for
+    the importance correction: the design integrates the *Gaussian* implied by the
+    Hessian, and dividing by that Gaussian recovers the true posterior. Without
+    that correction CCD would report the Laplace approximation back to itself and
+    the evaluated densities would do no work.
+    """
+    center = np.asarray(center, dtype=float)
+    d = center.size
+    directions = _whitening_directions(hessian)
+    design, weights = _ccd_design(d, f0)
+
+    grid, payloads, z_sq, kept_weights = [], [], [], []
+    for z, weight in zip(design, weights, strict=True):
+        u = center + directions @ z
+        if not (np.all(u >= internal_lower) and np.all(u <= internal_upper)):
+            # Outside the declared domain the transform is not invertible, so the
+            # point cannot contribute; the surviving weights renormalise below.
+            continue
+        grid.append(u)
+        payloads.append(evaluate(u))
+        z_sq.append(float(z @ z))
+        kept_weights.append(weight)
+    if not grid:
+        raise OptimizationError("the CCD design lies entirely outside the declared bounds")
+    return (np.asarray(grid), payloads, np.asarray(z_sq), np.asarray(kept_weights))
+
+
+def _predicted_grid_points(d, *, depth, prune_drop, grid_step, max_radius, cap=2_000_000):
+    """How many points the explored-and-pruned box would hold under the Gaussian.
+
+    Pure arithmetic on the design -- no conditional fits. ``auto`` needs to choose
+    a strategy *before* paying for one, and the alternative (explore, blow the
+    budget, fall back) would spend `O(d * max_radius)` fits to learn what this
+    computes for free.
+    """
+    reach = min(int(np.ceil(np.sqrt(2.0 * depth) / grid_step)), max_radius)
+    if (2 * reach + 1) ** d > cap:
+        return cap + 1
+    return sum(
+        1
+        for z in product(range(-reach, reach + 1), repeat=d)
+        if 0.5 * grid_step ** 2 * float(np.dot(z, z)) <= prune_drop
+    )
+
+
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=2.5,
-    prune_slack=4.0,
+    prune_slack=4.0, int_strategy="auto", ccd_f0=1.1,
     max_grid_points=4096, latent_strategy="gaussian",
 ) -> INLAResult:
     names = tuple(family.parameter_names)
@@ -432,28 +533,76 @@ def integrate_inla(
     # hyperparameter; there, the extra depth is what makes the marginal cover the
     # posterior instead of truncating it.
     depth = explore_drop if len(names) == 1 else log_density_drop
-    grid, points = _explore_grid(
-        u_star, hessian, evaluate,
-        internal_lower=internal_lower, internal_upper=internal_upper,
-        grid_step=grid_step, max_radius=max_radius, explore_drop=depth,
-        prune_drop=max(depth, log_density_drop) + prune_slack,
-        max_grid_points=max_grid_points,
-    )
-    if not len(grid):
-        grid, points = u_star.reshape(1, -1), [evaluate(u_star)]
-    s_values = np.array([s for s, _, _, _ in points])
-    s_max = float(s_values.max())
-    kept = [(u, s, cond, theta, compiled)
-            for u, (s, cond, theta, compiled) in zip(grid, points, strict=True)
-            if s >= s_max - log_density_drop]
-    if not kept:
-        raise NumericalError("INLA grid retained no points above the density threshold")
+    prune_drop = max(depth, log_density_drop) + prune_slack
+    if int_strategy not in ("auto", "grid", "ccd"):
+        raise ValueError("int_strategy must be 'auto', 'grid' or 'ccd'")
+    if int_strategy == "auto":
+        predicted = _predicted_grid_points(
+            len(names), depth=depth, prune_drop=prune_drop,
+            grid_step=grid_step, max_radius=max_radius,
+        )
+        int_strategy = "ccd" if predicted > max_grid_points else "grid"
 
-    # importance-weight Jacobian: log|d theta / d u| summed over parameters
-    log_weights = np.array([
-        s + float(sum(transforms[i].log_abs_jacobian(u[i]) for i in range(len(names))))
-        for (u, s, _, _, _) in kept
-    ])
+    def jacobian(u):
+        return float(sum(transforms[i].log_abs_jacobian(u[i]) for i in range(len(names))))
+
+    if int_strategy == "ccd":
+        # The design integrates a Gaussian, so it must be centred on the density
+        # it is actually integrating. `u_star` is the mode of `s` alone, but the
+        # posterior *in u* is exp(s + jacobian) -- and for the usual log transform
+        # the Jacobian is `u`, a linear tilt that moves the mode a full standard
+        # deviation. Centring on `s`'s mode leaves the design systematically
+        # off-target, which a few dozen points cannot absorb.
+        #
+        # One Newton step fixes it, and costs no conditional fits: the Jacobian is
+        # analytic, and a linear tilt leaves the curvature alone, so the step is
+        # exactly (-H)^-1 grad(jacobian) evaluated at the mode of s.
+        gradient = np.zeros(len(names))
+        for i in range(len(names)):
+            step = 1e-4 * max(1.0, abs(u_star[i]))
+            forward, backward = u_star.copy(), u_star.copy()
+            forward[i] += step
+            backward[i] -= step
+            gradient[i] = (jacobian(forward) - jacobian(backward)) / (2.0 * step)
+        ccd_center = u_star + np.linalg.solve(-hessian, gradient)
+        grid, points, z_sq, design_weights = _ccd_grid(
+            ccd_center, hessian, evaluate,
+            internal_lower=internal_lower, internal_upper=internal_upper, f0=ccd_f0,
+        )
+        # Every design point is kept: dropping any would break the balance that
+        # gives the design its weights, and the density enters through the
+        # importance ratio rather than through a threshold.
+        s_values = np.array([s for s, _, _, _ in points])
+        kept = [(u, s, cond, theta, compiled)
+                for u, (s, cond, theta, compiled) in zip(grid, points, strict=True)]
+        # The design integrates the Gaussian implied by the Hessian, so dividing
+        # by that Gaussian -- adding 0.5*||z||^2 in logs -- leaves the true
+        # posterior. Without it CCD would just echo the Laplace approximation.
+        log_weights = np.array([
+            np.log(w) + s + jacobian(u) + 0.5 * zz
+            for (u, s, _, _, _), w, zz in zip(kept, design_weights, z_sq, strict=True)
+        ])
+        volume_element = 0.5 * len(names) * np.log(2.0 * np.pi)
+    else:
+        grid, points = _explore_grid(
+            u_star, hessian, evaluate,
+            internal_lower=internal_lower, internal_upper=internal_upper,
+            grid_step=grid_step, max_radius=max_radius, explore_drop=depth,
+            prune_drop=prune_drop, max_grid_points=max_grid_points,
+        )
+        if not len(grid):
+            grid, points = u_star.reshape(1, -1), [evaluate(u_star)]
+        s_values = np.array([s for s, _, _, _ in points])
+        s_max = float(s_values.max())
+        kept = [(u, s, cond, theta, compiled)
+                for u, (s, cond, theta, compiled) in zip(grid, points, strict=True)
+                if s >= s_max - log_density_drop]
+        if not kept:
+            raise NumericalError("INLA grid retained no points above the density threshold")
+        # importance-weight Jacobian: log|d theta / d u| summed over parameters
+        log_weights = np.array([s + jacobian(u) for (u, s, _, _, _) in kept])
+        volume_element = len(names) * np.log(grid_step)
+
     weights = np.exp(log_weights - logsumexp(log_weights))
 
     reference = kept[0][2]
@@ -513,13 +662,14 @@ def integrate_inla(
 
     eigenvalues = np.clip(np.linalg.eigvalsh(-hessian), 1e-6, None)
     integrated_lml = float(
-        logsumexp(log_weights) + len(names) * np.log(grid_step)
+        logsumexp(log_weights) + volume_element
         - 0.5 * float(np.sum(np.log(eigenvalues)))
     )
 
     diagnostics = {
         "inla_grid_points": int(len(kept)),
         "inla_grid_evaluated": int(len(grid)),
+        "inla_int_strategy": int_strategy,
         "inla_effective_weight": float(1.0 / np.sum(weights**2)),
         "inla_conditional_engine": "laplace" if is_laplace else "exact_gaussian",
         "inla_active_bounds": ",".join(eb.diagnostics.active_bounds),
