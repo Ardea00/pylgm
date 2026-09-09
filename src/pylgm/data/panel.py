@@ -101,7 +101,9 @@ class CanonicalPanel:
         return result
 
     @classmethod
-    def from_frame(cls, frame: pd.DataFrame, config: DataConfig) -> "CanonicalPanel":
+    def from_frame(
+        cls, frame: pd.DataFrame, config: DataConfig, *, require_observed: bool = True
+    ) -> "CanonicalPanel":
         _validate_frame_contract(frame)
         keys = (*config.panel, config.time)
         required = {*keys, config.response}
@@ -121,6 +123,6 @@ class CanonicalPanel:
         source_positions = ordered.index.to_numpy(dtype=np.int64, copy=True)
         ordered = ordered.reset_index(drop=True)
         observed = ordered[config.response].notna().to_numpy(dtype=bool)
-        if not observed.any():
+        if require_observed and not observed.any():
             raise DataContractError("panel contains no observed responses")
         return cls(ordered, observed, keys, config.response, source_positions)

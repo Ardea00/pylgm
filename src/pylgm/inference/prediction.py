@@ -26,11 +26,13 @@ as is ``fitted_mean`` for the identity link and for all plug-in and
 empirical-Bayes fits.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import warnings
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 from formulaic import ModelSpec
 
 from pylgm.exceptions import NumericalError
@@ -45,9 +47,23 @@ class PredictionContext:
     order: ``("fixed", ModelSpec)``,
     ``("structured", (block_name, index_column, labels_tuple))``,
     ``("midas", (block_name, columns_tuple))``,
+    ``("midas_parametric", (block_name, columns_tuple, kernel, theta))``,
     ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
     ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
-    or ``("grouped_structured", (block_name, group, index, group_labels, level_labels))``.
+    ``("replicated_structured", (block_name, over, index, replicate_labels,
+    level_labels))``, ``("grouped_structured", (block_name, over, index,
+    group_labels, level_labels))``,
+    ``("shared", (block_name, index, labels, scale_spec, fitted_scale))`` (joint
+    models only -- a shared field's predict-time design is ``scale * incidence``),
+    ``("weighted", (inner_entry, by_column))`` -- rebuilds ``inner_entry``'s
+    own design (any other kind, recursively) and scales it row-wise by
+    ``by_column`` from ``new_data``, mirroring the ``diag(by) A`` design a
+    ``Weighted`` effect compiles to -- or ``("copied", (base_entry, copies))``,
+    where ``copies`` is a tuple of ``(index_column, labels, scale_spec,
+    fitted_scale)`` -- rebuilds ``base_entry``'s own design (the target block
+    it copies into) and adds each copy's ``scale * incidence`` over the same
+    columns, mirroring how a ``Copy`` effect folds into its target block at
+    fit time.
     """
 
     entries: tuple[tuple[str, object], ...]
@@ -55,6 +71,24 @@ class PredictionContext:
     offset: str | None
     trials: str | None = None
     width: int = 0
+    column_slices: tuple[tuple[int, int], ...] = ()
+    """Per-entry ``(start, stop)`` column spans in the fitted latent.
+
+    Empty means the entries are contiguous and gapless from column 0, which is
+    every single-response model. A joint model's per-outcome context sets this
+    because its entries occupy scattered spans of the stacked latent.
+    """
+
+
+@dataclass(frozen=True)
+class JointPredictionContext:
+    """Per-outcome prediction contexts for a joint model."""
+
+    contexts: Mapping[str, PredictionContext]
+
+    @property
+    def outcomes(self) -> tuple[str, ...]:
+        return tuple(self.contexts)
 
 
 def _fixed_block(spec: ModelSpec, new_data: pd.DataFrame) -> np.ndarray:
@@ -221,41 +255,167 @@ def _dynamic_spatial_panel_block(
     )
 
 
-def _grouped_structured_block(
+def _replicated_block(
     entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
 ) -> np.ndarray:
-    name, group, index_column, group_labels, level_labels = entry
+    """Rebuild a replicated effect's design on (replicate, level) pairs.
+
+    Replicate-major, matching ``replicate_block``'s ``replicate * n_levels +
+    level`` layout, so this is the same outer/inner pairing as the grouped AR1.
+    """
+    name, over, index_column, replicate_labels, level_labels = entry
     return _paired_cell_block(
-        name, group, index_column, group_labels, level_labels, new_data,
+        name, over, index_column, replicate_labels, level_labels, new_data,
+        block_label="replicated",
+        pair_label="replicate/level",
+        hint="To score a new replicate or level, include those rows at fit time "
+             "with a NaN response instead.",
+    )
+
+
+def _grouped_block(
+    entry: tuple[str, str, str, tuple[str, ...], tuple[str, ...]], new_data: pd.DataFrame
+) -> np.ndarray:
+    """Rebuild a grouped effect's design on (group, level) pairs.
+
+    Group-major, matching ``grouped_block``'s ``group * n_levels + level``
+    layout. The correlation between groups lives entirely in the precision, so
+    the design is the same shape as a replicated one.
+    """
+    name, over, index_column, group_labels, level_labels = entry
+    return _paired_cell_block(
+        name, over, index_column, group_labels, level_labels, new_data,
         block_label="grouped",
         pair_label="group/level",
-        hint="To forecast new levels, include those rows at fit time with a NaN "
-             "response instead.",
+        hint="To score a new group or level, include those rows at fit time "
+             "with a NaN response instead.",
     )
+
+
+def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """Rebuild a shared field's design for one outcome: scale_k * incidence.
+
+    Named to distinguish it from ``compiler._shared_block``, which builds the
+    fit-time LatentBlock; this one rebuilds the dense predict-time design.
+    """
+    name, index, labels, scale_spec, fitted = entry
+    if index not in new_data.columns:
+        raise ValueError(f"predict() new_data is missing the index column {index!r}")
+    position_of = {label: i for i, label in enumerate(labels)}
+    block = np.zeros((len(new_data), len(labels)))
+    scale = fitted if isinstance(scale_spec, str) else float(scale_spec)
+    for row, value in enumerate(new_data[index].astype(str)):
+        if value not in position_of:
+            raise ValueError(
+                f"predict() new_data has an unseen level {value!r} in {index!r} "
+                f"for shared effect {name!r}"
+            )
+        block[row, position_of[value]] = scale
+    return block
+
+
+def _weighted_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """Scale a nested entry's rebuilt design by a weight column from new_data."""
+    inner_entry, by_column = entry
+    if by_column not in new_data.columns:
+        raise ValueError(
+            f"predict() new_data is missing the weight column {by_column!r}"
+        )
+    column = new_data[by_column]
+    if not is_numeric_dtype(column):
+        raise ValueError(
+            f"predict() weight column {by_column!r} must be numeric and finite"
+        )
+    try:
+        weights = column.to_numpy(dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"predict() weight column {by_column!r} must be numeric and finite"
+        ) from error
+    if not np.isfinite(weights).all():
+        raise ValueError(
+            f"predict() weight column {by_column!r} must be numeric and finite"
+        )
+    return weights[:, None] * _design_block_for(inner_entry, new_data)
+
+
+def _copied_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """Rebuild a block that one or more copies fold into.
+
+    The base entry supplies the block's own design; each copy adds its scaled
+    incidence over the same columns, which is what makes a copy a second
+    occurrence of one field rather than a second field.
+    """
+    base_entry, copies = entry
+    design = _design_block_for(base_entry, new_data)
+    for index_column, labels, _spec, fitted in copies:
+        if index_column not in new_data.columns:
+            raise ValueError(
+                f"predict() new_data is missing the copy index column {index_column!r}"
+            )
+        position = {label: k for k, label in enumerate(labels)}
+        values = new_data[index_column].map(str)
+        unknown = sorted({value for value in values if value not in position})
+        if unknown:
+            raise ValueError(
+                f"predict() cannot score rows whose copy level was not in the fitted "
+                f"model: {unknown!r}"
+            )
+        # _design_block_for returns a freshly allocated array from every branch,
+        # so mutating it in place is safe; each row appears exactly once, so
+        # += has no duplicate-index hazard.
+        design[np.arange(len(new_data)), values.map(position).to_numpy()] += fitted
+    return design
+
+
+def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.ndarray:
+    """Rebuild the dense predict-time design block for one ``(kind, payload)`` entry."""
+    kind, payload = entry
+    if kind == "fixed":
+        return _fixed_block(payload, new_data)
+    elif kind == "structured":
+        return _structured_block(payload, new_data)
+    elif kind == "midas":
+        return _midas_block(payload, new_data)
+    elif kind == "midas_parametric":
+        return _midas_parametric_block(payload, new_data)
+    elif kind == "spacetime":
+        return _spacetime_block(payload, new_data)
+    elif kind == "dynamic_spatial_panel":
+        return _dynamic_spatial_panel_block(payload, new_data)
+    elif kind == "replicated_structured":
+        return _replicated_block(payload, new_data)
+    elif kind == "grouped_structured":
+        return _grouped_block(payload, new_data)
+    elif kind == "shared":
+        return _shared_design_block(payload, new_data)
+    elif kind == "weighted":
+        return _weighted_block(payload, new_data)
+    elif kind == "copied":
+        return _copied_block(payload, new_data)
+    else:
+        raise ValueError(f"predict() context has an unknown block kind {kind!r}")
 
 
 def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarray:
     if not isinstance(new_data, pd.DataFrame) or new_data.empty:
         raise ValueError("predict() new_data must be a non-empty pandas DataFrame")
-    blocks = []
-    for kind, payload in context.entries:
-        if kind == "fixed":
-            blocks.append(_fixed_block(payload, new_data))
-        elif kind == "structured":
-            blocks.append(_structured_block(payload, new_data))
-        elif kind == "midas":
-            blocks.append(_midas_block(payload, new_data))
-        elif kind == "midas_parametric":
-            blocks.append(_midas_parametric_block(payload, new_data))
-        elif kind == "spacetime":
-            blocks.append(_spacetime_block(payload, new_data))
-        elif kind == "dynamic_spatial_panel":
-            blocks.append(_dynamic_spatial_panel_block(payload, new_data))
-        elif kind == "grouped_structured":
-            blocks.append(_grouped_structured_block(payload, new_data))
-        else:
-            raise ValueError(f"predict() context has an unknown block kind {kind!r}")
-    design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))
+    blocks = [_design_block_for(entry, new_data) for entry in context.entries]
+    if context.column_slices:
+        if len(context.column_slices) != len(blocks):
+            raise ValueError(
+                "predict() context column_slices must align one-to-one with entries"
+            )
+        design = np.zeros((len(new_data), context.width))
+        for block, (start, stop) in zip(blocks, context.column_slices):
+            if stop - start != block.shape[1]:
+                raise ValueError(
+                    f"predict() rebuilt a block of width {block.shape[1]} for a "
+                    f"column span of width {stop - start}"
+                )
+            design[:, start:stop] = block
+    else:
+        design = np.hstack(blocks) if blocks else np.empty((len(new_data), 0))
     # Defence in depth against a block silently losing rows: a length-1 design
     # would broadcast against the offset and fabricate a prediction for every
     # requested row.
@@ -389,6 +549,12 @@ class Prediction:
 
     @property
     def predictive_mean(self) -> np.ndarray:
+        """Linear predictor eta for ``new_data``, on the link scale, offset included.
+
+        Same contract as the fitted result's property of this name, so the two
+        compose: a margin taken from the fit and one taken from ``predict()``
+        are on the same scale.
+        """
         return _readonly_array(self._predictive_mean)
 
     @property

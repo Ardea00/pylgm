@@ -158,12 +158,16 @@ class ParametricDesignBlock:
     block: LatentBlock
     parameters: tuple[str, ...]
     build: Callable[[Mapping[str, float]], csr_matrix]
+    parameter: str | None
+    scale: float
 
     def __init__(
         self,
         block: LatentBlock,
         parameters: tuple[str, ...],
         build: Callable[[Mapping[str, float]], csr_matrix],
+        parameter: str | None = None,
+        scale: float = 1.0,
     ) -> None:
         if not isinstance(block, LatentBlock):
             raise ModelValidationError("parametric-design block must contain a latent block")
@@ -172,9 +176,13 @@ class ParametricDesignBlock:
             raise ModelValidationError("parametric-design block parameters must be non-empty strings")
         if not callable(build):
             raise ModelValidationError("parametric-design block build must be callable")
+        if parameter is not None and (not isinstance(parameter, str) or not parameter):
+            raise ModelValidationError("parametric-design block parameter must be a non-empty string")
         object.__setattr__(self, "block", block)
         object.__setattr__(self, "parameters", names)
         object.__setattr__(self, "build", build)
+        object.__setattr__(self, "parameter", parameter)
+        object.__setattr__(self, "scale", _ordinary_positive(scale, "block scale"))
 
     def materialize(self, resolved: Mapping[str, float]) -> LatentBlock:
         design = self.build(resolved)
@@ -182,11 +190,18 @@ class ParametricDesignBlock:
             raise NumericalError(
                 f"parametric design for block {self.block.name!r} must remain finite"
             )
+        multiplier = resolved[self.parameter] if self.parameter else self.scale
+        with np.errstate(over="ignore", invalid="ignore"):
+            precision = self.block.precision * multiplier
+        if not np.isfinite(precision.data).all():
+            raise NumericalError(
+                f"precision scaling for block {self.block.name!r} must remain finite"
+            )
         return LatentBlock(
             self.block.name,
             self.block.labels,
             design,
-            self.block.precision,
+            precision,
             self.block.constraints,
         )
 

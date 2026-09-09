@@ -26,6 +26,7 @@ rather than remembered.
 | [`general_lgm`](https://github.com/Ardea00/pylgm/tree/main/examples/general_lgm) | The same model through both the Python and the YAML frontend |
 | [`count_glm`](https://github.com/Ardea00/pylgm/tree/main/examples/count_glm) | A Poisson count model on the Laplace engine |
 | [`method_comparison`](https://github.com/Ardea00/pylgm/tree/main/examples/method_comparison) | pyLGM against a GLM, XGBoost and a Metropolis sampler — see [comparison](comparison.md) |
+| [`boosted_offset`](https://github.com/Ardea00/pylgm/tree/main/examples/boosted_offset) | Gradient boosting **and** pyLGM in one linear predictor via `offset=` — halves the error of either alone, and shows how an in-sample offset silently decalibrates the posterior. Guide: [combining with gradient boosting](boosting.md) |
 
 ## Spatial and network structure
 
@@ -36,6 +37,12 @@ rather than remembered.
 | [`directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar) | `SAR` on a directed interbank-exposure network, estimating contagion strength ρ |
 | [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | `SAR` reproducing Anselin's published Columbus results on real contiguity data |
 | [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | `DynamicSpatialPanel` with one network per year, on 48 US states |
+
+## Effect modifiers (`weights`, `copy`, `replicate`, `group`)
+
+| Example | Shows |
+|---|---|
+| [`grouped_panel`](https://github.com/Ardea00/pylgm/tree/main/examples/grouped_panel) | `Grouped` vs `Replicated` — a spatial field whose yearly copies are tied by an `AR1`, cutting latent error ~25% against independent copies by borrowing strength across years |
 
 ## Time, frequency and forecasting
 

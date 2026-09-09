@@ -2,23 +2,33 @@
 
 from pylgm.effects import (
     AR1,
+    AR1Structure,
     Besag,
+    BesagStructure,
     BYM2,
+    Copy,
     DynamicSpatialPanel,
     Fixed,
     forecast_dynamic_spatial_panel,
+    Grouped,
     IID,
+    IIDStructure,
     MIDAS,
     MIDASParametric,
     ProperCAR,
+    Replicated,
     RW1,
+    RW1Structure,
     RW2,
+    RW2Structure,
     SAR,
     Seasonal,
     SpaceTime,
+    Weighted,
     load_graph_file,
 )
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
+from pylgm.joint import Joint, Shared
 from pylgm.likelihoods import (
     Bernoulli,
     Beta,
@@ -31,6 +41,7 @@ from pylgm.likelihoods import (
     WeibullSurv,
 )
 from pylgm.model import LGM
+from pylgm.observations import LinearConstraint, LinearObservation
 from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
 from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision
@@ -39,13 +50,16 @@ __version__ = "0.6.1"
 
 __all__ = [
     "AR1",
+    "AR1Structure",
     "Bernoulli",
     "Besag",
+    "BesagStructure",
     "Beta",
     "Binomial",
     "BYM2",
     "CandidateFailure",
     "ComparisonResult",
+    "Copy",
     "DynamicSpatialPanel",
     "Experiment",
     "ExponentialSurv",
@@ -55,9 +69,14 @@ __all__ = [
     "Gamma",
     "Gaussian",
     "GaussianPrior",
+    "Grouped",
     "Hyperparameter",
     "IID",
+    "IIDStructure",
+    "Joint",
     "LGM",
+    "LinearConstraint",
+    "LinearObservation",
     "MIDAS",
     "MIDASParametric",
     "NegativeBinomial",
@@ -67,11 +86,16 @@ __all__ = [
     "Pipeline",
     "Poisson",
     "ProperCAR",
+    "Replicated",
     "RW1",
+    "RW1Structure",
     "RW2",
+    "RW2Structure",
     "SAR",
     "Seasonal",
+    "Shared",
     "SpaceTime",
+    "Weighted",
     "WeibullSurv",
     "__version__",
 ]

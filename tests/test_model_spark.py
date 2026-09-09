@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-from pylgm import Fixed, Gaussian, LGM
+from pylgm import Fixed, Gaussian, IID, LGM, Weighted
 from pylgm.exceptions import DataContractError
 
 
@@ -76,3 +76,34 @@ def test_spark_fit_result_can_predict(spark):
     prediction = result.predict(frame)
     assert np.allclose(prediction.predictive_mean, result.predictive_mean)
     assert np.allclose(prediction.predictive_variance, result.predictive_variance)
+
+
+def test_spark_fit_supports_a_weighted_effect(spark):
+    # Weighted has no `.index` (by design), so `_required_columns` must unwrap
+    # it to find the inner effect's index *and* project the `by` weight
+    # column -- dropping either one used to crash or silently break the fit.
+    rows = [
+        ("B", 2, 4.0, 8.0), ("A", 1, 1.0, 2.0),
+        ("B", 1, 3.0, 6.0), ("A", 2, 2.0, 4.0),
+    ]
+    columns = ["region", "time", "z", "y"]
+    model = LGM(
+        "y",
+        Gaussian(1.0),
+        Fixed("1") + Weighted(IID("u", index="region", precision=1.0), by="z"),
+        panel=("region",),
+        time="time",
+    )
+
+    spark_result = model.fit(spark.createDataFrame(rows, columns))
+    pandas_result = model.fit(
+        pd.DataFrame(rows, columns=columns).sort_values(["region", "time"])
+    )
+
+    np.testing.assert_allclose(
+        spark_result.predictive_mean, pandas_result.predictive_mean
+    )
+    np.testing.assert_allclose(
+        spark_result.log_marginal_likelihood,
+        pandas_result.log_marginal_likelihood,
+    )
