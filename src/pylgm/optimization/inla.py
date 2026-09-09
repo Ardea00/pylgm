@@ -259,6 +259,54 @@ def _build_grid(
     return np.asarray(points)
 
 
+def _theta_marginals(names, grid, s_values, transforms, theta_mean, theta_sq, points=513):
+    """Posterior marginals for the hyperparameters.
+
+    With one hyperparameter the grid is a line in ``u``, and ``s(u) = log p(y|theta)
+    + log pi(theta)`` is the unnormalised log posterior evaluated on it. Splining
+    that log density and mapping it through the transform gives the marginal
+    itself, tabulated -- rather than a Gaussian matched to its first two moments,
+    which for a positive, right-skewed precision is wrong in both tails.
+
+    Every grid point is used, not only the ones the integration weights retain:
+    they have all been evaluated by the time we get here, and the density-drop
+    filter that trims the integration would truncate this marginal's tails at
+    roughly 2.2 sigma instead of the grid's own 3.
+
+    With more than one hyperparameter the grid is a lattice rotated onto the
+    whitened Hessian's directions, so projections onto a single axis scatter and
+    a marginal cannot be read off it this way; those keep the moment match.
+    """
+    moment_matched = {
+        name: GaussianMarginals(
+            np.array([theta_mean[name]]),
+            np.array([max(theta_sq[name] - theta_mean[name] ** 2, 0.0)]),
+        )
+        for name in names
+    }
+    if len(names) != 1 or len(s_values) < 4:
+        return moment_matched
+
+    u = np.asarray(grid, dtype=float)[:, 0]
+    order = np.argsort(u)
+    u, s = u[order], np.asarray(s_values, dtype=float)[order]
+    if not np.all(np.diff(u) > 0):
+        return moment_matched
+
+    fine = np.linspace(u[0], u[-1], points)
+    log_density = CubicSpline(u, s - s.max())(fine)
+    theta = np.array([transforms[0].from_internal(value) for value in fine])
+    if not np.all(np.diff(theta) > 0):   # transform must stay strictly monotone
+        return moment_matched
+    density = np.exp(log_density - log_density.max())
+    if not np.all(np.isfinite(density)) or density.max() <= 0.0:
+        return moment_matched
+    # p(theta | y) is proportional to exp(s); TabulatedMarginals normalises it
+    # over this theta grid, so no Jacobian belongs here -- s is already a
+    # function of theta, and the grid carries the change of variable.
+    return {names[0]: TabulatedMarginals(theta[None, :], density[None, :])}
+
+
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, radius=3, log_density_drop=2.5, max_grid_points=4096,
@@ -375,13 +423,9 @@ def integrate_inla(
     predictive_mean = pm_acc
     predictive_variance = pv_acc - pm_acc * pm_acc
 
-    hyper_marginals = {
-        name: GaussianMarginals(
-            np.array([theta_mean[name]]),
-            np.array([max(theta_sq[name] - theta_mean[name] ** 2, 0.0)]),
-        )
-        for name in names
-    }
+    hyper_marginals = _theta_marginals(
+        names, grid, s_values, transforms, theta_mean, theta_sq
+    )
 
     eigenvalues = np.clip(np.linalg.eigvalsh(-hessian), 1e-6, None)
     integrated_lml = float(

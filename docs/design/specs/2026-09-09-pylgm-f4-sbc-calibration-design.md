@@ -269,17 +269,70 @@ Attributed rather than asserted, by two controls:
 Control 2 matters for the roadmap: this result does **not** argue for F5. A
 smarter hyperparameter grid would not have fixed it.
 
-### Phase 3 — hyperparameter PIT
+### Phase 3 — hyperparameter PIT *(done, and it fails)*
 
-Blocked on prerequisite 3 **and** on F5. Specified here so it is not rediscovered;
-not scheduled.
+Delivered: the drawn `θ̃` is PIT'd against its own reported marginal, listed as
+`hyper:<name>`. Two things had to change first.
 
-Phase 2's finding sharpens the case for it. The same Gaussian-moment collapse
-that miscalibrates the *latent* marginals under `latent_strategy="gaussian"` is
-applied unconditionally to the *hyperparameter* marginals, on the natural scale,
-where the skew is worse. Phase 2 measured the size of that error for the latent
-field; there is no reason to expect the hyperparameter version to be smaller, and
-currently no way to check it.
+**Prerequisite 3, resolved.** `hyperparameter_marginals()` no longer collapses
+the θ posterior to two moments. With one hyperparameter the grid is a line in
+`u`, and `s(u) = log p(y|θ) + log π(θ)` is the unnormalised log posterior
+evaluated on it, so splining that log density and mapping it through the
+transform gives the marginal itself as a `TabulatedMarginals`. Every grid point
+feeds it, not only the ones the integration weights retain — they are all
+evaluated by the time the marginals are built, and the `log_density_drop` filter
+would truncate the tails at ≈2.2σ instead of the grid's own 3. With more than one
+hyperparameter the lattice is rotated onto the whitened Hessian's directions, so
+single-axis projections scatter and no marginal can be read off it; those keep
+the moment match. The runtime type check widened from `GaussianMarginals` to the
+`LatentMarginals` protocol, which is what callers actually use.
+
+Verified against a brute-force reference — the exact log posterior on a dense θ
+grid, no INLA in the loop. Median relative quantile error across datasets:
+
+| | grid covers (5/30) | grid truncates (25/30) |
+|---|---|---|
+| tabulated | **0.038** | **0.445** |
+| moment-matched | 0.505 | 1.899 |
+
+Better in both regimes, by 13× and 4×. On a single well-identified dataset the
+2.5% credible bound moves from 0.238 to 0.471 against a reference of 0.468 — the
+old collapse was wrong by a factor of two at the lower end, because it assumes
+away a posterior skewness of 1.08.
+
+**The finding: hyperparameter marginals are not calibrated, and the cause is the
+grid, not the summary.** PIT mean 0.61 rather than 0.5, KS p ≈ 1e-11. Attributed
+in three steps rather than asserted:
+
+1. **The harness is exonerated.** Re-running the same SBC loop against a
+   brute-force reference posterior — same prior draws, same simulated data, exact
+   posterior in place of the engine's — gives a uniform PIT (mean 0.480, p 0.15).
+   So the prior sampler, the truncation to bounds, and the simulation are right.
+   *(This needed care: a first attempt integrated the reference over a wider
+   support than the sampler's bounds and produced a spurious deviation. The
+   reference must use the same truncated prior the engine does.)*
+2. **The direction is one-sided.** The grid's upper edge reaches only 0.139× the
+   reference's 97.5th percentile and fails to cover it in 85% of datasets, while
+   covering the lower tail comfortably (0% failure). The reported mean is 0.28×
+   the reference mean.
+3. **The summary is not the culprit.** Swapping the tabulated marginal back for
+   the moment match barely moves the PIT (mean 0.60 vs 0.62; both p < 1e-8).
+   Fixing the shape cannot fix missing mass.
+
+The mechanism: the grid is centred on the empirical-Bayes mode and scaled by the
+curvature of `s` there, spanning ±3 of those units. For a weakly identified
+precision the log posterior has a long right tail that a mode-centred, curvature-
+scaled grid does not reach.
+
+**This does argue for F5** — and corrects what phase 2 concluded. There, refining
+the grid changed nothing, so the latent-marginal error was attributed to the
+summary and F5 ruled out. That holds for the *latent* marginals and does not
+generalise: for the hyperparameter marginal the grid *is* the representation, and
+its coverage is the whole error. An adaptive or low-discrepancy integration
+scheme is the fix; widening `radius` is not, since the cost is `(2r+1)^d`.
+
+Not fixed here. The grid is core inference machinery shared by every `integrate`
+fit, and changing its extent changes released numerics for all of them.
 
 ## Architecture
 

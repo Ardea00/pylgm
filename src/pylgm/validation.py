@@ -237,6 +237,8 @@ class IndexCalibration:
 
     label: str
     index: int
+    """Position in the latent vector, or ``-1`` for a hyperparameter marginal
+    (whose label is prefixed ``hyper:``)."""
     statistic: float
     pvalue: float
     dispersion_statistic: float
@@ -437,15 +439,16 @@ def calibrate(
 
     samplers = {name: _PriorSampler(prior, bound)
                 for name, (prior, bound) in hyperprior.items()}
+    hyper_names = tuple(sorted(samplers))
     rng = np.random.default_rng(seed)
-    collected = np.empty((replicates, len(tracked)))
+    collected = np.empty((replicates, len(tracked) + len(hyper_names)))
     for replicate in range(replicates):
+        drawn = {}
         if hyperprior:
             # Redraw theta, then rebuild Q(theta) through the same family the
             # engine materialises during its own grid search.
-            compiled = family.materialize(
-                {name: draw(rng) for name, draw in samplers.items()}
-            )
+            drawn = {name: draw(rng) for name, draw in samplers.items()}
+            compiled = family.materialize(drawn)
         truth = simulate_latent(compiled, rng)
         working[response] = simulate_response(compiled, truth, rng)
         result = model.fit(working, **fit_kwargs)
@@ -457,11 +460,24 @@ def calibrate(
                 "fitted labels do not match the compiled labels; the PIT would "
                 "compare mismatched components"
             )
-        collected[replicate] = pit(result.latent_marginals(), truth)[list(tracked)]
+        collected[replicate, :len(tracked)] = pit(result.latent_marginals(), truth)[list(tracked)]
+        if hyper_names:
+            # The hyperparameter's own marginal, against the value that generated
+            # the data. Each is a one-component marginal, so cdf takes a (1,).
+            reported = result.hyperparameter_marginals()
+            collected[replicate, len(tracked):] = [
+                pit(reported[name], np.array([drawn[name]]))[0] for name in hyper_names
+            ]
 
     entries = tuple(
-        _calibration_entry(compiled.labels[index], index, collected[:, position])
-        for position, index in enumerate(tracked)
+        [
+            _calibration_entry(compiled.labels[index], index, collected[:, position])
+            for position, index in enumerate(tracked)
+        ]
+        + [
+            _calibration_entry(f"hyper:{name}", -1, collected[:, len(tracked) + position])
+            for position, name in enumerate(hyper_names)
+        ]
     )
     return CalibrationReport(
         replicates=replicates, entries=entries, alpha=alpha, seed=seed

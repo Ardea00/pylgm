@@ -785,7 +785,7 @@ class _BaseResult:
             raise NotImplementedError(_NO_POSTERIOR)
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
-    def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
+    def hyperparameter_marginals(self) -> Mapping[str, LatentMarginals]:
         return MappingProxyType({})
 
     def linear_combinations(self, weights: csr_matrix | np.ndarray) -> GaussianMarginals:
@@ -1027,16 +1027,22 @@ class LaplaceResult(_BaseResult):
 
 
 def _readonly_hyperparameter_marginals(
-    values: Mapping[str, GaussianMarginals],
-) -> Mapping[str, GaussianMarginals]:
+    values: Mapping[str, LatentMarginals],
+) -> Mapping[str, LatentMarginals]:
     if not isinstance(values, Mapping):
         raise TypeError("hyperparameter_marginals must be a mapping")
     resolved = {}
     for name, value in values.items():
         if not isinstance(name, str) or not name:
             raise TypeError("hyperparameter_marginals keys must be non-empty strings")
-        if not isinstance(value, GaussianMarginals):
-            raise TypeError("hyperparameter_marginals values must be GaussianMarginals")
+        # Widened from GaussianMarginals: a single hyperparameter now gets its
+        # marginal tabulated from the integration grid rather than moment-matched.
+        # The protocol is what callers actually use -- mean, std, quantile, cdf.
+        if not isinstance(value, LatentMarginals):
+            raise TypeError(
+                "hyperparameter_marginals values must be LatentMarginals "
+                f"(mean/variance/std/cdf/quantile); got {type(value).__name__}"
+            )
         resolved[name] = value
     return MappingProxyType(resolved)
 
@@ -1050,7 +1056,7 @@ class INLAResult(_BaseResult):
     observation_variance: float | None
     _ENGINE = "inla"
 
-    _hyperparameter_marginals: Mapping[str, GaussianMarginals] = field(repr=False)
+    _hyperparameter_marginals: Mapping[str, LatentMarginals] = field(repr=False)
     _criteria: ModelCriteria = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
@@ -1065,7 +1071,7 @@ class INLAResult(_BaseResult):
         log_marginal_likelihood: float,
         predictive_mean: np.ndarray,
         predictive_variance: np.ndarray,
-        hyperparameter_marginals: Mapping[str, GaussianMarginals],
+        hyperparameter_marginals: Mapping[str, LatentMarginals],
         *,
         criteria: ModelCriteria,
         fitted_mean: np.ndarray | None = None,
@@ -1160,7 +1166,7 @@ class INLAResult(_BaseResult):
             )
         return latent_marginals_from(self._mean, self._covariance, self.block_slices, block)
 
-    def hyperparameter_marginals(self) -> Mapping[str, GaussianMarginals]:
+    def hyperparameter_marginals(self) -> Mapping[str, LatentMarginals]:
         return self._hyperparameter_marginals
 
     @property

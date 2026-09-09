@@ -272,15 +272,15 @@
       "hyperparameter_marginals": {
         "trend.precision": {
           "mean": [
-            6.38896589183
+            9.92749585333
           ],
           "mean_raises_on_write": true,
           "std": [
-            4.40047690314
+            9.00382770541
           ],
           "std_raises_on_write": true,
           "variance": [
-            19.3641969751
+            81.0689133487
           ],
           "variance_raises_on_write": true
         }
@@ -1414,15 +1414,15 @@
       "hyperparameter_marginals": {
         "trend.precision": {
           "mean": [
-            1.81062491091
+            1.82647581245
           ],
           "mean_raises_on_write": true,
           "std": [
-            0.804531735199
+            0.847429471329
           ],
           "std_raises_on_write": true,
           "variance": [
-            0.647271312942
+            0.718136708877
           ],
           "variance_raises_on_write": true
         }
@@ -1936,15 +1936,15 @@
       "hyperparameter_marginals": {
         "grp.precision": {
           "mean": [
-            13.9064599271
+            15.8194465748
           ],
           "mean_raises_on_write": true,
           "std": [
-            10.9839434473
+            15.4228767577
           ],
           "std_raises_on_write": true,
           "variance": [
-            120.647013653
+            237.865127483
           ],
           "variance_raises_on_write": true
         }
@@ -3300,15 +3300,15 @@
       "hyperparameter_marginals": {
         "region.precision": {
           "mean": [
-            8.25410308663
+            12.6200618125
           ],
           "mean_raises_on_write": true,
           "std": [
-            5.74038143828
+            11.5433000644
           ],
           "std_raises_on_write": true,
           "variance": [
-            32.9519790569
+            133.247776377
           ],
           "variance_raises_on_write": true
         }
@@ -3572,15 +3572,15 @@
       "hyperparameter_marginals": {
         "grp.precision": {
           "mean": [
-            5.61642074837
+            7.79276787584
           ],
           "mean_raises_on_write": true,
           "std": [
-            3.82153027292
+            6.76216919815
           ],
           "std_raises_on_write": true,
           "variance": [
-            14.6040936268
+            45.7269322644
           ],
           "variance_raises_on_write": true
         }

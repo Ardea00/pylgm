@@ -468,7 +468,9 @@ def test_integrated_fit_is_calibrated_when_the_prior_is_tight():
     """
     report = calibrate(_hyper_model(lower=1.9, upper=2.1), _frame(),
                        replicates=128, seed=23)
-    assert report.ok, f"near-fixed theta reported as miscalibrated:\n{report}"
+    latent = [e for e in report.entries if not e.label.startswith("hyper:")]
+    assert all(e.pvalue >= report.threshold and e.dispersion_pvalue >= report.threshold
+               for e in latent), f"near-fixed theta reported as miscalibrated:\n{report}"
 
 
 def test_skew_normal_marginals_are_better_calibrated_than_the_gaussian_collapse():
@@ -488,8 +490,35 @@ def test_skew_normal_marginals_are_better_calibrated_than_the_gaussian_collapse(
     collapsed = calibrate(model, frame, replicates=128, seed=31)
     skewed = calibrate(model, frame, replicates=128, seed=31,
                        latent_strategy="simplified_laplace")
-    worst = lambda report: min(e.dispersion_pvalue for e in report.entries)  # noqa: E731
+    # Latent entries only: the theta marginal does not depend on latent_strategy,
+    # so including it would compare the same number on both sides.
+    worst = lambda report: min(  # noqa: E731
+        e.dispersion_pvalue for e in report.entries if not e.label.startswith("hyper:")
+    )
     assert worst(skewed) > worst(collapsed), (
         f"expected simplified_laplace to be better calibrated\n"
         f"gaussian: {worst(collapsed):.3g}\nsimplified_laplace: {worst(skewed):.3g}"
     )
+
+
+def test_hyperparameter_marginals_are_reported_and_checked():
+    """Phase 3: the drawn theta is PIT'd against its own reported marginal.
+
+    Not asserted as calibrated -- it is not. The INLA grid spans roughly three
+    Hessian-implied standard deviations around the empirical-Bayes mode, and for
+    a weakly identified precision the posterior's right tail runs well past that,
+    so the reported marginal is truncated and the truth lands high too often.
+    That is a coverage limitation of the grid, measured in
+    docs/design/specs/2026-09-09-pylgm-f4-sbc-calibration-design.md, and it is
+    what the harness exists to surface.
+    """
+    report = calibrate(_hyper_model(), _frame(), replicates=64, seed=23)
+    entry = next(e for e in report.entries if e.label == "hyper:tau")
+    assert entry.index == -1
+    assert 0.0 <= entry.mean_pit <= 1.0
+    assert len(report.entries) == 6          # five latent components plus the hyperparameter
+
+
+def test_hyperparameter_entries_are_absent_when_theta_is_fixed():
+    report = calibrate(_gaussian_model(), _frame(), replicates=8, seed=1)
+    assert not [e for e in report.entries if e.label.startswith("hyper:")]
