@@ -240,25 +240,6 @@ def test_gaussian_marginals_cdf_handles_a_degenerate_component():
     np.testing.assert_allclose(values, [norm.cdf(0.5), 1.0, 0.0])
 
 
-def test_declared_hyperparameter_is_rejected():
-    """The subtlest guard: this case ran happily and reported PASS.
-
-    Simulation uses ``Q`` at the hyperparameter's ``initial``; each fit then
-    re-estimates it by empirical Bayes from the simulated data. The PIT is then
-    of a posterior conditional on ``theta_hat(y)``, not on the theta that
-    generated the data -- a different quantity that still looks calibrated.
-    """
-    from pylgm import Hyperparameter
-
-    model = LGM(
-        response="y", likelihood=Gaussian(sigma=0.7),
-        predictor=Fixed("1", prior_precision=1.0)
-        + IID("u", index="g", precision=Hyperparameter("tau", initial=2.0)),
-    )
-    with pytest.raises(NotImplementedError, match="holds hyperparameters fixed"):
-        calibrate(model, _frame(), replicates=4)
-
-
 # --------------------------------------------------------------------------
 # Intrinsic (rank-deficient) effects. Their precision is singular, and the
 # block's constraints are a basis of its null space, so the field is sampled on
@@ -399,3 +380,113 @@ def test_nonzero_rhs_constraint_holds_in_the_sample():
     draws = np.array([simulate_latent(compiled, rng) for _ in range(200)])
     achieved = (compiled.constraints @ draws.T).T
     assert np.abs(achieved - compiled.constraint_rhs).max() < 1e-10
+
+
+# ==========================================================================
+# Phase 2: hyperparameters drawn from their priors and integrated over.
+#
+# The check is now of the marginal p(x | y) rather than p(x | y, theta), which
+# is the quantity a user of hyperparameters="integrate" actually reads.
+# ==========================================================================
+from pylgm import Hyperparameter                                    # noqa: E402
+from pylgm.optimization.empirical_bayes import OptimizationBounds   # noqa: E402
+from pylgm.optimization.transforms import IdentityTransform, LogTransform  # noqa: E402
+from pylgm.priors import GaussianPrior, PCPrecision                 # noqa: E402
+from pylgm.validation import _PriorSampler, sample_prior           # noqa: E402
+
+
+def _hyper_model(prior=None, lower=None, upper=None):
+    prior = PCPrecision(upper_sd=1.0, alpha=0.01) if prior is None else prior
+    return LGM(
+        response="y", likelihood=Gaussian(sigma=0.7),
+        predictor=Fixed("1", prior_precision=1.0)
+        + IID("u", index="g", precision=Hyperparameter(
+            "tau", initial=2.0, prior=prior, lower=lower, upper=upper)),
+    )
+
+
+def test_sample_prior_reproduces_the_pc_precision_construction():
+    """PCPrecision is Exp(lambda) on the KLD distance tau^-1/2, lambda =
+    -log(alpha)/upper_sd. Pinning the construction, not just "it runs"."""
+    from scipy.stats import kstest
+
+    upper_sd, alpha = 1.0, 0.01
+    prior = PCPrecision(upper_sd=upper_sd, alpha=alpha)
+    bounds = OptimizationBounds(1.0, 1e-6, 1e6, transform=LogTransform())
+    rng = np.random.default_rng(0)
+    draw = _PriorSampler(prior, bounds)          # what calibrate builds, once
+    draws = np.array([draw(rng) for _ in range(4000)])
+    rate = -np.log(alpha) / upper_sd
+    assert kstest(draws ** -0.5, "expon", args=(0.0, 1.0 / rate)).pvalue > 0.01
+    # and the one-shot public helper agrees with it
+    assert sample_prior(prior, bounds, np.random.default_rng(7)) == pytest.approx(
+        _PriorSampler(prior, bounds)(np.random.default_rng(7))
+    )
+
+
+def test_sample_prior_reproduces_a_gaussian_prior():
+    from scipy.stats import kstest
+
+    bounds = OptimizationBounds(0.0, -20.0, 20.0, transform=IdentityTransform())
+    rng = np.random.default_rng(0)
+    draw = _PriorSampler(GaussianPrior(mean=0.5, precision=4.0), bounds)
+    draws = np.array([draw(rng) for _ in range(4000)])
+    assert kstest(draws, "norm", args=(0.5, 0.5)).pvalue > 0.01
+
+
+def test_sample_prior_respects_the_declared_bounds():
+    """The engine only ever searches within the bounds, so the prior it uses is
+    the truncated one; drawing outside would be miscalibration nobody caused."""
+    bounds = OptimizationBounds(1.0, 0.5, 2.0, transform=LogTransform())
+    rng = np.random.default_rng(0)
+    draw = _PriorSampler(PCPrecision(upper_sd=1.0, alpha=0.01), bounds)
+    draws = np.array([draw(rng) for _ in range(500)])
+    assert draws.min() >= 0.5 and draws.max() <= 2.0
+
+
+def test_hyperparameter_without_a_prior_is_rejected():
+    model = LGM(
+        response="y", likelihood=Gaussian(sigma=0.7),
+        predictor=Fixed("1", prior_precision=1.0)
+        + IID("u", index="g", precision=Hyperparameter("tau", initial=2.0)),
+    )
+    with pytest.raises(NotImplementedError, match="declare none"):
+        calibrate(model, _frame(), replicates=4)
+
+
+def test_integrated_fit_is_calibrated_when_the_prior_is_tight():
+    """The phase-2 self-test.
+
+    With theta pinned to a narrow interval the theta-mixture collapses to
+    essentially one component, so the reported marginal is very nearly exact and
+    the PIT must be uniform. If the prior draw, the per-replicate rebuild of
+    Q(theta), or the integrate path were wrong, this is where it shows -- and it
+    cannot fail for the mixture-shape reason the next test characterises.
+    """
+    report = calibrate(_hyper_model(lower=1.9, upper=2.1), _frame(),
+                       replicates=128, seed=23)
+    assert report.ok, f"near-fixed theta reported as miscalibrated:\n{report}"
+
+
+def test_skew_normal_marginals_are_better_calibrated_than_the_gaussian_collapse():
+    """The measurement F4 exists to make.
+
+    Under ``hyperparameters="integrate"`` the true latent marginal is a mixture
+    over the theta grid. ``latent_strategy="gaussian"`` reports only that
+    mixture's first two moments, and a moment-matched Gaussian has the right
+    variance but the wrong shape -- which the dispersion statistic sees and the
+    location statistic does not. ``simplified_laplace`` tracks the shape.
+
+    Asserted as an ordering rather than an absolute threshold: the ordering is
+    stable across seeds, while whether either crosses a fixed p-value at this
+    many replicates is not.
+    """
+    model, frame = _hyper_model(), _frame()
+    collapsed = calibrate(model, frame, replicates=128, seed=31)
+    skewed = calibrate(model, frame, replicates=128, seed=31,
+                       latent_strategy="simplified_laplace")
+    worst = lambda report: min(e.dispersion_pvalue for e in report.entries)  # noqa: E731
+    assert worst(skewed) > worst(collapsed), (
+        f"expected simplified_laplace to be better calibrated\n"
+        f"gaussian: {worst(collapsed):.3g}\nsimplified_laplace: {worst(skewed):.3g}"
+    )

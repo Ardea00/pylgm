@@ -11,7 +11,8 @@ works on your own model, not just on the library's test suite.
 ## The short version
 
 ```python
-from pylgm import Fixed, IID, LGM, Poisson
+from pylgm import Fixed, Hyperparameter, IID, LGM, Poisson
+from pylgm.priors import PCPrecision
 from pylgm.validation import calibrate
 
 model = LGM(
@@ -103,20 +104,57 @@ data size*. That is not automatically a bug:
   tells you how far the approximation is from honest at *your* data size — raise
   the counts, or treat the reported intervals as approximate.
 
-Comparing `latent_strategy="simplified_laplace"` against the default would be the
-natural next question. It is not available here yet: `latent_strategy` only
-applies under `hyperparameters="integrate"`, which requires a declared
-`Hyperparameter`, which this check rejects (see below).
+## Hyperparameters
+
+If the model declares a `Hyperparameter`, each replicate **draws it from its
+prior** and the fit integrates over it (`hyperparameters="integrate"`), so the
+check covers the marginal posterior rather than one conditional on a fixed
+value. Every declared hyperparameter needs a prior for this; one without is
+rejected, because falling back to empirical Bayes would re-estimate it from each
+simulated dataset and quietly test a different quantity.
+
+```python
+model = LGM(
+    response="y", likelihood=Gaussian(sigma=0.7),
+    predictor=Fixed("1", prior_precision=1.0)
+    + IID("u", index="g", precision=Hyperparameter(
+        "tau", initial=2.0, prior=PCPrecision(upper_sd=1.0, alpha=0.01))),
+)
+calibrate(model, frame, replicates=512)
+```
+
+Draws are taken from the prior **truncated to the hyperparameter's
+`lower`/`upper`**, because that is the prior the engine actually uses.
+
+### Choosing a latent strategy
+
+Integrating over hyperparameters makes the true latent marginal a *mixture* over
+the θ grid. The default `latent_strategy="gaussian"` reports only that mixture's
+first two moments — right variance, wrong shape — and calibration checking sees
+it. On a Gaussian-likelihood IID model at 512 replicates:
+
+| `latent_strategy` | worst p(dispersion) |
+|---|---|
+| `gaussian` | 4e-10 |
+| `simplified_laplace` | 9e-07 |
+| `laplace` | 7e-07 |
+
+The location statistic barely moves; it is the dispersion statistic that reacts,
+which is the fingerprint of a shape error rather than a bias. Refining the INLA
+integration grid does **not** close the gap — the error is in how the marginal is
+summarised, not in how accurately θ is integrated.
+
+So if you use `hyperparameters="integrate"` and care about interval coverage
+rather than just point estimates, prefer `simplified_laplace`. Comparing the two
+reports on your own model is the intended way to decide.
 
 ## Limits
 
-- **Hyperparameters are held fixed**, and a declared `Hyperparameter` is
-  rejected. This is not fussiness: the latent field would be simulated at the
-  hyperparameter's `initial` value while each fit re-estimated it from the
-  simulated data by empirical Bayes, so the PIT would describe a posterior
-  conditional on `theta_hat(y)` rather than on the theta that generated the data
-  — a different quantity, which still comes out looking roughly calibrated. Pass
-  the fixed values you want to calibrate at instead.
+- **A hyperparameter's own marginal is not checked** — only the latent field's.
+  `result.hyperparameter_marginals()` reports a Gaussian moment-match on the
+  natural scale, which for a positive, skewed precision is wrong in the tails for
+  reasons of reporting rather than inference, so its PIT would measure the
+  collapse rather than the engine.
 - **Proper priors only.** `Fixed` defaults to `prior_precision=1e-6` — a prior SD
   of 1000, sensible for fitting and useless for simulating. `calibrate` rejects
   it rather than producing nonsense; pass a real `prior_precision`.

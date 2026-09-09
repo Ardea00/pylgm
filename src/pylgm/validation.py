@@ -43,9 +43,10 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.linalg import solve_triangular
+from scipy.integrate import cumulative_trapezoid
 from scipy.stats import kstest
 
-from .compiler import _model_hyperparameters, compile_lgm
+from .compiler import _model_hyperparameters, compile_family, compile_lgm
 from .config.schema import DataConfig
 from .data.panel import CanonicalPanel
 from .inference.gaussian import (
@@ -64,6 +65,7 @@ __all__ = [
     "IndexCalibration",
     "calibrate",
     "pit",
+    "sample_prior",
     "simulate_latent",
     "simulate_response",
 ]
@@ -144,6 +146,65 @@ def simulate_response(compiled, latent: np.ndarray, rng) -> np.ndarray:
         f"no simulator for {type(likelihood).__name__}; calibration supports "
         "Gaussian, Poisson, Bernoulli and Binomial responses"
     )
+
+
+def sample_prior(prior, bounds, rng, points: int = 4001) -> float:
+    """Draw one value from ``prior``, truncated to ``bounds``.
+
+    Numeric inverse-CDF rather than a closed form per prior class. That is not
+    only shorter than three bespoke samplers -- it is what makes the draw match
+    the model actually being fitted:
+
+    * **Truncation comes free.** The engine optimises and integrates only within
+      ``[lower, upper]``, so the prior it uses is the truncated one. Drawing from
+      the untruncated prior would put mass where the posterior cannot follow and
+      show up as miscalibration that is nobody's bug.
+    * **Any prior works**, including a user's own and ``PCBYM2Phi``, whose density
+      depends on graph eigenvalues and reaches us already bound.
+
+    The grid is laid out on the parameter's *internal* scale (log for a
+    precision), where the density is far better behaved across the six orders of
+    magnitude the default bounds span, with the Jacobian included so the density
+    integrated is the transformed one.
+    """
+    return _PriorSampler(prior, bounds, points)(rng)
+
+
+class _PriorSampler:
+    """A prior's inverse CDF, built once and evaluated per draw.
+
+    Built once because ``logpdf`` is scalar and the grid is thousands of points:
+    rebuilding it inside the replicate loop costs more than every fit in it.
+    """
+
+    def __init__(self, prior, bounds, points: int = 4001) -> None:
+        transform = bounds.transform
+        internal = np.linspace(
+            transform.to_internal(bounds.lower), transform.to_internal(bounds.upper), points
+        )
+        density = np.empty(points)
+        for position, value in enumerate(internal):
+            try:
+                density[position] = (
+                    prior.logpdf(transform.from_internal(value))
+                    + transform.log_abs_jacobian(value)
+                )
+            except (ValueError, ZeroDivisionError):
+                density[position] = -np.inf   # outside the prior's own support
+        finite = density[np.isfinite(density)]
+        if not finite.size:
+            raise ValueError("prior has no support inside the declared bounds")
+        cumulative = cumulative_trapezoid(np.exp(density - finite.max()), internal, initial=0.0)
+        if cumulative[-1] <= 0.0:
+            raise ValueError("prior integrates to zero inside the declared bounds")
+        self._cumulative = cumulative / cumulative[-1]
+        self._internal = internal
+        self._transform = transform
+
+    def __call__(self, rng) -> float:
+        return float(self._transform.from_internal(
+            np.interp(rng.random(), self._cumulative, self._internal)
+        ))
 
 
 def pit(marginals, truth: np.ndarray) -> np.ndarray:
@@ -273,31 +334,41 @@ def _tracked_indices(labels, requested, limit: int = 5) -> tuple[int, ...]:
     return tuple(resolved)
 
 
-def _check_fixed_hyperparameters(model) -> None:
-    """Reject a declared ``Hyperparameter``, which would test the wrong thing.
+def _resolve_hyperprior(model, family):
+    """``{name: (prior, bounds)}`` for a model whose hyperparameters are drawn.
 
-    The latent field is simulated from ``Q`` at the hyperparameter's ``initial``
-    value, but ``fit`` re-estimates it from each simulated dataset by empirical
-    Bayes. The reported posterior is then conditional on ``theta_hat(y)`` rather
-    than on the theta that generated the data, so the PIT is not uniform even
-    under exact inference -- and it comes out *looking* roughly calibrated, so
-    the check would pass while measuring something other than what it claims.
-
-    Calibrating over a hyperparameter prior needs draws from that prior and
-    ``hyperparameters="integrate"``; neither is implemented here.
+    Every declared ``Hyperparameter`` must carry a prior. Without one there is
+    nothing to draw from, and falling back to empirical Bayes would re-estimate
+    it from each simulated dataset -- making the PIT describe a posterior
+    conditional on ``theta_hat(y)`` rather than on the theta that generated the
+    data. That failure is silent: it still looks roughly calibrated.
     """
-    declared = _model_hyperparameters(model)
-    if declared:
-        names = ", ".join(sorted({repr(hp.name) for _, hp in declared}))
+    declared = {hp.name: hp for _, hp in _model_hyperparameters(model)}
+    # Same precedence the fitting path uses in LGM._family_optimization_inputs:
+    # a family-level prior wins, because it is the one already bound to the
+    # graph-dependent quantities a PCBYM2Phi needs.
+    family_priors = dict(getattr(family, "parameter_priors", {}) or {})
+    bounds, _, _ = model._family_optimization_inputs(family)
+    resolved = {}
+    missing = []
+    for name in family.parameter_names:
+        prior = family_priors.get(name) or getattr(declared.get(name), "prior", None)
+        if prior is None:
+            missing.append(name)
+        else:
+            resolved[name] = (prior, bounds[name])
+    if missing:
         raise NotImplementedError(
-            f"calibration holds hyperparameters fixed, but this model declares {names}. "
-            "Empirical Bayes would re-estimate them from each simulated dataset, so the "
-            "check would silently test a different quantity. Replace them with the fixed "
-            "values you want to calibrate at, e.g. IID(..., precision=9.0)."
+            f"calibration draws hyperparameters from their priors, but {sorted(missing)!r} "
+            "declare none. Give each a prior (e.g. Hyperparameter(..., "
+            "prior=PCPrecision(upper_sd=1.0, alpha=0.01))), or pass a fixed value instead "
+            "of a Hyperparameter to calibrate at that value."
         )
+    return resolved
 
 
 def _check_proper_prior(compiled, max_prior_sd: float) -> None:
+
     """Reject near-improper priors, which make simulated data meaningless.
 
     ``Fixed`` defaults to ``prior_precision=1e-6`` -- a prior SD of 1000. That is
@@ -352,19 +423,35 @@ def calibrate(
         working, DataConfig(time=_time_column(working), response=response, panel=())
     )
     compiled = compile_lgm(model, panel)
-    _check_fixed_hyperparameters(model)
     # The caller should not have to know that a non-Gaussian likelihood needs the
     # Laplace engine -- the compiled likelihood already says so.
     fit_kwargs.setdefault(
         "engine",
         "exact_gaussian" if isinstance(compiled.likelihood, CompiledGaussian) else "laplace",
     )
+    # A model with no declared Hyperparameter has a fixed theta, and the check is
+    # of p(x | y, theta). One that declares them is drawn from their priors and
+    # integrated over, and the check is of the marginal p(x | y).
+    family = compile_family(model, panel)
+    hyperprior = _resolve_hyperprior(model, family) if family is not None else {}
+    if hyperprior:
+        fit_kwargs.setdefault("hyperparameters", "integrate")
+        compiled = family.materialize({name: bound.initial
+                                       for name, (_, bound) in hyperprior.items()})
     _check_proper_prior(compiled, max_prior_sd)
     tracked = _tracked_indices(list(compiled.labels), indices)
 
+    samplers = {name: _PriorSampler(prior, bound)
+                for name, (prior, bound) in hyperprior.items()}
     rng = np.random.default_rng(seed)
     collected = np.empty((replicates, len(tracked)))
     for replicate in range(replicates):
+        if hyperprior:
+            # Redraw theta, then rebuild Q(theta) through the same family the
+            # engine materialises during its own grid search.
+            compiled = family.materialize(
+                {name: draw(rng) for name, draw in samplers.items()}
+            )
         truth = simulate_latent(compiled, rng)
         working[response] = simulate_response(compiled, truth, rng)
         result = model.fit(working, **fit_kwargs)

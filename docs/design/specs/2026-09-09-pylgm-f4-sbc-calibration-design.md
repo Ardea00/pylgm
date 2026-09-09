@@ -213,18 +213,64 @@ phi-mixture of a scaled Besag and an IID part is proper by construction — full
 rank, zero constraints — so it was already sampleable in phase 1. `RW1`, `RW2`
 and `Besag` are the genuinely rank-deficient ones.
 
-### Phase 2 — full SBC over the joint prior
+### Phase 2 — full SBC over the joint prior *(done)*
 
-`hyperparameters="integrate"`, `θ̃` drawn from the declared priors (prerequisite 2),
-latent PIT only. This is honest SBC: under empirical Bayes the latent posterior
-is conditional on `θ̂` rather than marginalised, so the joint-prior version is
+`hyperparameters="integrate"`, `θ̃` drawn from the declared priors, latent PIT
+only. This is honest SBC: under empirical Bayes the latent posterior is
+conditional on `θ̂` rather than marginalised, so the joint-prior version is
 *expected* to fail under `"optimize"` — EB is not Bayes, and reporting that as a
 calibration defect would be a category error.
+
+**Prerequisite 2 dissolved.** The spec called for a `sample(rng)` on each of the
+three prior classes, with `PCBYM2Phi` needing Newton on its own
+`distance_derivative`. None of that was written. A numeric inverse CDF over
+`logpdf`, laid out on the parameter's *internal* scale with the Jacobian
+included, is shorter than one bespoke sampler and strictly better:
+
+- it truncates to the declared `lower`/`upper` for free, which is required for
+  correctness — the engine only ever searches inside the bounds, so the prior it
+  uses *is* the truncated one, and drawing from the untruncated prior would put
+  mass where the posterior cannot follow;
+- it works for any prior with a `logpdf`, including a user's own and the
+  graph-bound `PCBYM2Phi` that reaches the family already bound.
+
+`priors.py` is untouched. The grid is built once per hyperparameter rather than
+per draw — `logpdf` is scalar, and rebuilding a 4001-point grid inside the
+replicate loop costs more than every fit in that loop.
+
+**The finding.** Phase 2 immediately caught a real, attributable miscalibration:
+under `hyperparameters="integrate"`, the true latent marginal is a mixture over
+the θ grid, and `latent_strategy="gaussian"` reports only its first two moments.
+A moment-matched Gaussian has the right variance and the wrong shape, and the
+dispersion statistic sees it while the location statistic does not. At 512
+replicates on a Gaussian-likelihood IID model, worst p(dispersion): `gaussian`
+4e-10, `simplified_laplace` 9e-07, `laplace` 7e-07.
+
+Attributed rather than asserted, by two controls:
+
+1. **Tightening the hyperparameter's bounds** so the mixture collapses to
+   essentially one component restores calibration — which exonerates the prior
+   draw, the per-replicate rebuild of `Q(θ)`, and the integrate path, since a bug
+   in any of those would not care how wide the prior is.
+2. **Refining the integration grid** (`grid_step` 1.0 → 0.4, `radius` 3 → 8)
+   changes nothing: 2.6e-05 → 1.3e-05 for `gaussian`, 0.0021 → 0.0021 for
+   `simplified_laplace`. So the residual is the marginal *representation*, not
+   integration accuracy.
+
+Control 2 matters for the roadmap: this result does **not** argue for F5. A
+smarter hyperparameter grid would not have fixed it.
 
 ### Phase 3 — hyperparameter PIT
 
 Blocked on prerequisite 3 **and** on F5. Specified here so it is not rediscovered;
 not scheduled.
+
+Phase 2's finding sharpens the case for it. The same Gaussian-moment collapse
+that miscalibrates the *latent* marginals under `latent_strategy="gaussian"` is
+applied unconditionally to the *hyperparameter* marginals, on the natural scale,
+where the skew is worse. Phase 2 measured the size of that error for the latent
+field; there is no reason to expect the hyperparameter version to be smaller, and
+currently no way to check it.
 
 ## Architecture
 
