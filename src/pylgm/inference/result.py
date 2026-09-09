@@ -181,6 +181,7 @@ class LatentMarginals(Protocol):
     def variance(self) -> np.ndarray: ...
     @property
     def std(self) -> np.ndarray: ...
+    def cdf(self, x: np.ndarray) -> np.ndarray: ...
     def quantile(self, probability: float) -> np.ndarray: ...
 
 
@@ -302,6 +303,25 @@ class GaussianMarginals:
     @property
     def std(self) -> np.ndarray:
         return _readonly_array(np.sqrt(self._variance))
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        """Elementwise ``F_i(x_i)``, matching ``SkewNormalMarginals.cdf``.
+
+        A zero-variance component is a point mass, so its CDF is the step at the
+        mean; ``quantile`` already degrades gracefully there and this matches it
+        rather than dividing by zero.
+        """
+        x = np.asarray(x, dtype=float)
+        if x.shape != self._mean.shape:
+            raise ValueError("x must match the marginal shape")
+        degenerate = self._variance == 0.0
+        scale = np.where(degenerate, 1.0, np.sqrt(self._variance))
+        values = np.where(
+            degenerate,
+            (x >= self._mean).astype(float),
+            norm.cdf((x - self._mean) / scale),
+        )
+        return _readonly_array(values)
 
     def quantile(self, probability: float) -> np.ndarray:
         if not isinstance(probability, (int, float, np.number)) or not 0 < probability < 1:

@@ -4,7 +4,7 @@ __pycache__/
 .worktrees/
 site/
 dist/
-validation/
+/validation/
 .base/
 .base-ast/
 research/

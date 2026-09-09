@@ -15,6 +15,7 @@ PACKAGES = [
     "pylgm.inference",
     "pylgm.ir",
     "pylgm.optimization",
+    "pylgm.validation",
 ]
 
 
