@@ -411,7 +411,10 @@ def _hyper_model(prior=None, lower=None, upper=None):
 def test_sample_prior_reproduces_the_pc_precision_construction():
     """PCPrecision is Exp(lambda) on the KLD distance tau^-1/2, lambda =
     -log(alpha)/upper_sd. Pinning the construction, not just "it runs"."""
-    from scipy.stats import kstest
+    # A frozen distribution's cdf, not the ("expon", args=...) string form:
+    # newer scipy resolves the string to a raw special function that rejects
+    # loc/scale, so the string form fails on 3.12+ while passing on 3.11.
+    from scipy.stats import expon, kstest
 
     upper_sd, alpha = 1.0, 0.01
     prior = PCPrecision(upper_sd=upper_sd, alpha=alpha)
@@ -420,7 +423,7 @@ def test_sample_prior_reproduces_the_pc_precision_construction():
     draw = _PriorSampler(prior, bounds)          # what calibrate builds, once
     draws = np.array([draw(rng) for _ in range(4000)])
     rate = -np.log(alpha) / upper_sd
-    assert kstest(draws ** -0.5, "expon", args=(0.0, 1.0 / rate)).pvalue > 0.01
+    assert kstest(draws ** -0.5, expon(loc=0.0, scale=1.0 / rate).cdf).pvalue > 0.01
     # and the one-shot public helper agrees with it
     assert sample_prior(prior, bounds, np.random.default_rng(7)) == pytest.approx(
         _PriorSampler(prior, bounds)(np.random.default_rng(7))
@@ -434,7 +437,7 @@ def test_sample_prior_reproduces_a_gaussian_prior():
     rng = np.random.default_rng(0)
     draw = _PriorSampler(GaussianPrior(mean=0.5, precision=4.0), bounds)
     draws = np.array([draw(rng) for _ in range(4000)])
-    assert kstest(draws, "norm", args=(0.5, 0.5)).pvalue > 0.01
+    assert kstest(draws, norm(loc=0.5, scale=0.5).cdf).pvalue > 0.01
 
 
 def test_sample_prior_respects_the_declared_bounds():
