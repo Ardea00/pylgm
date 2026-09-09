@@ -686,9 +686,12 @@ class _BaseResult:
     def predictive_mean(self) -> np.ndarray:
         """Posterior mean of the linear predictor eta, offset included.
 
-        On the link scale, never the response scale -- ``offset + A x`` for
-        every result type, matching ``predictive_variance`` and R-INLA's
-        ``summary.linear.predictor``. ``fitted_mean`` is the response-scale
+        On the link scale, never the response scale -- the offset plus the
+        latent field's contribution, for every result type, matching
+        ``predictive_variance`` and R-INLA's ``summary.linear.predictor``.
+        (A model declaring a linear observation is scored through its
+        ``prediction_design``/``prediction_offset``, which are otherwise the
+        fitted ``design``/``offset``.) ``fitted_mean`` is the response-scale
         counterpart.
 
         Being offset-inclusive and link-scaled is what makes this the term to
@@ -769,32 +772,55 @@ class _BaseResult:
             raise NotImplementedError(_NO_POSTERIOR)
         return linear_combinations_from(self._mean, self._covariance, weights)
 
-    def predict(self, new_data):
+    def predict(self, new_data, outcome: str | None = None):
         """Score new rows against this result's latent posterior.
 
         Scores against whatever posterior ``self.mean``/``self.covariance``
         carry -- for ``INLAResult`` that is the hyperparameter-integrated
         posterior (marginalized over the hyperparameter grid), not a
         posterior conditional on a single hyperparameter value.
+
+        ``outcome`` selects the sub-model on a joint result; it is required
+        there and rejected on a single-response result.
         """
-        from pylgm.inference.prediction import predict_from, predict_from_sparse
+        from pylgm.inference.prediction import (
+            JointPredictionContext, predict_from, predict_from_sparse,
+        )
+
+        context = self.prediction_context
+        if isinstance(context, JointPredictionContext):
+            if outcome is None:
+                raise ValueError(
+                    "predict() on a joint result requires outcome=, one of "
+                    f"{context.outcomes}"
+                )
+            if outcome not in context.contexts:
+                raise ValueError(
+                    f"predict() got unknown outcome {outcome!r}; "
+                    f"this joint model has {context.outcomes}"
+                )
+            context = context.contexts[outcome]
+        elif outcome is not None:
+            raise ValueError(
+                "predict() got outcome=, but this result is not a joint model"
+            )
 
         if self._covariance is None:
             sparse_posterior = getattr(self, "_sparse_posterior", None)
             if sparse_posterior is None:
                 raise NotImplementedError(_NO_POSTERIOR)
-            if self.prediction_context is None:
+            if context is None:
                 raise ValueError(
                     "this result carries no prediction context; predict() is available "
                     "on results produced by LGM.fit"
                 )
-            return predict_from_sparse(self.prediction_context, self.mean, sparse_posterior, new_data)
-        if self.prediction_context is None:
+            return predict_from_sparse(context, self.mean, sparse_posterior, new_data)
+        if context is None:
             raise ValueError(
                 "this result carries no prediction context; predict() is available "
                 "on results produced by LGM.fit"
             )
-        return predict_from(self.prediction_context, self.mean, self.covariance, new_data)
+        return predict_from(context, self.mean, self.covariance, new_data)
 
 
 @dataclass(frozen=True, init=False)

@@ -192,7 +192,8 @@ No change to the `LatentBlock` / `CompiledLGM` precision contract.
 - Schur block scales with the **constraint + fixed-effect count**, not `n`
   (`O(S+T)` for space-time Type IV) — dense but bounded well below the latent
   dimension.
-- Space-time constraint-basis SVD (`_interaction_constraints`) stays
-  one-time-dense at compile; a documented ceiling for very large `S·T`.
+- Space-time constraint-basis SVD (now `kron_null_constraints` in
+  `src/pylgm/effects/kronecker.py`) stays one-time-dense at compile; a
+  documented ceiling for very large `S·T`.
 - Posterior **variances** unavailable on the sparse path until E-sparse-C.
 - BYM2 not sparse until E-sparse-C (augmented Riebler reformulation).

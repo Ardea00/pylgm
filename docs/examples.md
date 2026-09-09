@@ -38,6 +38,12 @@ rather than remembered.
 | [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | `SAR` reproducing Anselin's published Columbus results on real contiguity data |
 | [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | `DynamicSpatialPanel` with one network per year, on 48 US states |
 
+## Effect modifiers (`weights`, `copy`, `replicate`, `group`)
+
+| Example | Shows |
+|---|---|
+| [`grouped_panel`](https://github.com/Ardea00/pylgm/tree/main/examples/grouped_panel) | `Grouped` vs `Replicated` — a spatial field whose yearly copies are tied by an `AR1`, cutting latent error ~25% against independent copies by borrowing strength across years |
+
 ## Time, frequency and forecasting
 
 | Example | Shows |

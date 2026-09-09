@@ -13,11 +13,28 @@ For the precise semantics of each shipped feature, follow the links into the
   on the Laplace engine, with fixed or estimated dispersion `φ`. See
   [likelihoods](likelihoods.md).
 - **Effects** — `Fixed`, `IID`, `RW1`/`RW2`, stationary `AR1` (optionally
-  **group-wise**: one independent series per panel unit, sharing `ρ` and
+  **replicated**: one independent series per panel unit, sharing `ρ` and
   `precision`), the drifting `Seasonal` pattern, the `MIDAS`
   mixed-frequency smooth-lag effect and its restricted (parametric)
   `MIDASParametric` counterpart (exp-Almon / Beta lag kernels), and the
   Knorr-Held `SpaceTime` interaction (Types I–IV). See [effects](effects.md).
+- **Effect modifiers** — R-INLA expresses `weights`, `copy`, `replicate` and
+  `group` as arguments of one `f()` call; pyLGM ships them as composable
+  wrappers, so any indexed effect gains them without each effect
+  reimplementing four validation paths. `Weighted(effect, by)` scales the
+  design by a column (spatially-varying coefficients); `Copy(name, index,
+  scale)` lets one latent field enter a predictor twice at different indices,
+  optionally under an estimated scale; `Replicated(effect, over)` gives `R`
+  independent copies sharing every hyperparameter (`I_R ⊗ Q`); and
+  `Grouped(effect, over, structure)` gives `G` *correlated* copies tied by a
+  between-group precision (`Q_S ⊗ Q_E`), with `IIDStructure`, `AR1Structure`,
+  `RW1Structure`/`RW2Structure` and `BesagStructure` available for `Q_S`. The
+  three that map onto Knorr-Held's interaction types reproduce `SpaceTime`
+  I–IV, which is how the composition is checked. Each modifier still produces
+  exactly one latent block, so inference is untouched. See
+  [effects](effects.md#weighted-effects), and
+  [research status](research-status.md) for what is and is not verified.
+
 - **Hybrid composition** — a mixed-frequency `MIDAS` term, a spatial `BYM2`
   term, and a temporal `AR1` term sum through `+` into one latent field that
   fits and predicts, demonstrated end to end in
@@ -86,6 +103,28 @@ For the precise semantics of each shipped feature, follow the links into the
   `result.diagnostics["hyperparameters_at_bound"]` and warned about, because a
   pinned estimate means the bound (often a default derived from `initial`)
   rather than the data is setting the value.
+
+> **Joint models are research-grade and live on the `research-tier` branch, not
+> `main`.** They are tested and reviewed, but validated only internally and
+> against MCMC on *simulated* data -- no published result on real data has been
+> reproduced, and `latent_strategy="laplace"` is known to degrade on them. See
+> [research status](research-status.md) for exactly what is and is not
+> established.
+
+- **Joint multi-likelihood models** — `Joint` stacks several `LGM` sub-models
+  (each with its own response, likelihood, offset, and predictor) into one
+  fit, with `Shared` letting one latent field enter more than one sub-model
+  under a per-sub-model scaling, including the Knorr-Held & Best `(delta,
+  delta⁻¹)` shared-component pairing for exactly two sub-models. Fits by
+  `engine="laplace"` only; per-outcome prediction via
+  `result.predict(new_data, outcome=...)`. This covers the *scaling* half of
+  R-INLA's `copy` — a shared field entering another sub-model under an
+  estimated multiplicative scale — but the copied field's own hyperparameters
+  (precision, rho, phi, ...) must stay fixed, unlike `copy`, which estimates
+  those too. It also does **not** cover off-block-diagonal precision coupling
+  (coregionalization) — see [joint models](joint-models.md#not-supported-yet).
+  `copy` and `replicate` *within* a single sub-model shipped separately, as the
+  `Copy` and `Replicated` modifiers above.
 
 ## Breaking changes in 0.6
 

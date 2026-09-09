@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 from typing import TypeAlias
+import warnings
 
 from pylgm.parameters import Hyperparameter
 
@@ -109,23 +110,47 @@ class RW2(_ComposableEffect):
 class AR1(_ComposableEffect):
     """A stationary first-order autoregressive latent effect.
 
-    With ``group`` set, the effect is one independent AR1 series per level of
-    that column -- the panel-econometrics case (a separate series per firm,
-    country, or region) -- sharing ``precision`` and ``rho`` across groups but
-    not their realizations.
+    With ``replicate`` set, the effect is one independent AR1 series per level
+    of that column -- the panel-econometrics case (a separate series per firm,
+    country, or region) -- sharing ``precision`` and ``rho`` across replicates
+    but not their realizations. This is R-INLA's ``f(index, model=...,
+    replicate=r)``; it is unrelated to R-INLA's own ``group``, which means
+    *correlated* copies with a between-group structure.
+
+    ``group`` is the deprecated former name for ``replicate`` -- kept for
+    backward compatibility and folded into ``replicate`` with a
+    ``DeprecationWarning``.
     """
 
     name: str
     index: str
     precision: float | Hyperparameter = 1.0
     rho: float | Hyperparameter = 0.5
+    replicate: str | None = None
     group: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
         object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if self.replicate is not None and self.group is not None:
+            raise ValueError(
+                "AR1 takes either `replicate` or the deprecated `group`, not both"
+            )
         if self.group is not None:
             object.__setattr__(self, "group", _non_empty_string(self.group, "group"))
+            warnings.warn(
+                "AR1(group=) is R-INLA's `replicate` -- independent series sharing "
+                "hyperparameters -- under the wrong name. Use AR1(replicate=) "
+                "instead. R-INLA's own `group` means correlated copies with a "
+                "between-group structure, which this is not.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            object.__setattr__(self, "replicate", self.group)
+        elif self.replicate is not None:
+            object.__setattr__(
+                self, "replicate", _non_empty_string(self.replicate, "replicate")
+            )
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )
@@ -438,6 +463,228 @@ class SpaceTime(_ComposableEffect):
         return self.space
 
 
+@dataclass(frozen=True)
+class Copy(_ComposableEffect):
+    """A second occurrence of an existing latent field, at a different index.
+
+    ``Copy("u", index="j", scale=beta)`` adds ``beta * A_j`` to the columns of
+    the block named ``u``, so the field ``u`` enters the predictor twice: once
+    at its own index and once at ``j``, scaled. This is R-INLA's
+    ``f(j, copy="u", hyper=list(beta=...))``.
+
+    It produces no block of its own -- there is one latent field, entering
+    twice -- so ``name`` is the **target** block's name, and every compiler
+    site that reads ``effect.name`` then refers to the block this copy feeds.
+
+    ``scale`` may be a ``Hyperparameter``, which makes the target block's design
+    depend on it; the compiler registers it as a ParametricDesignBlock.
+    """
+
+    name: str
+    index: str
+    scale: float | Hyperparameter = 1.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        object.__setattr__(self, "index", _non_empty_string(self.index, "index"))
+        if not isinstance(self.scale, (int, float, Hyperparameter)) or isinstance(
+            self.scale, bool
+        ):
+            raise TypeError(
+                f"Copy scale must be a real number or a Hyperparameter, got "
+                f"{type(self.scale).__name__}"
+            )
+
+
+@dataclass(frozen=True)
+class Weighted(_ComposableEffect):
+    """An indexed latent effect modulated by a numeric column.
+
+    The design becomes ``diag(by) A`` instead of the plain incidence ``A``, so
+    the effect's contribution to the predictor is ``by_i * u_{index(i)}``. This
+    is R-INLA's ``f(index, weights, model=...)``, and it is what a
+    spatially-varying coefficient needs: a covariate whose effect varies over a
+    latent field.
+
+    Precision, labels and constraints are the inner effect's, untouched --
+    weighting changes how the field enters the predictor, not the field itself.
+    """
+
+    effect: object
+    by: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                "Weighted cannot wrap a Copy: a copy is a term referencing "
+                "another term, not an indexed effect of its own. Weight the "
+                "target effect instead."
+            )
+        if isinstance(self.effect, Weighted):
+            raise TypeError(
+                "Weighted effect is already weighted; two weight columns on one "
+                "block is their product, so multiply them into a single column"
+            )
+        # Replicated and Grouped have no `index` of their own -- same reason
+        # Weighted itself doesn't (see Replicated.__post_init__): giving one an
+        # index would silently make joint.Shared's `hasattr(effect, "index")`
+        # gate accept Shared(Replicated(...)) / Shared(Grouped(...)), which is
+        # not supported. So they are named explicitly here rather than caught
+        # by the generic hasattr check.
+        if not hasattr(self.effect, "index") and not isinstance(
+            self.effect, (Replicated, Grouped)
+        ):
+            raise TypeError(
+                f"Weighted requires an indexed effect, got "
+                f"{type(self.effect).__name__}, which has no index. A Fixed effect "
+                "builds its design from a formula -- multiply the covariate into "
+                "the formula instead."
+            )
+        object.__setattr__(self, "by", _non_empty_string(self.by, "by"))
+
+    @property
+    def name(self) -> str:
+        return self.effect.name
+
+
+@dataclass(frozen=True)
+class Grouped(_ComposableEffect):
+    """``G`` *correlated* copies of an effect, with a between-group structure.
+
+    ``Grouped(Besag("s", index="district", graph=g), over="year",
+    structure=AR1Structure(rho=0.8))`` is one spatial field per year, with the
+    years tied together by an AR1. This is R-INLA's ``f(index, model=...,
+    group=g, control.group=list(model=...))``.
+
+    The precision becomes ``Q_S (x) Q_E``. Contrast ``Replicated``, whose
+    copies are independent: ``I_R (x) Q_E``, the special case where the
+    between-group structure is the identity.
+
+    Constraints follow the null space of the product, which is *not* one
+    constraint per group: ``null(Q_S (x) Q_E)`` picks up ``null(Q_S) (x) R^E``
+    as well, and the two spans overlap.
+    """
+
+    effect: object
+    over: str
+    structure: object
+
+    def __post_init__(self) -> None:
+        if isinstance(self.effect, Grouped):
+            raise TypeError(
+                "Grouped effect is already grouped; two group columns is one "
+                "group over their cross product, so combine them into a single "
+                "column"
+            )
+        if isinstance(self.effect, Replicated):
+            raise TypeError(
+                "Grouped cannot wrap a Replicated: R-INLA allows `group` and "
+                "`replicate` on one term, but pyLGM does not, because the "
+                "labels would become 'replicate@group@level' and the predict "
+                "path resolves exactly one pair. Use one or the other."
+            )
+        object.__setattr__(self, "over", _non_empty_string(self.over, "over"))
+        if not all(
+            hasattr(self.structure, method)
+            for method in ("levels", "precision", "null_basis")
+        ):
+            raise TypeError(
+                "Grouped requires a between-group structure (IIDStructure, "
+                "AR1Structure, RW1Structure, RW2Structure, BesagStructure), got "
+                f"{type(self.structure).__name__}"
+            )
+        # Resolve the index THROUGH a Weighted wrapper, for the same reason
+        # Replicated does: giving Weighted an `index` of its own turns
+        # joint.Shared's "wrapper, cannot be shared" guard into dead code.
+        target = self.effect.effect if isinstance(self.effect, Weighted) else self.effect
+        if not hasattr(target, "index"):
+            raise TypeError(
+                f"Grouped requires an indexed effect, got "
+                f"{type(self.effect).__name__}, which has no index."
+            )
+        if getattr(target, "replicate", None) is not None:
+            raise TypeError(
+                f"{type(target).__name__} already replicates itself through "
+                "its own `replicate` argument; combining it with a group would "
+                "give two copy mechanisms on one effect with no defined "
+                "interaction"
+            )
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                "Grouped cannot wrap a Copy: a copy is a term referencing "
+                "another term, not an indexed effect of its own. Group the "
+                "target effect instead."
+            )
+
+    @property
+    def name(self) -> str:
+        return self.effect.name
+
+
+@dataclass(frozen=True)
+class Replicated(_ComposableEffect):
+    """``R`` independent copies of an effect, sharing every hyperparameter.
+
+    ``Replicated(AR1("t", index="year"), over="firm")`` is one AR1 series per
+    firm: the firms share ``rho`` and ``precision`` but not their realizations.
+    This is R-INLA's ``f(index, model=..., replicate=r)``.
+
+    The precision becomes ``I_R (x) Q``, the design is indexed on
+    ``(replicate, level)`` pairs, and a constrained inner effect gets **one
+    constraint per replicate** -- a single shared constraint would leave
+    ``R-1`` directions unidentified while still fitting.
+
+    Not to be confused with R-INLA's ``group``, which is *correlated* copies
+    with a between-group structure; that is a separate modifier.
+    """
+
+    effect: object
+    over: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.effect, Replicated):
+            raise TypeError(
+                "Replicated effect is already replicated; two replicate columns "
+                "is one replicate over their cross product, so combine them into "
+                "a single column"
+            )
+        if isinstance(self.effect, Grouped):
+            raise TypeError(
+                "Replicated cannot wrap a Grouped: R-INLA allows `group` and "
+                "`replicate` on one term, but pyLGM does not, because the "
+                "labels would become 'replicate@group@level' and the predict "
+                "path resolves exactly one pair. Use one or the other."
+            )
+        # Resolve the index THROUGH a Weighted wrapper rather than giving
+        # Weighted an `index` of its own: joint.Shared distinguishes "wrapper,
+        # cannot be shared" from "no index at all" by hasattr(effect, "index"),
+        # so an index on Weighted turns that guard into dead code. Same unwrap
+        # pattern as compiler._build_effect_block and data.spark._required_columns.
+        target = self.effect.effect if isinstance(self.effect, Weighted) else self.effect
+        if not hasattr(target, "index"):
+            raise TypeError(
+                f"Replicated requires an indexed effect, got "
+                f"{type(self.effect).__name__}, which has no index."
+            )
+        if getattr(target, "replicate", None) is not None:
+            raise TypeError(
+                f"{type(target).__name__} already replicates itself through "
+                "its own `replicate` argument; wrapping it would give two "
+                "replication mechanisms on one effect with no defined interaction"
+            )
+        if isinstance(self.effect, Copy):
+            raise TypeError(
+                "Replicated cannot wrap a Copy: a copy is a term referencing "
+                "another term, not an indexed effect of its own. Replicate the "
+                "target effect instead."
+            )
+        object.__setattr__(self, "over", _non_empty_string(self.over, "over"))
+
+    @property
+    def name(self) -> str:
+        return self.effect.name
+
+
 EffectSpec: TypeAlias = (
     Fixed
     | IID
@@ -450,9 +697,13 @@ EffectSpec: TypeAlias = (
     | SAR
     | DynamicSpatialPanel
     | BYM2
+    | Copy
     | MIDAS
     | MIDASParametric
     | SpaceTime
+    | Weighted
+    | Replicated
+    | Grouped
 )
 
 
@@ -474,8 +725,11 @@ class Predictor:
             raise TypeError(
                 f"effects must contain only effect specifications; got {offenders}"
             )
-        names = [effect.name for effect in effects]
-        if len(names) != len(set(names)):
+        # Copy effects reference existing blocks and are not blocks themselves,
+        # so they may share names with their targets. Only check uniqueness among
+        # non-Copy effects: each block should appear exactly once.
+        non_copy_names = [effect.name for effect in effects if not isinstance(effect, Copy)]
+        if len(non_copy_names) != len(set(non_copy_names)):
             raise ValueError("effect names must be unique")
         object.__setattr__(self, "effects", effects)
 
@@ -492,15 +746,19 @@ __all__ = [
     "Seasonal",
     "Besag",
     "BYM2",
+    "Copy",
     "DynamicSpatialPanel",
     "Fixed",
+    "Grouped",
     "IID",
     "MIDAS",
     "MIDASParametric",
     "Predictor",
     "ProperCAR",
+    "Replicated",
     "RW1",
     "RW2",
     "SAR",
     "SpaceTime",
+    "Weighted",
 ]

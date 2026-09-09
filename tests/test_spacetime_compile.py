@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pylgm import Besag, Fixed, Gaussian, Hyperparameter, LGM, RW1, SpaceTime
+from pylgm import Besag, Fixed, Gaussian, Hyperparameter, LGM, RW1, SpaceTime, Weighted
 from pylgm.priors import PCPrecision
 
 GRAPH = {"a": ["b"], "b": ["a", "c"], "c": ["b"]}
@@ -62,6 +62,40 @@ def test_warns_when_a_main_effect_is_missing():
     )
     with pytest.warns(UserWarning, match="st"):
         model.fit(_frame())
+
+
+def test_warns_when_the_missing_main_effect_is_wrapped_in_weighted():
+    """A Weighted(SpaceTime(...)) must still get the missing-companion warning:
+    weighting changes how the field enters the predictor, not what kind of
+    effect it is, so the check must unwrap before deciding SpaceTime-ness."""
+    frame = _frame()
+    frame["z"] = 1.0
+    model = LGM(
+        response="y",
+        predictor=Fixed("1") + Weighted(
+            SpaceTime("st", space="area", time="t", graph=GRAPH, interaction="IV"), by="z"
+        ),
+        likelihood=Gaussian(sigma=0.5),
+    )
+    with pytest.warns(UserWarning, match="st"):
+        model.fit(frame)
+
+
+def test_no_warning_when_a_weighted_main_effect_is_present():
+    """A Weighted(Besag(...)) main effect must count toward satisfying the
+    SpaceTime interaction's identifiability check, same as a bare Besag."""
+    frame = _frame()
+    frame["z"] = 1.0
+    predictor = (
+        Fixed("1")
+        + Weighted(Besag("area", index="area", graph=GRAPH), by="z")
+        + RW1("period", index="t")
+        + SpaceTime("st", space="area", time="t", graph=GRAPH, interaction="IV", order=1)
+    )
+    model = LGM(response="y", predictor=predictor, likelihood=Gaussian(sigma=0.5))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.fit(frame)  # must not raise a converted warning
 
 
 def test_no_warning_when_both_main_effects_present():

@@ -29,10 +29,15 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
         "Pipeline",
         "Experiment",
         "ComparisonResult",
+        "Copy",
         "CandidateFailure",
         "FailureCause",
         "WeibullSurv",
         "ExponentialSurv",
+        "Joint",
+        "Shared",
+        "Replicated",
+        "Weighted",
     }
 
     assert expected.issubset(set(pylgm.__all__))
@@ -169,6 +174,30 @@ def test_directed_network_sar_example_estimates_rho():
     )
     assert completed.returncode == 0, completed.stderr
     assert "estimated rho=" in completed.stdout
+
+
+def test_grouped_panel_example_beats_independent_copies():
+    """The example's whole claim: correlating the copies recovers more.
+
+    Asserting only that it runs would pass with Grouped composing an identity
+    outer factor -- the failure this project has shipped before -- so the
+    assertions read the reported improvement and the marginal-likelihood
+    comparison out of the output.
+    """
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    completed = subprocess.run(
+        [sys.executable, str(root / "examples/grouped_panel/run.py")],
+        capture_output=True, check=False, text=True, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Replicated (independent):" in completed.stdout
+    assert "Grouped    (AR1-correlated):" in completed.stdout
+    assert "higher marginal likelihood: True" in completed.stdout
+    improvement = float(
+        completed.stdout.split("cuts the latent error by ")[1].split("%")[0]
+    )
+    assert improvement > 10.0, completed.stdout
 
 
 def test_survival_duration_example_reports_hazard_ratio():

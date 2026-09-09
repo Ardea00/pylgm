@@ -16,6 +16,7 @@ from pylgm.inference import GaussianResult, INLAResult, LaplaceResult, fit_gauss
 from pylgm.likelihoods import Gaussian
 from pylgm.optimization.empirical_bayes import OptimizationBounds, optimize_empirical_bayes
 from pylgm.optimization.inla import integrate_inla
+from pylgm.observations import LinearConstraint, LinearObservation
 
 
 _ROW_KEY = "__pylgm_row__"
@@ -117,12 +118,13 @@ def _context_with_fitted_likelihood(context, result, model):
 
 
 def _context_with_fitted_weights(context, result):
-    """Substitute fitted shape estimates into parametric-MIDAS design entries.
+    """Substitute fitted estimates into parametric-MIDAS and copy-scale entries.
 
     ``build_prediction_context`` runs on a ``compile_lgm`` result, which resolves
-    an estimated shape Hyperparameter to its ``.initial`` (the starting guess). A
-    parametric-MIDAS design is a function of that shape, so predict() would
-    otherwise aggregate new rows with the initial weights, not the fitted ones.
+    an estimated Hyperparameter (a MIDAS shape, or a ``Copy`` scale) to its
+    ``.initial`` (the starting guess). A parametric-MIDAS design and a copy's
+    folded incidence are both functions of that value, so predict() would
+    otherwise aggregate new rows with the initial value, not the fitted one.
     Mirror ``_context_with_fitted_likelihood`` and swap in the estimates. Under
     ``hyperparameters="integrate"`` the point estimate lives in the INLA
     marginal table (``result.hyperparameters`` is ``None`` there), so check that
@@ -147,6 +149,14 @@ def _context_with_fitted_weights(context, result):
             theta = tuple(s if not isinstance(s, str) else _resolve(s) for s in theta_spec)
             new_entries.append((kind, (name, columns, kernel, theta)))
             changed = True
+        elif kind == "copied":
+            base_entry, copies = payload
+            new_copies = tuple(
+                (index, labels, spec, _resolve(spec) if isinstance(spec, str) else value)
+                for index, labels, spec, value in copies
+            )
+            new_entries.append((kind, (base_entry, new_copies)))
+            changed = True
         else:
             new_entries.append((kind, payload))
     if not changed:
@@ -162,6 +172,7 @@ def _rebuild_result(
     hyperparameters: Mapping[str, float] | None = None,
     diagnostics: Mapping[str, object] | None = None,
     prediction_context: object | None = None,
+    reorder_criteria: bool = True,
 ) -> GaussianResult | LaplaceResult | INLAResult:
     """Rebuild a result of the same type, optionally reordering rows or overriding metadata.
 
@@ -205,7 +216,7 @@ def _rebuild_result(
         )
         criteria = (
             result.criteria.reordered(caller_order)
-            if caller_order is not None else result.criteria
+            if caller_order is not None and reorder_criteria else result.criteria
         )
         return INLAResult(
             hyperparameter_marginals=result.hyperparameter_marginals(),
@@ -231,9 +242,16 @@ def _rebuild_result(
 
 
 def _align_predictions_with_source_rows(
-    result: GaussianResult | LaplaceResult | INLAResult, source_positions: np.ndarray
+    result: GaussianResult | LaplaceResult | INLAResult,
+    source_positions: np.ndarray,
+    *,
+    reorder_criteria: bool = True,
 ) -> GaussianResult | LaplaceResult | INLAResult:
-    return _rebuild_result(result, caller_order=np.argsort(source_positions))
+    return _rebuild_result(
+        result,
+        caller_order=np.argsort(source_positions),
+        reorder_criteria=reorder_criteria,
+    )
 
 
 def _parameters_at_bound(
@@ -336,6 +354,8 @@ class LGM:
         max_driver_rows: int | None = 100_000,
         hyperparameters: str = "optimize",
         latent_strategy: str = "gaussian",
+        observations: object = (),
+        constraints: object = (),
     ):
         """Compile and fit this model with an explicitly selected engine.
 
@@ -355,7 +375,26 @@ class LGM:
         skew-normal marginals (Rue-Martino-Chopin 2009), and ``"laplace"``
         fits full-Laplace tabulated marginals (unconstrained models only);
         both non-``"gaussian"`` strategies require ``hyperparameters="integrate"``.
+
+        For a Gaussian model, ``observations`` may contain ``LinearObservation``
+        blocks whose operators aggregate the predictor-grid rows, and ``constraints``
+        may contain exact ``LinearConstraint`` equalities on that same grid. Operator
+        columns follow the caller's frame order. When either is supplied, the response
+        column may be absent entirely.
         """
+        try:
+            observations = tuple(observations)
+            constraints = tuple(constraints)
+        except TypeError as error:
+            raise TypeError("observations and constraints must be iterable") from error
+        if any(not isinstance(item, LinearObservation) for item in observations):
+            raise TypeError("observations must contain only LinearObservation instances")
+        if any(not isinstance(item, LinearConstraint) for item in constraints):
+            raise TypeError("constraints must contain only LinearConstraint instances")
+        if (observations or constraints) and not isinstance(self.likelihood, Gaussian):
+            raise UnsupportedEngineError(
+                "linear observations and predictor constraints require a Gaussian likelihood"
+            )
         if hyperparameters not in ("optimize", "integrate"):
             raise ValueError(
                 f"hyperparameters must be 'optimize' or 'integrate', got {hyperparameters!r}"
@@ -371,12 +410,17 @@ class LGM:
             )
         if isinstance(frame, pd.DataFrame):
             return self._fit_pandas(
-                frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy
+                frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy,
+                observations=observations, constraints=constraints,
             )
 
         from pylgm.data.spark import is_spark_dataframe
 
         if is_spark_dataframe(frame):
+            if observations or constraints:
+                raise UnsupportedEngineError(
+                    "linear observations and predictor constraints currently require pandas input"
+                )
             return self._fit_spark(
                 frame, engine, max_driver_rows=max_driver_rows,
                 hyperparameters=hyperparameters, latent_strategy=latent_strategy,
@@ -458,8 +502,12 @@ class LGM:
     def _fit_pandas(
         self, frame: pd.DataFrame, engine: str, *,
         hyperparameters: str = "optimize", latent_strategy: str = "gaussian",
+        observations: tuple[LinearObservation, ...] = (),
+        constraints: tuple[LinearConstraint, ...] = (),
     ) -> GaussianResult | LaplaceResult | INLAResult:
         prepared = frame.copy(deep=True)
+        if (observations or constraints) and self.response not in prepared.columns:
+            prepared[self.response] = np.nan
         time = self.time
         if time is None:
             if _ROW_KEY in prepared.columns:
@@ -468,11 +516,24 @@ class LGM:
             time = _ROW_KEY
 
         data = DataConfig(time=time, response=self.response, panel=self.panel)
-        panel = CanonicalPanel.from_frame(prepared, data)
+        panel = CanonicalPanel.from_frame(
+            prepared, data, require_observed=not (observations or constraints)
+        )
 
         from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
+        from pylgm.observations import (
+            project_gaussian_family,
+            project_gaussian_model,
+            reorder_linear_inputs,
+        )
+
+        observations, constraints = reorder_linear_inputs(
+            observations, constraints, panel.source_positions
+        )
 
         family = compile_family(self, panel)
+        if family is not None and (observations or constraints):
+            family = project_gaussian_family(family, observations, constraints)
         if hyperparameters == "integrate":
             if family is None:
                 raise ValueError(
@@ -482,15 +543,23 @@ class LGM:
             compiled = compile_lgm(self, panel)
         elif family is None:
             compiled = compile_lgm(self, panel)
-            result = self._engine(engine)(compiled)
+            fitted = (
+                project_gaussian_model(compiled, observations, constraints)
+                if observations or constraints else compiled
+            )
+            result = self._engine(engine)(fitted)
         else:
             result = self._run_empirical_bayes(family, engine)
             compiled = compile_lgm(self, panel)
-        context = build_prediction_context(self, panel, compiled)
+        context = build_prediction_context(self, panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
         context = _context_with_fitted_weights(context, result)
         result = _rebuild_result(result, prediction_context=context)
-        return _align_predictions_with_source_rows(result, panel.source_positions)
+        return _align_predictions_with_source_rows(
+            result,
+            panel.source_positions,
+            reorder_criteria=not (observations or constraints),
+        )
 
     def _fit_spark(
         self,
@@ -521,7 +590,7 @@ class LGM:
         else:
             result = self._run_empirical_bayes(family, engine)
             compiled = compile_lgm(self, canonical.panel)
-        context = build_prediction_context(self, canonical.panel, compiled)
+        context = build_prediction_context(self, canonical.panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
         context = _context_with_fitted_weights(context, result)
         return _rebuild_result(

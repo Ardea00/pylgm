@@ -231,7 +231,7 @@ def _build_effect(config: _EffectModelConfig, base_dir: Path) -> object:
     if config.type == "ar1":
         precision = 1.0 if config.precision is None else config.precision
         rho = 0.5 if config.rho is None else config.rho
-        return AR1(config.name, config.index, precision, rho, config.group)
+        return AR1(config.name, config.index, precision, rho, replicate=config.group)
     if config.type == "seasonal":
         precision = 1.0 if config.precision is None else config.precision
         ridge = 1e-6 if config.ridge is None else config.ridge

@@ -7,3 +7,5 @@ dist/
 validation/
 .base/
 .base-ast/
+research/
+examples/regional_gdp_nowcast

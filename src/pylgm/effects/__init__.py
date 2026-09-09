@@ -8,6 +8,7 @@ from pylgm.effects.iid import build_iid
 from pylgm.effects.midas import build_midas, build_midas_parametric, midas_penalty, midas_weights
 from pylgm.effects.proper_car import build_proper_car
 from pylgm.effects.random_walk import build_random_walk, difference_operator
+from pylgm.effects.replicate import replicate_levels, replicated_block
 from pylgm.effects.sar import build_dynamic_spatial_panel, build_sar
 from pylgm.effects.sdpd_forecast import forecast_dynamic_spatial_panel
 from pylgm.effects.spacetime import build_spacetime
@@ -16,35 +17,55 @@ from pylgm.effects.spec import (
     Seasonal,
     Besag,
     BYM2,
+    Copy,
     DynamicSpatialPanel,
     Fixed,
+    Grouped,
     IID,
     MIDAS,
     MIDASParametric,
     Predictor,
     ProperCAR,
+    Replicated,
     RW1,
     RW2,
     SAR,
     SpaceTime,
+    Weighted,
+)
+from pylgm.effects.structures import (
+    AR1Structure,
+    BesagStructure,
+    IIDStructure,
+    RW1Structure,
+    RW2Structure,
 )
 
 __all__ = [
     "AR1",
+    "AR1Structure",
     "Seasonal",
     "Besag",
+    "BesagStructure",
     "BYM2",
+    "Copy",
     "DynamicSpatialPanel",
     "Fixed",
+    "Grouped",
     "IID",
+    "IIDStructure",
     "MIDAS",
     "MIDASParametric",
     "Predictor",
     "ProperCAR",
+    "Replicated",
     "RW1",
+    "RW1Structure",
     "RW2",
+    "RW2Structure",
     "SAR",
     "SpaceTime",
+    "Weighted",
     "build_ar1",
     "build_seasonal",
     "seasonal_penalty",
@@ -63,6 +84,8 @@ __all__ = [
     "forecast_dynamic_spatial_panel",
     "midas_penalty",
     "midas_weights",
+    "replicate_levels",
+    "replicated_block",
     "canonical_graph",
     "load_graph_file",
     "normalize_graph",

@@ -39,6 +39,9 @@ nav:
       - Likelihoods: likelihoods.md
       - Effects: effects.md
       - Spatial effects: spatial-effects.md
+      - Joint multi-likelihood models: joint-models.md
+      - Linear observations: linear-observations.md
+      - Research status: research-status.md
       - Empirical Bayes and priors: empirical-bayes.md
       - INLA integration: inla.md
       - Prediction: prediction.md

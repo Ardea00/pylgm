@@ -17,7 +17,7 @@ from formulaic import Formula
 
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
-from pylgm.effects import Fixed
+from pylgm.effects import Fixed, Weighted
 from pylgm.exceptions import DataContractError
 
 
@@ -53,8 +53,11 @@ def _required_columns(model) -> set[str]:
     for effect in model.predictor.effects:
         if isinstance(effect, Fixed):
             required.update(Formula(effect.formula).required_variables)
-        else:
-            required.add(effect.index)
+            continue
+        if isinstance(effect, Weighted):
+            required.add(effect.by)
+            effect = effect.effect
+        required.add(effect.index)
     return required
 
 
