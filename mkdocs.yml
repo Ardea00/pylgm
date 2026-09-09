@@ -42,6 +42,7 @@ nav:
       - Empirical Bayes and priors: empirical-bayes.md
       - INLA integration: inla.md
       - Prediction: prediction.md
+      - Combining with gradient boosting: boosting.md
       - Model comparison and backtesting: model-comparison.md
       - Spark: spark.md
   - Examples:

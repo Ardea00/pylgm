@@ -389,6 +389,12 @@ class Prediction:
 
     @property
     def predictive_mean(self) -> np.ndarray:
+        """Linear predictor eta for ``new_data``, on the link scale, offset included.
+
+        Same contract as the fitted result's property of this name, so the two
+        compose: a margin taken from the fit and one taken from ``predict()``
+        are on the same scale.
+        """
         return _readonly_array(self._predictive_mean)
 
     @property

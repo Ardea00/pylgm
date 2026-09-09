@@ -684,6 +684,19 @@ class _BaseResult:
 
     @property
     def predictive_mean(self) -> np.ndarray:
+        """Posterior mean of the linear predictor eta, offset included.
+
+        On the link scale, never the response scale -- ``offset + A x`` for
+        every result type, matching ``predictive_variance`` and R-INLA's
+        ``summary.linear.predictor``. ``fitted_mean`` is the response-scale
+        counterpart.
+
+        Being offset-inclusive and link-scaled is what makes this the term to
+        hand an external learner as a starting margin (XGBoost
+        ``base_margin``, LightGBM ``init_score``) when boosting on top of a
+        fit; the reverse direction, boosting first, comes back in through
+        ``LGM(offset=...)``. See ``examples/boosted_offset``.
+        """
         return _readonly_array(self._predictive_mean)
 
     @property
