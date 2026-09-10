@@ -23,7 +23,7 @@ def _persistence_variance(fold: FoldData) -> float:
     squared_errors: list[float] = []
     for (panel_key, level), value in values.items():
         position = positions[level]
-        previous_position = position - fold.definition.horizon
+        previous_position = position - fold.definition.carry_forward_step
         if previous_position < 0:
             continue
         previous = values.get((panel_key, fold._levels[previous_position]))
@@ -50,6 +50,12 @@ def _persistence_variance(fold: FoldData) -> float:
 
 def persistence_predictions(fold: FoldData) -> pd.DataFrame:
     """Return leakage-safe persistence means and pooled horizon-specific variance.
+
+    The mean carries the last observed response forward onto the target, so the
+    residual history is pooled over the same distance -- ``carry_forward_step``,
+    which is 1 for a nowcast rather than 0. Differencing a level against itself
+    would otherwise make every residual zero and hand the benchmark the 1e-12
+    variance floor as a posterior.
 
     A zero empirical mean squared error receives a numerical variance floor of 1e-12.
     """

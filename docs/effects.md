@@ -523,6 +523,23 @@ result = LGM(
 ).fit(frame, engine="laplace")
 ```
 
+**From YAML:** the frontend declares `type: grouped`, with the wrapped effect
+inline. The inner spec takes the wrapper's name, so it does not set one of its
+own, and `space.precision` names the *inner* effect's precision — `structure`
+carries the between-group factor, which has no scale of its own.
+
+```yaml
+    - name: space
+      type: grouped
+      over: division
+      structure: {type: ar1, rho: 0.8}     # iid | ar1 | rw1 | rw2 | besag
+      effect: {type: besag, index: region, graph_file: adjacency.json}
+```
+
+`graph_file` paths — on the effect or on a `besag` structure — are relative to
+the YAML document. Wrappers do not nest: a `grouped` effect cannot wrap another
+`grouped`.
+
 **Five between-group structures.** `structure` is any of `IIDStructure()`,
 `RW1Structure()` / `RW2Structure()`, `BesagStructure(graph)`, or
 `AR1Structure(rho)` (rho fixed). The first three, paired with the inner

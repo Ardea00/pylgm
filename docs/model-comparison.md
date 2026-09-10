@@ -53,6 +53,25 @@ candidates:
 Note the `optimize` keys: on the config path hyperparameter names are
 **derived** as `<effect>.<parameter>`, so you never invent them.
 
+Effects here are the same ones the [model YAML](effects.md) declares —
+`besag`, `bym2`, `proper_car`, `sar`, `ar1`, `seasonal`, `spacetime`,
+`dynamicspatialpanel`, `midas` — plus `grouped`, which wraps another effect in
+correlated copies:
+
+```yaml
+    - name: space
+      type: grouped
+      over: division                       # one copy per level of this column
+      structure: {type: ar1, rho: 0.8}     # iid | ar1 | rw1 | rw2 | besag
+      effect: {type: besag, index: region, graph_file: adjacency.json}
+```
+
+The inner spec takes the wrapper's name, so it does not set one of its own, and
+`space.precision` is the inner effect's — `structure` carries the *between*-group
+precision, which has no scale of its own. `structure: {type: iid}` makes the
+copies independent, which is exactly `Replicated`. `graph_file` paths are
+relative to the YAML document, not to the working directory.
+
 ## Folds are rolling-origin
 
 ```yaml
@@ -68,6 +87,14 @@ at `origin + h` is held out. The held-out rows stay in the frame with a `NaN`
 response — the same mechanism as
 [forecasting](prediction.md#predicting-new-rows) — so the latent structure is
 built once and the future simply contributes no likelihood.
+
+**Horizon `0` is the nowcast**, and it shifts that boundary by one: it targets
+the origin period *itself* — the period whose covariates have arrived while its
+own response has not been published — so the origin's response is withheld too
+and training stops at the level before it. The `persistence` benchmark carries
+the last *observed* value forward, one level rather than zero. A nowcast origin
+therefore needs a level of history behind it, and the earliest level in the
+panel is not an eligible origin.
 
 **Covariate availability** is declared, not assumed:
 

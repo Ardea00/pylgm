@@ -99,7 +99,7 @@ def test_schema_version_must_be_integer_two(tmp_path: Path, version: object) -> 
         ("candidates: []", "candidates"),
         ("candidates:\n  - {name: base}\n  - {name: base}", "unique"),
         ("evaluation:\n  horizons: [1, 1]\n  origins: {last: 8}", "horizons"),
-        ("evaluation:\n  horizons: [0]\n  origins: {last: 8}", "greater than 0"),
+        ("evaluation:\n  horizons: [-1]\n  origins: {last: 8}", "greater than or equal to 0"),
     ],
 )
 def test_candidate_and_horizon_constraints(tmp_path: Path, replacement: str, message: str) -> None:
@@ -113,6 +113,44 @@ def test_candidate_and_horizon_constraints(tmp_path: Path, replacement: str, mes
 
     with pytest.raises(ConfigurationError, match=message):
         load_experiment_config(path)
+
+
+def test_graph_file_resolves_relative_to_the_document(tmp_path: Path, monkeypatch) -> None:
+    """Not to the working directory -- a config must travel with its graph."""
+    (tmp_path / "adjacency.json").write_text('{"a": ["b"], "b": ["a"]}')
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    text = path.read_text()
+    path.write_text(
+        text.replace(
+            "{name: trend, type: rw1, index: month, precision: 2.0}",
+            "{name: trend, type: besag, index: region, graph_file: adjacency.json}",
+        )
+    )
+    monkeypatch.chdir(tmp_path.parent)
+
+    config = load_experiment_config(path)
+
+    effect = config.model.effects[0]
+    assert effect.type == "besag"
+    assert effect.graph_file is None, "the reference is replaced by the graph itself"
+    assert effect.graph == {"a": ["b"], "b": ["a"]}
+
+
+def test_horizon_zero_is_a_configurable_nowcast(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.yaml"
+    write_experiment(path)
+    text = path.read_text()
+    path.write_text(
+        text.replace(
+            text[text.index("evaluation:") :],
+            "evaluation:\n  horizons: [0, 1]\n  origins: {last: 8}\n",
+        )
+    )
+
+    config = load_experiment_config(path)
+
+    assert config.evaluation.horizons == (0, 1)
 
 
 @pytest.mark.parametrize(

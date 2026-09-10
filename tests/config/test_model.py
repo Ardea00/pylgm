@@ -50,7 +50,6 @@ def test_load_model_forbids_unknown_keys(tmp_path: Path) -> None:
         "response: y\nlikelihood: {family: gaussian, sigma: 0}\npredictor: {fixed: '1'}",
         "response: y\nlikelihood: {family: gaussian, sigma: .inf}\npredictor: {fixed: '1'}",
         "response: y\nlikelihood: {family: gaussian, sigma: true}\npredictor: {fixed: '1'}",
-        "response: y\nlikelihood: {family: gaussian, sigma: 1}\npredictor:\n  fixed: '1'\n  effects: [{name: region, type: iid, index: region}]",
         "response: y\nlikelihood: {family: gaussian, sigma: 1}\npredictor:\n  fixed: '1'\n  effects: [{name: trend, type: rw2, index: time, precision: -1}]",
     ],
 )
@@ -323,24 +322,112 @@ def test_load_model_rejects_invalid_trials_usage(
 
 
 def test_sar_config_builds_effect():
-    from pylgm.config.model import _EffectModelConfig, _build_effect
+    from pylgm.config.schema import EffectConfig, build_effect
     from pathlib import Path
     from pylgm.effects.spec import SAR
 
-    config = _EffectModelConfig(
+    config = EffectConfig(
         name="s", type="sar", index="region",
         graph={"a": ["b"], "b": ["a"]}, rho=0.4,
     )
-    effect = _build_effect(config, Path("."))
+    effect = build_effect(config, Path("."))
     assert isinstance(effect, SAR)
     assert effect.index == "region"
 
 
+def test_grouped_config_builds_a_grouped_effect():
+    from pathlib import Path
+
+    from pylgm.config.schema import EffectConfig, build_effect
+    from pylgm.effects.spec import Besag, Grouped
+    from pylgm.effects.structures import AR1Structure
+
+    config = EffectConfig(
+        name="space", type="grouped", over="division",
+        structure={"type": "ar1", "rho": 0.8},
+        effect={"type": "besag", "index": "region",
+                "graph": {"a": ["b"], "b": ["a"]}, "precision": 2.0},
+    )
+    effect = build_effect(config, Path("."))
+
+    assert isinstance(effect, Grouped)
+    assert effect.over == "division"
+    assert isinstance(effect.structure, AR1Structure)
+    assert isinstance(effect.effect, Besag)
+    # The inner spec sets no name; the wrapper's is what hyperparameters key on.
+    assert effect.effect.name == "space"
+    assert effect.name == "space"
+
+
+def test_grouped_structure_types_build_their_own_precision():
+    from pathlib import Path
+
+    from pylgm.config.schema import StructureConfig, build_structure
+    from pylgm.effects.structures import (
+        BesagStructure, IIDStructure, RW1Structure, RW2Structure,
+    )
+
+    built = {
+        name: type(build_structure(StructureConfig.model_validate(payload), Path(".")))
+        for name, payload in {
+            "iid": {"type": "iid"},
+            "rw1": {"type": "rw1"},
+            "rw2": {"type": "rw2"},
+            "besag": {"type": "besag", "graph": {"a": ["b"], "b": ["a"]}},
+        }.items()
+    }
+
+    assert built == {
+        "iid": IIDStructure, "rw1": RW1Structure,
+        "rw2": RW2Structure, "besag": BesagStructure,
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({"name": "g", "type": "grouped", "over": "d",
+          "structure": {"type": "iid"}}, "requires over, effect and structure"),
+        ({"name": "g", "type": "grouped", "over": "d", "structure": {"type": "iid"},
+          "effect": {"name": "inner", "type": "iid", "index": "r"}},
+         "must not set its own name"),
+        ({"name": "g", "type": "grouped", "over": "d", "structure": {"type": "iid"},
+          "effect": {"type": "grouped", "over": "e", "structure": {"type": "iid"},
+                     "effect": {"type": "iid", "index": "r"}}},
+         "must not wrap another wrapper"),
+        ({"name": "g", "type": "grouped", "over": "d", "index": "r",
+          "structure": {"type": "iid"}, "effect": {"type": "iid", "index": "r"}},
+         "not valid for effect type"),
+    ],
+)
+def test_grouped_config_rejects_malformed_wrappers(payload: dict, match: str) -> None:
+    from pylgm.config.schema import EffectConfig
+
+    with pytest.raises(ValueError, match=match):
+        EffectConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({"type": "iid", "rho": 0.5}, "rho is required for structure type 'ar1'"),
+        ({"type": "ar1"}, "rho is required for structure type 'ar1'"),
+        ({"type": "iid", "graph": {"a": ["b"]}}, "structure type 'besag'"),
+        ({"type": "besag"}, "structure type 'besag'"),
+    ],
+)
+def test_grouped_structure_rejects_fields_of_other_types(payload: dict, match: str) -> None:
+    from pylgm.config.schema import StructureConfig
+
+    with pytest.raises(ValueError, match=match):
+        StructureConfig.model_validate(payload)
+
+
 def test_sar_config_requires_rho():
-    from pylgm.config.model import _EffectModelConfig
+    from pylgm.config.schema import EffectConfig
 
     with pytest.raises(ValueError, match="rho"):
-        _EffectModelConfig(name="s", type="sar", index="region", graph={"a": ["b"]})
+        EffectConfig(name="s", type="sar", index="region", graph={"a": ["b"]})
 
 
 def test_weibullsurv_config_builds_model(tmp_path: Path) -> None:
@@ -382,24 +469,24 @@ def test_load_model_builds_midas_with_explicit_fields(tmp_path: Path) -> None:
 
 
 def test_load_model_builds_midas_parametric(tmp_path: Path) -> None:
-    from pylgm.config.model import _EffectModelConfig, _build_effect
+    from pylgm.config.schema import EffectConfig, build_effect
     from pylgm.effects.spec import MIDASParametric
 
-    config = _EffectModelConfig(
+    config = EffectConfig(
         name="m", type="midas_parametric", columns=("x0", "x1", "x2"), kernel="exp_almon"
     )
-    effect = _build_effect(config, Path("."))
+    effect = build_effect(config, Path("."))
     assert isinstance(effect, MIDASParametric)
     assert effect.columns == ("x0", "x1", "x2")
     assert effect.kernel == "exp_almon"
 
 
 def test_midas_parametric_defaults_to_beta_kernel() -> None:
-    from pylgm.config.model import _EffectModelConfig, _build_effect
+    from pylgm.config.schema import EffectConfig, build_effect
     from pylgm.effects.spec import MIDASParametric
 
-    config = _EffectModelConfig(name="m", type="midas_parametric", columns=("x0", "x1"))
-    effect = _build_effect(config, Path("."))
+    config = EffectConfig(name="m", type="midas_parametric", columns=("x0", "x1"))
+    effect = build_effect(config, Path("."))
     assert isinstance(effect, MIDASParametric)
     assert effect.kernel == "beta"
 

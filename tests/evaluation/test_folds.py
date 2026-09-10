@@ -61,6 +61,70 @@ def test_horizon_three_masks_every_response_after_origin(panel_frame: pd.DataFra
     assert fold.training_frame["month"].max() == 3
 
 
+def test_horizon_zero_withholds_the_origins_own_response(panel_frame: pd.DataFrame) -> None:
+    """The nowcast targets the origin itself, so the origin must not be trained on."""
+    definition = FoldDefinition(origin=4, target=4, horizon=0)
+
+    fold = materialize_fold(panel_frame, data_config(), evaluation(horizons=(0,)), definition)
+
+    assert fold.model_frame.loc[fold.model_frame.month == 4, "y"].isna().all()
+    assert fold.model_frame["month"].max() == 4
+    # Training and history stop one level short of the origin -- that is the fold's
+    # whole content, and 40.0 (month 4) must appear in neither.
+    assert fold.training_frame["month"].max() == 3
+    assert fold.training_frame["y"].tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert 40.0 not in fold.training_frame["y"].tolist()
+    # The truth is still scored from the unmasked source.
+    assert fold.target_frame["month"].tolist() == [4]
+    assert fold.target_frame["y"].tolist() == [40.0]
+
+
+def test_horizon_zero_rolling_window_counts_back_from_the_last_observed_level(
+    panel_frame: pd.DataFrame,
+) -> None:
+    definition = FoldDefinition(origin=4, target=4, horizon=0)
+    config = evaluation(horizons=(0,), window=WindowConfig(type="rolling", length=2))
+
+    fold = materialize_fold(panel_frame, data_config(), config, definition)
+
+    # Length 2 of *observed* history is months 2 and 3, not 3 and 4.
+    assert fold.training_frame["month"].tolist() == [2, 3]
+    assert fold.model_frame["month"].tolist() == [2, 3, 4]
+
+
+def test_horizon_zero_origins_skip_the_first_level(panel_frame: pd.DataFrame) -> None:
+    """A nowcast at the earliest level would have no observed history at all."""
+    config = evaluation(horizons=(0,), origins=OriginConfig(last=7))
+
+    with pytest.raises(FoldConstructionError, match="insufficient eligible origins"):
+        build_fold_definitions(panel_frame, data_config(), config)
+
+    definitions = build_fold_definitions(
+        panel_frame, data_config(), evaluation(horizons=(0,), origins=OriginConfig(last=6))
+    )
+
+    assert definitions == tuple(FoldDefinition(month, month, 0) for month in range(1, 7))
+
+
+def test_horizon_zero_keeps_the_last_level_eligible(panel_frame: pd.DataFrame) -> None:
+    """`levels[:-0]` is empty; the nowcast must still reach the final level."""
+    config = evaluation(horizons=(0,), origins=OriginConfig(last=1))
+
+    definitions = build_fold_definitions(panel_frame, data_config(), config)
+
+    assert definitions == (FoldDefinition(6, 6, 0),)
+
+
+def test_negative_horizon_is_rejected(panel_frame: pd.DataFrame) -> None:
+    with pytest.raises(FoldConstructionError, match="non-negative"):
+        materialize_fold(
+            panel_frame,
+            data_config(),
+            evaluation(horizons=(1,)),
+            FoldDefinition(origin=4, target=3, horizon=-1),
+        )
+
+
 def test_builds_arbitrary_horizons_from_irregular_ordered_time_positions() -> None:
     frame = pd.DataFrame(
         {

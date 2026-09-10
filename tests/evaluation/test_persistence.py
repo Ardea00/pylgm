@@ -39,6 +39,35 @@ def test_persistence_uses_last_panel_response_and_exact_horizon_variance() -> No
     assert predictions["variance"].tolist() == [9.0, 9.0]
 
 
+def test_persistence_at_horizon_zero_carries_one_level_not_zero() -> None:
+    """Differencing the target against itself would zero every residual."""
+    frame = pd.DataFrame(
+        {
+            "region": ["A"] * 5 + ["B"] * 5,
+            "month": [0, 1, 2, 3, 4] * 2,
+            "y": [1.0, 2.0, 4.0, 8.0, 99.0, 10.0, 10.0, 13.0, 13.0, 88.0],
+        }
+    )
+    fold = materialize_fold(
+        frame,
+        DATA,
+        evaluation(0),
+        FoldDefinition(origin=4, target=4, horizon=0),
+    )
+
+    predictions = persistence_predictions(fold)
+
+    # The nowcast withholds month 4, so the carried-forward value is month 3.
+    assert predictions[["region", "actual", "mean"]].to_dict("records") == [
+        {"region": "A", "actual": 99.0, "mean": 8.0},
+        {"region": "B", "actual": 88.0, "mean": 13.0},
+    ]
+    # One-level pre-origin errors: A gives 1, 2, 4 and B gives 0, 3, 0, so the
+    # pooled mean squared error is (1 + 4 + 16 + 0 + 9 + 0) / 6.
+    assert predictions["variance"].tolist() == [5.0, 5.0]
+    assert predictions["variance"].gt(1e-9).all(), "must not collapse to the variance floor"
+
+
 def test_persistence_mean_uses_last_available_response_not_origin_row() -> None:
     frame = pd.DataFrame(
         {
