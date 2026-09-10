@@ -228,6 +228,50 @@ In YAML: `likelihood: {family: weibullsurv, event: d, shape: 1.5, entry: v}` /
 `{family: exponentialsurv, event: d}` (`shape` accepts a fixed value only,
 same as GLM `phi` above; `entry` is optional for both).
 
+### Semi-parametric survival (Cox PH with a piecewise baseline hazard)
+
+`WeibullSurv` fixes the shape of the baseline hazard. To leave it arbitrary,
+expand the data instead: split time into intervals, hold the hazard constant
+within each, and give every subject one row per interval it is at risk in. The
+piecewise-exponential likelihood is then the Poisson likelihood on those rows,
+with the log time-at-risk as an offset — the mechanism R-INLA uses
+(`inla.coxph`; Martino, Akerkar & Rue 2011).
+
+```python
+from pylgm import Fixed, Hyperparameter, LGM, Poisson, RW1, expand_cox
+
+expansion = expand_cox(frame, time="t", event="d", breaks=12)   # or entry="e" to left-truncate
+
+result = LGM(
+    response=expansion.response,
+    likelihood=Poisson(),
+    predictor=Fixed("1 + x") + RW1("baseline", index=expansion.interval,
+                                   precision=Hyperparameter("kappa", initial=10.0)),
+    offset=expansion.exposure,
+).fit(expansion.frame, engine="laplace")
+```
+
+`RW1`/`RW2` on the interval index smooths the log baseline hazard; `IID` leaves
+it free; omitting it gives a constant hazard, which is exactly `ExponentialSurv`.
+`breaks` is either a count (cut at quantiles of the event times, so each interval
+holds roughly equal events) or explicit cut points.
+
+The covariate effects are the Cox ones, and getting the baseline wrong is not a
+cosmetic error: on data with a rising hazard, a constant-hazard fit recovered a
+coefficient of 0.37 where the truth was 0.7, while the smoothed version recovered
+0.64 and tracked the true log-hazard shape at a correlation of 0.99.
+
+**The log marginal likelihood is shifted.** The Poisson and piecewise-exponential
+log likelihoods differ by `sum_i d_i log r_i` — a constant in the parameters, so
+every estimate agrees, but an absolute value does not. `log_likelihood_offset(expansion)`
+returns the constant; add it before comparing against an unexpanded model or an
+expansion with different breakpoints.
+
+**It costs rows.** A subject at risk across `K` intervals becomes `K` rows, so
+the fit is on `O(n*K)` observations — 1,500 subjects and 10 intervals is about
+8,700 rows. The latent dimension does not grow with `K` beyond the baseline
+effect itself.
+
 ## The `predictive_variance` convention
 
 `predictive_variance` is the **linear-predictor** posterior variance
