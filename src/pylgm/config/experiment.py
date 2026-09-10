@@ -34,6 +34,7 @@ def _require_exact_boolean(value: object) -> object:
 
 
 StrictPositiveInt = Annotated[int, BeforeValidator(_require_exact_integer), Field(gt=0)]
+StrictNonnegativeInt = Annotated[int, BeforeValidator(_require_exact_integer), Field(ge=0)]
 StrictRollingLength = Annotated[int, BeforeValidator(_require_exact_integer), Field(ge=2)]
 StrictUnitFloat = Annotated[
     float, BeforeValidator(_require_ordinary_real), Field(ge=0, le=1, allow_inf_nan=False)
@@ -171,7 +172,7 @@ class WindowConfig(StrictModel):
 
 class EvaluationConfig(StrictModel):
     mode: Literal["latest", "vintage"] = "latest"
-    horizons: tuple[StrictPositiveInt, ...]
+    horizons: tuple[StrictNonnegativeInt, ...]
     origins: OriginConfig
     window: WindowConfig = WindowConfig()
     interval_levels: tuple[StrictUnitFloat, ...] = (0.5, 0.8, 0.95)
@@ -180,8 +181,8 @@ class EvaluationConfig(StrictModel):
 
     @model_validator(mode="after")
     def valid_horizons_and_levels(self) -> "EvaluationConfig":
-        if not self.horizons or any(horizon <= 0 for horizon in self.horizons):
-            raise ValueError("horizons must be positive")
+        if not self.horizons or any(horizon < 0 for horizon in self.horizons):
+            raise ValueError("horizons must not be negative")
         if len(self.horizons) != len(set(self.horizons)):
             raise ValueError("horizons must be unique")
         if any(not 0 < level < 1 for level in self.interval_levels):

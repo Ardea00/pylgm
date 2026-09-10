@@ -24,9 +24,34 @@ def _copy_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class FoldDefinition:
+    """One rolling-origin fold: stand at ``origin``, score the level ``horizon`` ahead.
+
+    Horizon 0 is the nowcast. It targets the origin period *itself*: the period
+    whose covariates have arrived -- a flash aggregate, a high-frequency driver --
+    while its own response has not been published. The origin's response is
+    therefore withheld like any other future value, and the fold trains on the
+    levels strictly before it.
+    """
+
     origin: object
     target: object
     horizon: int
+
+    @property
+    def carry_forward_step(self) -> int:
+        """Levels between the last observed response and the target.
+
+        This is the horizon at every positive horizon, and 1 for a nowcast --
+        whose last observed level is the one *before* the origin, not the origin.
+        Anything comparing a target to the value carried forward onto it wants
+        this distance, not the horizon.
+        """
+        return max(self.horizon, 1)
+
+
+def _last_observed_position(origin_position: int, horizon: int) -> int:
+    """Position of the last level whose response the fold is allowed to see."""
+    return origin_position - 1 if horizon == 0 else origin_position
 
 
 @dataclass(frozen=True, init=False)
@@ -129,7 +154,13 @@ def build_fold_definitions(
     maximum_horizon = max(evaluation.horizons)
     if len(levels) <= maximum_horizon:
         raise FoldConstructionError("insufficient future time levels for configured horizons")
-    eligible = levels[:-maximum_horizon]
+    # `levels[:-0]` is empty, not "everything" -- slice by length so horizon 0 keeps
+    # every level in play.
+    eligible = levels[: len(levels) - maximum_horizon]
+    if 0 in evaluation.horizons:
+        # A nowcast withholds the origin's own response, so the first level has no
+        # history left to train on.
+        eligible = eligible[1:]
     positions = {value: index for index, value in enumerate(levels)}
     if evaluation.origins.last is not None:
         count = evaluation.origins.last
@@ -200,8 +231,8 @@ def _latest_vintage(
 
 
 def _validate_definition(definition: FoldDefinition, levels: tuple[object, ...]) -> tuple[int, int]:
-    if type(definition.horizon) is not int or definition.horizon <= 0:
-        raise FoldConstructionError("fold horizon must be a positive integer")
+    if type(definition.horizon) is not int or definition.horizon < 0:
+        raise FoldConstructionError("fold horizon must be a non-negative integer")
     try:
         origin_position = levels.index(definition.origin)
         target_position = levels.index(definition.target)
@@ -217,7 +248,7 @@ def _apply_training_window(
     data: ExperimentDataConfig,
     evaluation: EvaluationConfig,
     levels: tuple[object, ...],
-    origin_position: int,
+    last_observed_position: int,
     target_position: int,
 ) -> pd.DataFrame:
     allowed = set(levels[: target_position + 1])
@@ -225,10 +256,12 @@ def _apply_training_window(
     if evaluation.window.type == "rolling":
         assert evaluation.window.length is not None
         length = evaluation.window.length
-        if origin_position + 1 < length:
+        if last_observed_position + 1 < length:
             raise FoldConstructionError("rolling window has insufficient history levels")
-        retained_history = set(levels[origin_position - length + 1 : origin_position + 1])
-        retained_future = set(levels[origin_position + 1 : target_position + 1])
+        retained_history = set(
+            levels[last_observed_position - length + 1 : last_observed_position + 1]
+        )
+        retained_future = set(levels[last_observed_position + 1 : target_position + 1])
         result = result.loc[result[data.time].isin(retained_history | retained_future)].copy()
     try:
         return result.sort_values([*data.panel, data.time], kind="stable").reset_index(drop=True)
@@ -267,22 +300,23 @@ def materialize_fold(
     raw = _validate_source(frame, data, evaluation)
     levels = _ordered_levels(raw, data.time)
     origin_position, target_position = _validate_definition(definition, levels)
+    last_observed = _last_observed_position(origin_position, definition.horizon)
+    if last_observed < 0:
+        raise FoldConstructionError("nowcast origin has no prior level to train on")
     source = _latest_available_vintage(raw, data, evaluation, definition.origin)
     truth = _latest_vintage(raw, data, evaluation)
-    history_levels = set(levels[: origin_position + 1])
+    history_levels = set(levels[: last_observed + 1])
     history_frame = source.loc[source[data.time].isin(history_levels)].copy()
     model_frame = _apply_training_window(
-        source, data, evaluation, levels, origin_position, target_position
+        source, data, evaluation, levels, last_observed, target_position
     )
     target_frame = _target_rows(truth, data, definition.target)
     _require_target_coordinates(model_frame, target_frame, data)
-    future_levels = set(levels[origin_position + 1 : target_position + 1])
+    future_levels = set(levels[last_observed + 1 : target_position + 1])
     future_mask = model_frame[data.time].isin(future_levels)
     validate_future_covariates(model_frame.loc[future_mask], data, definition.horizon)
     model_frame.loc[future_mask, data.response] = np.nan
-    training_frame = model_frame.loc[
-        model_frame[data.time].isin(set(levels[: origin_position + 1]))
-    ].copy()
+    training_frame = model_frame.loc[model_frame[data.time].isin(history_levels)].copy()
     return FoldData(
         definition,
         training_frame,

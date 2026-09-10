@@ -199,7 +199,10 @@ def test_compiler_rejects_block_with_wrong_panel_row_count(
         csr_matrix([[1.0]]),
         np.empty((0, 1)),
     )
-    monkeypatch.setattr("pylgm.compiler._structured_blocks", lambda config, panel: [bad_block])
+    monkeypatch.setattr(
+        "pylgm.compiler._structured_blocks",
+        lambda config, panel, optimized=(): ([bad_block], {}, {}),
+    )
 
     with pytest.raises(CompilationError, match="row count"):
         compile_model(config, panel)
@@ -689,3 +692,155 @@ def test_missing_index_column_is_a_compilation_error_via_both_compile_paths() ->
         )
         with pytest.raises(CompilationError, match="failed to compile effect 'fixed'"):
             model.fit(frame)
+
+
+def _spatial_panel() -> tuple[pd.DataFrame, DataConfig]:
+    frame = pd.DataFrame(
+        {
+            "region": ["a", "b", "c"] * 4,
+            "division": ["x"] * 6 + ["y"] * 6,
+            "month": [1, 1, 1, 2, 2, 2] * 2,
+            "y": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5] * 2,
+        }
+    )
+    return frame, DataConfig(time="month", response="y", panel=("region", "division"))
+
+
+_TRIANGLE = {"a": ["b", "c"], "b": ["a", "c"], "c": ["a", "b"]}
+
+
+def test_experiment_path_compiles_a_besag_effect() -> None:
+    """The backtest schema used to accept only iid/rw1/rw2."""
+    frame, data = _spatial_panel()
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": data.model_dump(),
+            "model": {
+                "fixed": "1",
+                "sigma": 1.0,
+                "effects": [
+                    {"name": "space", "type": "besag", "index": "region",
+                     "graph": _TRIANGLE, "precision": 2.0},
+                ],
+            },
+        }
+    )
+    panel = CanonicalPanel.from_frame(frame, data)
+
+    compiled = compile_model(config, panel)
+
+    assert [block.name for block in compiled.blocks] == ["fixed", "space"]
+    assert compiled.blocks[1].design.shape == (len(frame), 3)
+
+
+def test_experiment_path_compiles_a_grouped_effect() -> None:
+    frame, data = _spatial_panel()
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": data.model_dump(),
+            "model": {
+                "fixed": "1",
+                "sigma": 1.0,
+                "effects": [
+                    {"name": "space", "type": "grouped", "over": "division",
+                     "structure": {"type": "iid"},
+                     "effect": {"type": "besag", "index": "region",
+                                "graph": _TRIANGLE, "precision": 2.0}},
+                ],
+            },
+        }
+    )
+    panel = CanonicalPanel.from_frame(frame, data)
+
+    compiled = compile_model(config, panel)
+
+    # One spatial field per division: 3 regions x 2 divisions.
+    assert compiled.blocks[1].name == "space"
+    assert compiled.blocks[1].design.shape == (len(frame), 6)
+
+
+def test_grouped_precision_is_optimized_through_the_inner_effect() -> None:
+    """A wrapper carries no precision of its own, so the override must reach inside."""
+    frame, data = _spatial_panel()
+    effects = [
+        {"name": "space", "type": "grouped", "over": "division",
+         "structure": {"type": "iid"},
+         "effect": {"type": "besag", "index": "region", "graph": _TRIANGLE,
+                    "precision": 7.0}},
+    ]
+    model = RunConfig.model_validate(
+        {"schema_version": 1, "data": data.model_dump(),
+         "model": {"fixed": "1", "sigma": 1.0, "effects": effects}}
+    ).model
+    panel = CanonicalPanel.from_frame(frame, data)
+
+    family = compile_gaussian_family(data, model, panel, optimized=("space.precision",))
+
+    # The configured 7.0 is the optimizer's starting point, and the block itself
+    # is built at unit precision so the parameter *is* the precision.
+    assert family.initial.precisions["space"] == 7.0
+    unit = compile_gaussian_family(data, model, panel, optimized=())
+    scaled = family.materialize({"space.precision": 1.0})
+    reference = unit.materialize({})
+    assert np.allclose(
+        reference.blocks[1].precision.toarray(),
+        7.0 * scaled.blocks[1].precision.toarray(),
+    )
+
+
+def test_experiment_path_reports_missing_columns_for_every_effect_shape() -> None:
+    frame, data = _spatial_panel()
+    config = RunConfig.model_validate(
+        {
+            "schema_version": 1,
+            "data": data.model_dump(),
+            "model": {
+                "fixed": "1",
+                "sigma": 1.0,
+                "effects": [
+                    {"name": "space", "type": "grouped", "over": "absent_group",
+                     "structure": {"type": "iid"},
+                     "effect": {"type": "besag", "index": "absent_index",
+                                "graph": _TRIANGLE}},
+                ],
+            },
+        }
+    )
+    panel = CanonicalPanel.from_frame(frame, data)
+
+    with pytest.raises(DataContractError, match="absent_group.*absent_index"):
+        compile_model(config, panel)
+
+
+def test_midas_precision_scales_only_the_smoothness_penalty() -> None:
+    """MIDAS is Q(tau) = tau*D'D + ridge*P0; scaling the whole block would shrink
+    the lag curve's level and slope, which is what its null-space ridge prevents."""
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({"t": range(40), "y": rng.standard_normal(40)})
+    columns = [f"x{k}" for k in range(6)]
+    for column in columns:
+        frame[column] = rng.standard_normal(40)
+    data = DataConfig(time="t", response="y")
+    config = RunConfig.model_validate({
+        "schema_version": 1,
+        "data": data.model_dump(),
+        "model": {"fixed": "1", "sigma": 1.0, "effects": [
+            {"name": "lag", "type": "midas", "columns": columns,
+             "precision": 1.0, "order": 2, "ridge": 1.0e-6},
+        ]},
+    })
+    panel = CanonicalPanel.from_frame(frame, data)
+
+    family = compile_gaussian_family(data, config.model, panel, optimized=("lag.precision",))
+
+    low = np.linalg.eigvalsh(family.materialize({"lag.precision": 1.0}).blocks[1].precision.toarray())
+    high = np.linalg.eigvalsh(
+        family.materialize({"lag.precision": 100.0}).blocks[1].precision.toarray()
+    )
+    # order=2 leaves a two-dimensional null space carrying the ridge alone.
+    assert np.allclose(low[:2], 1e-6) and np.allclose(high[:2], 1e-6), (
+        "the lag curve's level and slope must not be scaled by the smoothing precision"
+    )
+    assert np.isclose(high[-1] / low[-1], 100.0), "the smoothness penalty must scale"
