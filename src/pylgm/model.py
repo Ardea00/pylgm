@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 import warnings
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -354,6 +355,7 @@ class LGM:
         max_driver_rows: int | None = 100_000,
         hyperparameters: str = "optimize",
         latent_strategy: str = "gaussian",
+        mean_correction: bool = False,
         observations: object = (),
         constraints: object = (),
     ):
@@ -411,6 +413,7 @@ class LGM:
         if isinstance(frame, pd.DataFrame):
             return self._fit_pandas(
                 frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy,
+                mean_correction=mean_correction,
                 observations=observations, constraints=constraints,
             )
 
@@ -424,10 +427,11 @@ class LGM:
             return self._fit_spark(
                 frame, engine, max_driver_rows=max_driver_rows,
                 hyperparameters=hyperparameters, latent_strategy=latent_strategy,
+                mean_correction=mean_correction,
             )
         raise DataContractError("frame must be a Pandas DataFrame")
 
-    def _engine(self, engine: str):
+    def _engine(self, engine: str, mean_correction: bool = False):
         engines = {"exact_gaussian": fit_gaussian, "laplace": fit_laplace}
         try:
             fit = engines[engine]
@@ -444,6 +448,11 @@ class LGM:
                 "engine='laplace' is for non-Gaussian likelihoods; "
                 "use engine='exact_gaussian' for a Gaussian likelihood"
             )
+        if mean_correction and engine == "laplace":
+            return partial(fit, mean_correction=True)
+        # An exact Gaussian posterior has no mode/mean gap to correct: its third
+        # derivative is identically zero, so the shift would be too. Ignoring the
+        # flag there is the honest reading, not a silent omission.
         return fit
 
     def _family_optimization_inputs(self, family):
@@ -469,8 +478,10 @@ class LGM:
                 return total
         return bounds, initial, penalty
 
-    def _run_empirical_bayes(self, family, engine: str) -> GaussianResult | LaplaceResult:
-        fit = self._engine(engine)
+    def _run_empirical_bayes(
+        self, family, engine: str, mean_correction: bool = False
+    ) -> GaussianResult | LaplaceResult:
+        fit = self._engine(engine, mean_correction)
         bounds, initial, penalty = self._family_optimization_inputs(family)
         eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit, penalty=penalty)
         diagnostics = dict(eb.fit.diagnostics)
@@ -491,8 +502,11 @@ class LGM:
             )
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
-    def _run_inla(self, family, engine: str, latent_strategy: str = "gaussian") -> INLAResult:
-        fit = self._engine(engine)
+    def _run_inla(
+        self, family, engine: str, latent_strategy: str = "gaussian",
+        mean_correction: bool = False,
+    ) -> INLAResult:
+        fit = self._engine(engine, mean_correction)
         bounds, initial, penalty = self._family_optimization_inputs(family)
         return integrate_inla(
             family, bounds, initial=initial, fit=fit, penalty=penalty,
@@ -502,6 +516,7 @@ class LGM:
     def _fit_pandas(
         self, frame: pd.DataFrame, engine: str, *,
         hyperparameters: str = "optimize", latent_strategy: str = "gaussian",
+        mean_correction: bool = False,
         observations: tuple[LinearObservation, ...] = (),
         constraints: tuple[LinearConstraint, ...] = (),
     ) -> GaussianResult | LaplaceResult | INLAResult:
@@ -539,7 +554,7 @@ class LGM:
                 raise ValueError(
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
-            result = self._run_inla(family, engine, latent_strategy)
+            result = self._run_inla(family, engine, latent_strategy, mean_correction)
             compiled = compile_lgm(self, panel)
         elif family is None:
             compiled = compile_lgm(self, panel)
@@ -547,9 +562,9 @@ class LGM:
                 project_gaussian_model(compiled, observations, constraints)
                 if observations or constraints else compiled
             )
-            result = self._engine(engine)(fitted)
+            result = self._engine(engine, mean_correction)(fitted)
         else:
-            result = self._run_empirical_bayes(family, engine)
+            result = self._run_empirical_bayes(family, engine, mean_correction)
             compiled = compile_lgm(self, panel)
         context = build_prediction_context(self, panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
@@ -569,6 +584,7 @@ class LGM:
         max_driver_rows: int | None,
         hyperparameters: str = "optimize",
         latent_strategy: str = "gaussian",
+        mean_correction: bool = False,
     ) -> GaussianResult | LaplaceResult | INLAResult:
         from pylgm.data.spark import canonicalize_spark_frame
 
@@ -582,13 +598,13 @@ class LGM:
                 raise ValueError(
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
-            result = self._run_inla(family, engine, latent_strategy)
+            result = self._run_inla(family, engine, latent_strategy, mean_correction)
             compiled = compile_lgm(self, canonical.panel)
         elif family is None:
             compiled = compile_lgm(self, canonical.panel)
-            result = self._engine(engine)(compiled)
+            result = self._engine(engine, mean_correction)(compiled)
         else:
-            result = self._run_empirical_bayes(family, engine)
+            result = self._run_empirical_bayes(family, engine, mean_correction)
             compiled = compile_lgm(self, canonical.panel)
         context = build_prediction_context(self, canonical.panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)

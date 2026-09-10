@@ -14,7 +14,46 @@ from pylgm.inference.result import LaplaceResult, quadratic_form_diagonal
 from pylgm.ir.model import CompiledLGM
 
 
-def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float) -> LaplaceResult:
+def _variational_mean_shift(reduced_design, reduced_covariance, factor, eta, y, likelihood):
+    """The leading-order variational correction from the mode toward the mean.
+
+    A Laplace approximation reports the *mode* of the conditional posterior. The
+    mode is not its mean whenever the likelihood is skewed, and the gap is
+    systematic rather than noisy -- always in the same direction, and shrinking
+    only as O(1/n) per observation.
+
+    Minimising ``KL(N(x* + d, Sigma) || p)`` over a mean shift ``d``, holding the
+    Laplace covariance fixed, gives a gradient at ``d = 0`` of
+    ``A' (g1(eta*) - E[g1(eta)])``, where ``g1`` is the likelihood score.
+    Expanding that expectation to second order -- its first-order term vanishes
+    because ``E[eta - eta*] = 0`` -- leaves ``-A' (sigma_eta^2 * g3) / 2`` with
+    ``g3`` the third derivative, and one Newton step against the same Hessian the
+    fit already factored gives
+
+        d = 0.5 * H^-1 A' (sigma_eta^2 * g3)
+
+    Everything on the right is already computed: the predictive variances, the
+    likelihood's third derivative, and the Cholesky factor. No new solve of a
+    different matrix and no second pass over the data, which is what makes this
+    close to free.
+
+    This is the "mean" strategy of Van Niekerk & Rue (JMLR 2024,
+    arXiv:2111.12945) taken to leading order, rather than their full low-rank
+    optimisation. On a Poisson likelihood with a flat prior -- where the exact
+    answer is ``digamma(y)`` against a mode of ``log y`` -- it turns an O(1/y)
+    error into an O(1/y^2) one.
+
+    The covariance is deliberately left alone: this corrects where the
+    approximating Gaussian sits, not its shape.
+    """
+    eta_variance = np.clip(quadratic_form_diagonal(reduced_design, reduced_covariance), 0.0, None)
+    third = np.asarray(likelihood.third_derivative(eta, y), dtype=float)
+    return cho_solve(factor, reduced_design.T @ (0.5 * eta_variance * third))
+
+
+def _fit_laplace_dense(
+    model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False
+) -> LaplaceResult:
     likelihood = model.likelihood
     precision = model.precision.toarray()
     latent_size = precision.shape[0]
@@ -141,7 +180,16 @@ def _fit_laplace_dense(model: CompiledLGM, max_iterations: int, tolerance: float
         logdet_posterior = 0.0
         loglik_mode = lk_obs.log_likelihood(offset_obs, y_obs)
 
-    mean = basis @ z if x_p is None else x_p + basis @ z
+    # Only the reported mean moves. `z` stays the mode, because the log marginal
+    # likelihood below is a Laplace approximation *at* it and evaluating that
+    # expansion anywhere else would stop it being one.
+    z_mean = z
+    if mean_correction and reduced_dim:
+        z_mean = z + _variational_mean_shift(
+            reduced_design, reduced_covariance, factor, eta, y_obs, lk_obs
+        )
+
+    mean = basis @ z_mean if x_p is None else x_p + basis @ z_mean
     covariance = basis @ reduced_covariance @ basis.T
     centered = z - prior_mean
     log_marginal_likelihood = float(
@@ -193,15 +241,23 @@ def fit_laplace(
     allow_large_dense: bool = False,
     max_iterations: int = 100,
     tolerance: float = 1e-8,
+    mean_correction: bool = False,
 ) -> LaplaceResult:
     """Fit a latent Gaussian model by a Laplace approximation at fixed hyperparameters.
 
     Likelihood-agnostic: any compiled likelihood implementing the GLM protocol works,
     so a Gaussian likelihood is fit exactly and serves as the correctness anchor.
+
+    ``mean_correction`` moves the reported mean from the conditional mode toward
+    the conditional mean (see :func:`_variational_mean_shift`). It changes
+    ``mean`` and the ``predictive_mean``/``fitted_mean`` derived from it; it
+    leaves the covariance and the log marginal likelihood alone, the latter
+    because that is a Laplace approximation *at the mode* and would stop being
+    one if evaluated anywhere else.
     """
     preflight_dense_reference(model, allow_large_dense=allow_large_dense)
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            return _fit_laplace_dense(model, max_iterations, tolerance)
+            return _fit_laplace_dense(model, max_iterations, tolerance, mean_correction)
     except FloatingPointError as error:
         raise NumericalError("Laplace numerical calculation was non-finite") from error

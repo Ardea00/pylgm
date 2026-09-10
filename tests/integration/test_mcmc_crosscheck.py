@@ -15,7 +15,13 @@ pyLGM's ``gaussian`` latent strategy reports the **joint posterior mode**; MCMC
 reports **marginal posterior means**. In 42 dimensions these genuinely differ,
 even with near-symmetric marginals (the alpha_oral marginal has skew -0.087),
 because the mode is not a typical point in high dimensions. So we do NOT assert
-that pyLGM's means equal the MCMC means -- that would be asserting a falsehood.
+that pyLGM's means equal the MCMC means *by default* -- that would be asserting
+a falsehood.
+
+``mean_correction=True`` closes that gap deliberately, and there the comparison
+becomes fair: ``test_mean_correction_recovers_the_nuts_means`` asserts it. This
+file is where the gap was first written down, so it is where its closing is
+checked.
 
 We assert three things that are true and that would break if the joint machinery
 were wrong:
@@ -151,3 +157,41 @@ def test_joint_mode_mean_gap_is_no_worse_than_a_plain_lgm(reference):
         f"joint max|z| {np.abs(joint_z).max():.3f} vs control {np.abs(single_z).max():.3f}"
     )
     assert np.abs(joint_z).mean() < 0.20
+
+
+def test_mean_correction_recovers_the_nuts_means(reference):
+    """What the mode/mean gap looks like once it is corrected.
+
+    The variational shift moves the reported mean from the conditional mode
+    toward the conditional mean, which is the quantity MCMC estimates. Against
+    4 chains x 8000 draws the RMSE falls about fifteen-fold and every one of the
+    42 components moves closer -- an ordering that would not survive if the
+    correction were merely adding noise of the right size.
+    """
+    _, y_oral, y_lar = _simulate()
+    nuts = reference["joint"]["mean"]
+
+    def gap(**kwargs):
+        frame = pd.DataFrame({
+            "district": list(range(N)) * 2,
+            "oral": list(y_oral) + [np.nan] * N,
+            "larynx": [np.nan] * N + list(y_lar),
+            "row": range(2 * N),
+        })
+        joint = Joint(
+            [LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
+             LGM(response="larynx", likelihood=Poisson(), predictor=Fixed("1"))],
+            shared=[Shared(IID("u", index="district", precision=TAU_U),
+                           scale=(DELTA, 1.0 / DELTA))],
+        )
+        fitted = dict(zip(*(lambda r: (r.labels, r.mean))(joint.fit(frame, engine="laplace", **kwargs))))
+        return np.array([fitted[k] - nuts[k] for k in nuts])
+
+    mode_error = gap()
+    corrected_error = gap(mean_correction=True)
+
+    rmse = lambda e: float(np.sqrt(np.mean(e ** 2)))          # noqa: E731
+    assert rmse(corrected_error) < rmse(mode_error) / 5.0, (rmse(mode_error), rmse(corrected_error))
+    assert np.all(np.abs(corrected_error) < np.abs(mode_error))
+    # and in absolute terms it now agrees with MCMC to within its own noise
+    assert np.abs(corrected_error).max() < 0.02

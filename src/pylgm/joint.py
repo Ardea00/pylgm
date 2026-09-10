@@ -10,6 +10,7 @@ invariants -- ``design == hstack(blocks)`` and ``precision == block_diag(blocks)
 """
 
 from dataclasses import dataclass
+from functools import partial
 
 from scipy.sparse import csr_matrix, vstack
 
@@ -174,7 +175,7 @@ class Joint:
         return obj
 
     def fit(self, frame, engine: str = "laplace", *, hyperparameters: str = "optimize",
-            latent_strategy: str = "gaussian"):
+            latent_strategy: str = "gaussian", mean_correction: bool = False):
         """Compile and fit this joint model. Only ``engine='laplace'`` is supported."""
         import pandas as pd
 
@@ -221,13 +222,13 @@ class Joint:
                 raise ValueError(
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
-            result = self._run_inla(family, latent_strategy)
+            result = self._run_inla(family, latent_strategy, mean_correction)
             compiled = compile_joint(self, panels)
         elif family is None:
             compiled = compile_joint(self, panels)
-            result = fit_laplace(compiled)
+            result = fit_laplace(compiled, mean_correction=mean_correction)
         else:
-            result = self._run_empirical_bayes(family)
+            result = self._run_empirical_bayes(family, mean_correction)
             compiled = compile_joint(self, panels)
 
         contexts = build_joint_prediction_contexts(self, panels, compiled, result)
@@ -265,7 +266,7 @@ class Joint:
                 return sum(float(hp.prior.logpdf(values[hp.name])) for hp in priored)
         return bounds, initial, penalty
 
-    def _run_empirical_bayes(self, family):
+    def _run_empirical_bayes(self, family, mean_correction: bool = False):
         """Type-II ML / MAP-II fit. Mirrors LGM._run_empirical_bayes (model.py:428)."""
         import warnings
 
@@ -275,7 +276,10 @@ class Joint:
 
         bounds, initial, penalty = self._family_optimization_inputs(family)
         eb = optimize_empirical_bayes(
-            family, bounds, initial=initial, fit=fit_laplace, penalty=penalty
+            family, bounds, initial=initial,
+            fit=partial(fit_laplace, mean_correction=mean_correction) if mean_correction
+            else fit_laplace,
+            penalty=penalty,
         )
         diagnostics = dict(eb.fit.diagnostics)
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
@@ -294,13 +298,16 @@ class Joint:
             )
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
-    def _run_inla(self, family, latent_strategy: str = "gaussian"):
+    def _run_inla(self, family, latent_strategy: str = "gaussian",
+                  mean_correction: bool = False):
         """INLA grid integration. Mirrors LGM._run_inla (model.py:450)."""
         from pylgm.inference.laplace import fit_laplace
         from pylgm.optimization.inla import integrate_inla
 
         bounds, initial, penalty = self._family_optimization_inputs(family)
+        conditional = (partial(fit_laplace, mean_correction=True) if mean_correction
+                       else fit_laplace)
         return integrate_inla(
-            family, bounds, initial=initial, fit=fit_laplace, penalty=penalty,
+            family, bounds, initial=initial, fit=conditional, penalty=penalty,
             latent_strategy=latent_strategy,
         )

@@ -52,6 +52,57 @@ any) hit a bound at the mode, so this degradation is visible rather than
 silent. A runnable example lives at
 [`examples/inla/README.md`](https://github.com/Ardea00/pylgm/blob/main/examples/inla/README.md).
 
+### Correcting the mode toward the mean
+
+A Laplace approximation reports the **mode** of the conditional posterior. The
+mode is not its mean whenever the likelihood is skewed, and the gap is
+systematic — always in the same direction, shrinking only as `O(1/n)` per
+observation. `mean_correction=True` closes it:
+
+```python
+result = model.fit(frame, engine="laplace", mean_correction=True)
+```
+
+Minimising `KL(N(x* + d, Sigma) || p)` over a mean shift `d`, holding the Laplace
+covariance fixed, gives one Newton step against the Hessian the fit already
+factored:
+
+```
+d = 0.5 * H^-1 A' (sigma_eta^2 * g3)
+```
+
+with `sigma_eta^2` the predictive variances and `g3` the likelihood's third
+derivative — both already computed, so the correction costs one extra solve
+against an existing factorisation. This is the "mean" strategy of Van Niekerk &
+Rue ([JMLR 2024](https://arxiv.org/abs/2111.12945)) taken to leading order
+rather than as their full low-rank optimisation.
+
+**Measured against MCMC.** On the joint model of
+`tests/integration/test_mcmc_crosscheck.py`, against 4 chains × 8000 NUTS draws
+over 42 latent components:
+
+| | mean bias | RMSE | max abs. error |
+|---|---|---|---|
+| mode (default) | +0.0091 | 0.0556 | 0.292 |
+| `mean_correction=True` | +0.0003 | **0.0038** | **0.011** |
+
+Every one of the 42 components moved closer. On a Poisson likelihood with a flat
+prior — where the exact answer is `digamma(y)` against a mode of `log y` — the
+error drops from `O(1/y)` to `O(1/y^2)`.
+
+**What it does and does not change.** It moves `mean`, and the `predictive_mean`
+and `fitted_mean` derived from it. It leaves the covariance alone (it says where
+the approximating Gaussian sits, not its shape) and leaves
+`log_marginal_likelihood` alone, since that is an expansion *at the mode* and
+would stop being one if evaluated elsewhere. It reaches the empirical-Bayes and
+INLA paths too, because each grid point is a conditional fit. For a Gaussian
+likelihood the shift is identically zero, so the flag is ignored on the
+`exact_gaussian` engine.
+
+It is **off by default**: turning it on changes the reported mean of every
+Laplace fit, which is a decision to make deliberately rather than inherit.
+
+
 ### Simplified-Laplace latent marginals
 
 By default (`latent_strategy="gaussian"`), latent marginals — from either
