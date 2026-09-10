@@ -114,6 +114,49 @@ convention — a point estimate that ignores the linear-predictor variance —
 while the two log-link families (`NegativeBinomial`, `Gamma`) apply the same
 exact lognormal correction `exp(mean + var/2)` as `Poisson`.
 
+## Zero-inflated counts
+
+`ZeroInflated` wraps a count family with an extra point mass at zero, giving ZIP,
+ZINB and ZIB from one class:
+
+```python
+from pylgm import Binomial, Fixed, Hyperparameter, LGM, NegativeBinomial, Poisson, ZeroInflated
+
+# ZIP with a known inflation probability
+LGM("y", ZeroInflated(Poisson(), pi=0.4), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+
+# ...or estimated from the data. pi is a probability, so it takes a logit transform.
+pi = Hyperparameter("pi", initial=0.2, transform="logit")
+LGM("y", ZeroInflated(Poisson(), pi=pi), Fixed("1 + x"), time="t").fit(frame, engine="laplace")
+
+LGM("y", ZeroInflated(NegativeBinomial(phi=2.0), pi=pi), ...)   # ZINB
+LGM("y", ZeroInflated(Binomial(trials="n"), pi=pi), ...)        # ZIB
+```
+
+The model is `P(0) = pi + (1 - pi) f(0)` and `P(y) = (1 - pi) f(y)` for `y > 0`.
+`pi` is the *structural* zero probability — zeros the count process could not have
+produced, over and above the ones it produces naturally — so `fitted_mean` is
+`(1 - pi)` times the base mean, and `pi` is **not** the fraction of zeros you
+observe. On data generated with `pi = 0.45` roughly half the rows are zero.
+
+Use it when a count model leaves more zeros unexplained than it can generate. On
+zero-inflated data the fit is not marginally better but decisively so — a few
+hundred log-likelihood units on a few hundred rows — so the log marginal
+likelihood is a reasonable way to decide.
+
+### What it costs
+
+- **One extra scalar per family.** The optimiser carries a single likelihood
+  scalar beside the block precisions, so a zero-inflated negative binomial
+  estimates `pi` *or* `phi`, not both; fix one to a number. Both estimated is a
+  compilation error rather than a silently ignored parameter.
+- **`pi` is constant across rows.** A covariate-dependent inflation probability
+  (R-INLA's type-1 zero-inflation) would need a second linear predictor, which is
+  a larger change than a likelihood plugin.
+- **The mixture is not log-concave.** The observed curvature at a zero turns the
+  wrong way over a wide band, so the Newton step uses the *expected* information,
+  which is provably positive here. Mode-finding is unaffected in practice.
+
 ## Survival likelihoods
 
 `WeibullSurv` and `ExponentialSurv` fit event-time (duration) data under a

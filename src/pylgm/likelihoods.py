@@ -723,6 +723,202 @@ class NegativeBinomial:
 
 
 @dataclass(frozen=True)
+class CompiledZeroInflated(_CompiledLikelihood):
+    """A count likelihood with an extra point mass at zero.
+
+    ``p(0) = pi + (1 - pi) f(0 | eta)`` and ``p(y) = (1 - pi) f(y | eta)`` for
+    ``y > 0``, where ``f`` is the base count density. ``pi`` is the *structural*
+    zero probability -- zeros the count process could not have produced -- so the
+    fitted mean is ``(1 - pi)`` times the base mean.
+
+    Everything below is written against the base likelihood's own surface rather
+    than per-family, so one wrapper covers ZIP, ZINB and ZIB.
+
+    THE QUANTITY THAT DOES THE WORK
+    -------------------------------
+    ``w`` is the posterior probability that an observed zero came from the count
+    component rather than the point mass. Every derivative is the base's own,
+    damped by ``w``: a zero the count process explains easily keeps its full
+    influence, one it cannot keeps almost none.
+
+    WHY THE WEIGHTS ARE THE EXPECTED INFORMATION
+    --------------------------------------------
+    The *observed* second derivative at a zero is ``w h0 + w(1-w) s0^2``, whose
+    negative can be negative -- the mixture is not log-concave, so a Newton step
+    on it can fail to factor. The expected information is not, and it collapses
+    to something the base already exposes::
+
+        I(eta) = (1 - pi) [ I_base - f0 (1 - w) s0^2 ]
+
+    (the terms in ``h0`` cancel because ``p0 w = (1 - pi) f0``). That is positive
+    for every base here: the subtracted piece is at most ``e^-1`` of the first --
+    ``mu e^-mu <= e^-1`` for Poisson, ``(phi/(1+phi))^(phi+1) < 1`` for negative
+    binomial -- and ``tests/test_zero_inflated.py`` sweeps it rather than trusting
+    the algebra.
+    """
+
+    base: object
+    pi: float
+    link: object = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        pi = self.pi
+        if type(pi) not in (int, float) or not math.isfinite(pi) or not 0.0 <= pi < 1.0:
+            raise ValueError("pi must be a finite real in [0, 1)")
+        object.__setattr__(self, "pi", float(pi))
+        object.__setattr__(self, "link", self.base.link)
+
+    @property
+    def trials(self):
+        """The base's per-row trials, if it has any.
+
+        Read off the *compiled* likelihood by ``inference/laplace.py`` to slice it
+        into observed-row space; a wrapper that hid it would leave a zero-inflated
+        binomial with unbound trials and a NaN log density.
+        """
+        return getattr(self.base, "trials", None)
+
+    def for_observations(self, aux: "Mapping[str, np.ndarray] | None") -> "CompiledZeroInflated":
+        bound = self.base.for_observations(aux)
+        return self if bound is self.base else CompiledZeroInflated(bound, self.pi)
+
+    def restrict(self, observed: np.ndarray) -> "CompiledZeroInflated":
+        bound = self.base.restrict(observed)
+        return self if bound is self.base else CompiledZeroInflated(bound, self.pi)
+
+    # ---- pieces every derivative is built from --------------------------------
+    def _at_zero(self, eta: np.ndarray):
+        """``(log_p0, s0, w, f0_times_one_minus_w)`` -- everything the zero rows need.
+
+        Computed in log space throughout. ``f(0 | eta)`` underflows to zero for a
+        large mean, and forming ``w`` as a ratio of underflowed densities gives
+        ``0/0``: silently wrong at ``pi = 0``, where the wrapper must reduce
+        exactly to its base and ``w`` is identically one.
+        """
+        eta = np.asarray(eta, dtype=float)
+        zeros = np.zeros_like(eta)
+        log_f0 = np.asarray(self.base.pointwise_log_density(eta, zeros), dtype=float)
+        s0 = np.asarray(self.base.gradient(eta, zeros), dtype=float)
+        log_pi = np.log(self.pi) if self.pi > 0.0 else -np.inf
+        log_count = np.log1p(-self.pi) + log_f0
+        log_p0 = np.logaddexp(log_pi, log_count)
+        w = np.exp(log_count - log_p0)
+        # f0 * (1 - w) == exp(log(pi) + log f0 - log p0): zero when pi is, and
+        # never the underflowed-ratio form.
+        f0_gap = np.exp(log_pi + log_f0 - log_p0) if self.pi > 0.0 else np.zeros_like(log_f0)
+        return log_p0, s0, w, f0_gap
+
+    def _base_curvature_at_zero(self, eta: np.ndarray) -> np.ndarray:
+        """``h0`` by central differences on the base score.
+
+        The base exposes its expected information but not its *observed* second
+        derivative, and the two differ where it matters (negative binomial). This
+        appears only in ``third_derivative``, which feeds the simplified-Laplace
+        skewness correction and never the mode.
+        """
+        eta = np.asarray(eta, dtype=float)
+        step = 1e-5 * np.maximum(1.0, np.abs(eta))
+        zeros = np.zeros_like(eta)
+        forward = np.asarray(self.base.gradient(eta + step, zeros), dtype=float)
+        backward = np.asarray(self.base.gradient(eta - step, zeros), dtype=float)
+        return (forward - backward) / (2.0 * step)
+
+    # ---- the likelihood surface ----------------------------------------------
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        base = np.asarray(self.base.pointwise_log_density(eta, y), dtype=float)
+        log_p0, _, _, _ = self._at_zero(eta)
+        positive = np.log1p(-self.pi) + base
+        return np.where(y <= 0.0, log_p0, positive)
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(np.sum(self.pointwise_log_density(eta, y)))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        _, s0, w, _ = self._at_zero(eta)
+        base = np.asarray(self.base.gradient(eta, y), dtype=float)
+        return np.where(y <= 0.0, w * s0, base)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        zeros = np.zeros_like(eta)
+        _, s0, _, f0_gap = self._at_zero(eta)
+        base_information = np.asarray(self.base.working_weights(eta, zeros), dtype=float)
+        return (1.0 - self.pi) * (base_information - f0_gap * s0 ** 2)
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        zeros = np.zeros_like(eta)
+        _, s0, w, _ = self._at_zero(eta)
+        h0 = self._base_curvature_at_zero(eta)
+        t0 = np.asarray(self.base.third_derivative(eta, zeros), dtype=float)
+        at_zero = (1.0 - 2.0 * w) * w * (1.0 - w) * s0 ** 3 + 3.0 * w * (1.0 - w) * s0 * h0 + w * t0
+        base = np.asarray(self.base.third_derivative(eta, y), dtype=float)
+        return np.where(y <= 0.0, at_zero, base)
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return (1.0 - self.pi) * np.asarray(self.base.response_mean(eta), dtype=float)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return (1.0 - self.pi) * np.asarray(
+            self.base.response_prediction(eta_mean, eta_variance), dtype=float
+        )
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        y = np.asarray(y, dtype=float)
+        base = np.asarray(self.base.cdf(eta, y), dtype=float)
+        return np.where(y < 0.0, 0.0, self.pi + (1.0 - self.pi) * base)
+
+    def observed_zero_fraction(self, eta: np.ndarray) -> np.ndarray:
+        """``P(y = 0)`` -- structural and count zeros together."""
+        log_p0, _, _, _ = self._at_zero(eta)
+        return np.exp(log_p0)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        self.base.validate_response(y)
+
+
+@dataclass(frozen=True)
+class ZeroInflated:
+    """Zero-inflation for a count likelihood: ZIP, ZINB or ZIB.
+
+    ``ZeroInflated(Poisson())`` is ZIP, ``ZeroInflated(NegativeBinomial(phi=2.0))``
+    is ZINB, ``ZeroInflated(Binomial(trials="n"))`` is ZIB. ``pi`` is the
+    structural-zero probability and may be a fixed float or a
+    :class:`~pylgm.parameters.Hyperparameter` with ``transform="logit"``, whose
+    interval is the unit one.
+    """
+
+    base: object
+    pi: float | Hyperparameter = 0.1
+
+    def __post_init__(self) -> None:
+        # Zero-inflation is a statement about counts; wrapping a continuous or
+        # survival family would put a point mass where the base has a density.
+        if not isinstance(self.base, (Poisson, NegativeBinomial, Binomial, Bernoulli)):
+            raise ValueError(
+                "zero-inflation applies to a count likelihood (Poisson, "
+                f"NegativeBinomial, Binomial, Bernoulli); got {type(self.base).__name__}"
+            )
+        if isinstance(self.pi, Hyperparameter):
+            if self.pi.transform != "logit":
+                raise ValueError(
+                    "an estimated pi must declare transform='logit'; it is a "
+                    "probability, and the default log transform would let it exceed 1"
+                )
+            return
+        if type(self.pi) not in (int, float) or not math.isfinite(self.pi) or not 0.0 <= self.pi < 1.0:
+            raise ValueError("pi must be a finite real in [0, 1)")
+
+    def materialize(self, values: Mapping[str, float]) -> CompiledZeroInflated:
+        return CompiledZeroInflated(self.base.materialize(values), _resolve_phi(self.pi, values))
+
+
+@dataclass(frozen=True)
 class Gamma:
     """A gamma likelihood with a fixed or optimisable precision phi."""
 

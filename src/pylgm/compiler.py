@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -9,7 +10,7 @@ from formulaic.errors import FormulaicError
 from scipy.sparse import bmat, block_diag, csr_matrix, diags, hstack, identity, kron, vstack
 
 from pylgm.config import RunConfig
-from pylgm.config.schema import DataConfig, ModelConfig
+from pylgm.config.schema import DataConfig, EffectConfig, ModelConfig, build_effect
 from pylgm.data import CanonicalPanel
 from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects import (
@@ -68,7 +69,12 @@ from pylgm.effects.bym2 import (
 )
 from pylgm.effects.proper_car import car_rho_interval
 from pylgm.effects.scaling import sorbye_rue_scale
-from pylgm.exceptions import CompilationError, DataContractError, ModelValidationError
+from pylgm.exceptions import (
+    CompilationError,
+    ConfigurationError,
+    DataContractError,
+    ModelValidationError,
+)
 from pylgm.ir import (
     CompiledFamily,
     CompiledGaussianFamily,
@@ -93,6 +99,7 @@ from pylgm.likelihoods import (
     NegativeBinomial,
     Poisson,
     WeibullSurv,
+    ZeroInflated,
 )
 from pylgm.optimization.empirical_bayes import OptimizationBounds
 from pylgm.optimization.transforms import IdentityTransform, LogitTransform, LogTransform
@@ -131,32 +138,75 @@ def resolve_constraints(
     return matrix, rhs
 
 
+def _unit_precision(effect: EffectConfig) -> EffectConfig:
+    """The same effect declared at precision 1.0, so a scale parameter *is* the precision.
+
+    A wrapper carries no precision of its own -- ``Grouped``'s lives on the effect
+    being copied -- so the override has to reach the inner spec.
+    """
+    if effect.effect is not None:
+        return effect.model_copy(update={"effect": _unit_precision(effect.effect)})
+    return effect.model_copy(update={"precision": 1.0})
+
+
+def _configured_precision(effect: EffectConfig) -> float:
+    inner = effect.effect if effect.effect is not None else effect
+    return 1.0 if inner.precision is None else float(inner.precision)
+
+
 def _structured_blocks(
     model: ModelConfig,
     panel: CanonicalPanel,
     optimized: tuple[str, ...] = (),
-) -> list[LatentBlock]:
+) -> tuple[list[LatentBlock], dict[str, float], dict[str, tuple[tuple[str, ...], object]]]:
+    """Compile configured effects through the same builders as the Python model path.
+
+    Returns the blocks, the precision to record under each effect's own name, and
+    the parametric-precision builders for effects that cannot simply be scaled.
+    An optimized effect is built at precision 1.0 and scaled by its
+    ``<name>.precision`` parameter downstream, so its configured value is only
+    the optimizer's starting point -- which is what goes into the mapping.
+    """
     blocks: list[LatentBlock] = []
+    precisions: dict[str, float] = {}
+    # Effects whose precision is not a plain scale of the whole block. MIDAS is
+    # the only one: its precision multiplies the smoothness penalty alone --
+    # Q(tau) = tau*D'D + ridge*P0 -- so scaling the assembled block would shrink
+    # the lag curve's level and slope too, which is exactly what its design
+    # avoids. These get a ParametricBlock, as the model path already gives them.
+    parametric: dict[str, tuple[tuple[str, ...], object]] = {}
     frame = panel.frame
     for effect in model.effects:
-        parameter = f"{effect.name}.precision"
-        precision = 1.0 if parameter in optimized else effect.precision
+        estimated = f"{effect.name}.precision" in optimized
         try:
-            if effect.type == "iid":
-                block = build_iid(frame, effect.name, effect.index, precision)
-            else:
-                order = 1 if effect.type == "rw1" else 2
-                block = build_random_walk(
-                    frame,
-                    effect.name,
-                    effect.index,
-                    precision,
-                    order,
-                )
-        except (DataContractError, ModelValidationError, TypeError, ValueError) as error:
-            raise CompilationError(f"failed to compile effect {effect.name!r}: {error}") from error
+            built = build_effect(_unit_precision(effect) if estimated else effect, Path("."))
+            block, precision = _build_effect_block(built, frame)
+        except (
+            ConfigurationError,
+            DataContractError,
+            ModelValidationError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise CompilationError(
+                f"failed to compile effect {effect.name!r}: "
+                f"{_effect_failure_detail(error, frame)}"
+            ) from error
+        if precision is not None:
+            precisions[effect.name] = _configured_precision(effect) if estimated else precision
+        if estimated and effect.type == "midas":
+            parameter = f"{effect.name}.precision"
+            dtd, projector = midas_penalty(len(effect.columns or ()),
+                                           2 if effect.order is None else effect.order)
+            ridge = 1e-6 if effect.ridge is None else float(effect.ridge)
+
+            def build(values, dtd=dtd, projector=projector, ridge=ridge, parameter=parameter):
+                return csr_matrix(float(values[parameter]) * dtd + ridge * projector)
+
+            parametric[effect.name] = ((parameter,), build)
         blocks.append(block)
-    return blocks
+    return blocks, precisions, parametric
 
 
 def _effect_failure_detail(error: Exception, frame) -> str:
@@ -183,13 +233,33 @@ def _qualified_labels(blocks: list[LatentBlock]) -> tuple[str, ...]:
     return labels
 
 
+def _index_columns(effects) -> set[str]:
+    """Every data column an effect is indexed by, across all effect shapes.
+
+    Simple and spatial effects use `index`; `spacetime` a (space, time) pair,
+    `dynamicspatialpanel` a (unit, time) pair, MIDAS a list of lag columns, and a
+    wrapper adds its group column on top of whatever it wraps.
+    """
+    columns: set[str] = set()
+    for effect in effects:
+        columns.update(
+            value
+            for value in (effect.index, effect.space, effect.time, effect.unit, effect.over)
+            if value is not None
+        )
+        columns.update(effect.columns or ())
+        if effect.effect is not None:
+            columns.update(_index_columns((effect.effect,)))
+    return columns
+
+
 def _validate_required_columns(data: DataConfig, model: ModelConfig, frame_columns: object) -> None:
     columns = set(frame_columns)
     required_data = {*data.panel, data.time, data.response}
     missing_data = sorted(required_data.difference(columns))
     if missing_data:
         raise DataContractError(f"missing configured data columns: {missing_data}")
-    missing_indexes = sorted({effect.index for effect in model.effects}.difference(columns))
+    missing_indexes = sorted(_index_columns(model.effects).difference(columns))
     if missing_indexes:
         raise DataContractError(f"missing configured effect index columns: {missing_indexes}")
 
@@ -241,11 +311,10 @@ def compile_gaussian_family(
     ) as error:
         raise CompilationError(f"failed to compile fixed formula: {error}") from error
     structured_optimized = tuple(name for name in optimized if name.endswith(".precision"))
-    blocks = [fixed]
-    if structured_optimized:
-        blocks.extend(_structured_blocks(model, panel, optimized))
-    else:
-        blocks.extend(_structured_blocks(model, panel))
+    structured, precisions, parametric = _structured_blocks(
+        model, panel, optimized if structured_optimized else ()
+    )
+    blocks = [fixed, *structured]
     wrong_rows = [block.name for block in blocks if block.design.shape[0] != len(frame)]
     if wrong_rows:
         raise CompilationError(
@@ -255,7 +324,9 @@ def compile_gaussian_family(
     try:
         y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
         scalable_blocks = tuple(
-            ScalableBlock(
+            ParametricBlock(block, *parametric[block.name])
+            if block.name in parametric
+            else ScalableBlock(
                 block,
                 f"{block.name}.precision" if f"{block.name}.precision" in optimized else None,
                 1.0,
@@ -268,10 +339,7 @@ def compile_gaussian_family(
             offset=np.zeros(len(frame)),
             blocks=scalable_blocks,
             parameter_names=optimized,
-            initial=Hyperparameters(
-                sigma=float(model.sigma),
-                precisions={effect.name: float(effect.precision) for effect in model.effects},
-            ),
+            initial=Hyperparameters(sigma=float(model.sigma), precisions=precisions),
         )
     except (TypeError, ValueError) as error:
         raise CompilationError(f"compiled Gaussian family is invalid: {error}") from error
@@ -316,13 +384,24 @@ def _warn_missing_spacetime_main_effects(effects) -> None:
             )
 
 
+def _base_likelihood(likelihood: object) -> object:
+    """The family underneath any wrapper.
+
+    Per-row data and the prediction context belong to the base: a wrapper changes
+    the density, not what columns the family reads. Every ``isinstance`` check on
+    a *count* family has to come through here, or zero-inflating a binomial
+    silently loses its trials column.
+    """
+    return likelihood.base if isinstance(likelihood, ZeroInflated) else likelihood
+
+
 def _likelihood_columns(model: "LGM", frame: object) -> "dict | None":
     """Extract and validate the per-row auxiliary data a likelihood binds.
 
     Returns ``{"trials": ...}`` for Binomial and ``None`` for every family that
     binds no per-row data (its ``for_observations`` hook is then a no-op).
     """
-    like = model.likelihood
+    like = _base_likelihood(model.likelihood)
     if isinstance(like, Binomial):
         column = like.trials
         if column not in frame.columns:
@@ -355,12 +434,44 @@ def _likelihood_columns(model: "LGM", frame: object) -> "dict | None":
 
 
 def _estimable_scalar(likelihood: object) -> "Hyperparameter | None":
-    """The likelihood's optimisable scalar (dispersion phi or Weibull shape), if any."""
+    """The likelihood's optimisable scalar (dispersion phi, Weibull shape, or a
+    zero-inflation pi), if any.
+
+    A family gets **one**: the optimiser carries a single likelihood scalar
+    alongside the block precisions. Zero-inflation therefore estimates either its
+    own ``pi`` or its base's dispersion, not both, and says so rather than
+    resolving one and silently leaving the other at its initial value.
+    """
+    if isinstance(likelihood, ZeroInflated):
+        inner = _estimable_scalar(likelihood.base)
+        if isinstance(likelihood.pi, Hyperparameter):
+            if inner is not None:
+                raise CompilationError(
+                    f"zero-inflated likelihood estimates both {likelihood.pi.name!r} and "
+                    f"{inner.name!r}, but a family carries only one optimisable scalar; "
+                    "fix one of them to a number"
+                )
+            return likelihood.pi
+        return inner
     for attr in ("phi", "shape"):
         value = getattr(likelihood, attr, None)
         if isinstance(value, Hyperparameter):
             return value
     return None
+
+
+def _likelihood_scalar_bounds(likelihood: object, scalar: Hyperparameter) -> OptimizationBounds:
+    """Bounds for a likelihood's own scalar.
+
+    A zero-inflation probability is the one that is not positive-and-unbounded:
+    it lives on the unit interval, so it takes the same logit treatment as a
+    proper-CAR rho rather than the log treatment a dispersion gets.
+    """
+    if isinstance(likelihood, ZeroInflated) and likelihood.pi is scalar:
+        return _bounded_parameter(
+            scalar, 0.0, 1.0, label="zero-inflation probability", inset=1e-6
+        )
+    return _log_bounds(scalar)
 
 
 def _slice_aux(aux: "dict | None", observed: "np.ndarray") -> "dict | None":
@@ -714,7 +825,8 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
     if isinstance(model.likelihood, (Poisson, Bernoulli, Binomial, NegativeBinomial,
-                                     Gamma, Beta, WeibullSurv, ExponentialSurv)):
+                                     Gamma, Beta, WeibullSurv, ExponentialSurv,
+                                     ZeroInflated)):
         # A phi/shape-family with an optimisable scalar compiles here at its
         # initial value (the EB/INLA fit refines it); a fixed-scalar family
         # ignores the mapping.
@@ -1061,12 +1173,13 @@ def _model_hyperparameters(model: "LGM") -> list[tuple[str, Hyperparameter]]:
     found: list[tuple[str, Hyperparameter]] = []
     if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
         found.append(("sigma", model.likelihood.sigma))
-    phi = getattr(model.likelihood, "phi", None)  # NB/Gamma/Beta dispersion/precision
-    if isinstance(phi, Hyperparameter):
-        found.append(("phi", phi))
-    shape = getattr(model.likelihood, "shape", None)  # Weibull survival shape
-    if isinstance(shape, Hyperparameter):
-        found.append(("shape", shape))
+    # One source of truth for "what scalar does this likelihood estimate": reading
+    # phi/shape off the object again here would miss anything nested, which is
+    # how a zero-inflated family's pi went undeclared and left its fit with no
+    # hyperparameters at all.
+    scalar = _estimable_scalar(model.likelihood)  # NB/Gamma/Beta phi, Weibull shape, ZI pi
+    if scalar is not None:
+        found.append(("likelihood", scalar))
     for effect in model.predictor.effects:
         found.extend((effect.name, hp) for hp in _effect_hyperparameters(effect))
     return found
@@ -1888,7 +2001,7 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
         scalar = _estimable_scalar(likelihood)  # NB/Gamma/Beta phi or Weibull shape
         if scalar is not None:
             parameter_names.append(scalar.name)
-            parameter_bounds[scalar.name] = _log_bounds(scalar)
+            parameter_bounds[scalar.name] = _likelihood_scalar_bounds(likelihood, scalar)
 
         # materialize is lenient (picks the scalar out of the joint mapping); a
         # scalar-less family (Poisson/Bernoulli) ignores `resolved` and returns
@@ -2060,7 +2173,8 @@ def build_prediction_context(
         entries=tuple(entries),
         likelihood=compiled.likelihood,
         offset=model.offset,
-        trials=model.likelihood.trials if isinstance(model.likelihood, Binomial) else None,
+        trials=(_base_likelihood(model.likelihood).trials
+                if isinstance(_base_likelihood(model.likelihood), Binomial) else None),
         width=compiled.design.shape[1],
     )
 
@@ -2130,7 +2244,8 @@ def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLG
             entries=tuple(entries),
             likelihood=_submodel_likelihood(model, panel, fitted),
             offset=model.offset,
-            trials=model.likelihood.trials if isinstance(model.likelihood, Binomial) else None,
+            trials=(_base_likelihood(model.likelihood).trials
+                if isinstance(_base_likelihood(model.likelihood), Binomial) else None),
             width=compiled.design.shape[1],
             column_slices=tuple(slices),
         )

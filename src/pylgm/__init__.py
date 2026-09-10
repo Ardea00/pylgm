@@ -39,6 +39,7 @@ from pylgm.likelihoods import (
     NegativeBinomial,
     Poisson,
     WeibullSurv,
+    ZeroInflated,
 )
 from pylgm.model import LGM
 from pylgm.observations import LinearConstraint, LinearObservation
@@ -97,5 +98,6 @@ __all__ = [
     "SpaceTime",
     "Weighted",
     "WeibullSurv",
+    "ZeroInflated",
     "__version__",
 ]
