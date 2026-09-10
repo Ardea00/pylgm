@@ -41,6 +41,7 @@ from pylgm.likelihoods import (
     WeibullSurv,
     ZeroInflated,
 )
+from pylgm.survival import CoxExpansion, expand_cox, log_likelihood_offset
 from pylgm.model import LGM
 from pylgm.observations import LinearConstraint, LinearObservation
 from pylgm.parameters import Hyperparameter
@@ -99,5 +100,8 @@ __all__ = [
     "Weighted",
     "WeibullSurv",
     "ZeroInflated",
+    "CoxExpansion",
+    "expand_cox",
+    "log_likelihood_offset",
     "__version__",
 ]
