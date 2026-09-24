@@ -88,8 +88,31 @@ def test_working_weights_are_the_expected_information(name, spec, trials):
                 + lk.pointwise_log_density(one - step, target)[0]
             ) / step ** 2)
         expected = -float(np.dot(density, curvature))
-        got = lk.working_weights(one, np.array([0.0]))[0]
+        got = lk.fisher_information(one)[0]
         assert got == pytest.approx(expected, rel=1e-4), (name, eta)
+
+
+@pytest.mark.parametrize("name, spec, trials", CASES)
+def test_working_weights_are_the_observed_information_where_it_is_positive(
+    name, spec, trials
+):
+    """Laplace wants the observed curvature; the expected one is only the fallback."""
+    lk = _bound(spec, 1, trials)
+    step = 1e-4
+    for eta in ETAS:
+        one = np.array([eta])
+        for y in (0.0, 1.0, 3.0):
+            target = np.array([y])
+            observed = -float(
+                lk.pointwise_log_density(one + step, target)[0]
+                - 2 * lk.pointwise_log_density(one, target)[0]
+                + lk.pointwise_log_density(one - step, target)[0]
+            ) / step ** 2
+            got = lk.working_weights(one, target)[0]
+            if observed > 1e-3:
+                assert got == pytest.approx(observed, rel=1e-4, abs=1e-6), (name, eta, y)
+            else:
+                assert got == pytest.approx(lk.fisher_information(one)[0]), (name, eta, y)
 
 
 @pytest.mark.parametrize("name, spec, trials", CASES)
