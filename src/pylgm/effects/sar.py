@@ -122,7 +122,7 @@ def _panel_design(
     missing_t = sorted({v for v in obs_t if v not in tpos})
     if missing_t:
         raise ValueError(f"observed time(s) {missing_t!r} have no network graph")
-    cells = np.array([tpos[t] * n + upos[u] for u, t in zip(obs_u, obs_t)])
+    cells = np.array([tpos[t] * n + upos[u] for u, t in zip(obs_u, obs_t, strict=False)])
     return csr_matrix(
         (np.ones(len(frame)), (np.arange(len(frame)), cells)),
         shape=(len(frame), n * len(times)),

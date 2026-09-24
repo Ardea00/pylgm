@@ -119,7 +119,7 @@ def _augmented_split(labels: tuple[str, ...]) -> int | None:
         return None
     half = n // 2
     head, tail = labels[:half], labels[half:]
-    if all(t == f"{h}__u" for h, t in zip(head, tail)):
+    if all(t == f"{h}__u" for h, t in zip(head, tail, strict=False)):
         return half
     return None
 

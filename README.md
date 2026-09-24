@@ -135,14 +135,15 @@ learn them. Reproduce both with
 
 | Area | What you get | Docs |
 |---|---|---|
-| **Likelihoods** | Gaussian (exact), Poisson, Bernoulli, Binomial, negative-binomial, Gamma, Beta, Weibull/exponential survival | [likelihoods](https://ardea00.github.io/pylgm/likelihoods/) |
+| **Likelihoods** | Gaussian (exact), Poisson, Bernoulli, Binomial, negative-binomial, zero-inflated counts, Gamma, Beta, Weibull/exponential survival | [likelihoods](https://ardea00.github.io/pylgm/likelihoods/) |
 | **Effects** | `Fixed`, `IID`, `RW1`/`RW2`, `AR1` (optionally group-wise), `Seasonal`, `MIDAS`, `MIDASParametric`, `SpaceTime` | [effects](https://ardea00.github.io/pylgm/effects/) |
 | **Spatial** | `Besag` (ICAR), `ProperCAR`, `BYM2`, weighted graphs | [spatial](https://ardea00.github.io/pylgm/spatial-effects/) |
 | **Networks** | directed `SAR`, dynamic `DynamicSpatialPanel` (SDPD) with forward forecasting | [spatial](https://ardea00.github.io/pylgm/spatial-effects/) |
 | **Scale** | sparse solver past the dense guard, with the full uncertainty surface | [internals](https://ardea00.github.io/pylgm/internals/) |
 | **Hyperparameters** | Empirical Bayes (type-II ML), MAP-II with PC priors, bounds | [empirical bayes](https://ardea00.github.io/pylgm/empirical-bayes/) |
 | **Integration** | INLA grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT | [INLA](https://ardea00.github.io/pylgm/inla/) |
-| **Prediction** | fit-row, out-of-sample `predict`, and forecasting via `NaN` rows | [prediction](https://ardea00.github.io/pylgm/prediction/) |
+| **Prediction** | fit-row, out-of-sample `predict`, forecasting via `NaN` rows, and joint posterior draws via `sample` | [prediction](https://ardea00.github.io/pylgm/prediction/) |
+| **Aggregates** | `LinearObservation` (noisy, optionally estimated sigma) and exact `LinearConstraint` data on the predictor grid, for temporal disaggregation and nowcasting | [linear observations](https://ardea00.github.io/pylgm/linear-observations/) |
 | **Constraints** | arbitrary linear constraints `A x = e` (R-INLA `extraconstr`) | [effects](https://ardea00.github.io/pylgm/effects/#linear-constraints-extraconstr) |
 | **Data boundary** | Pandas, or Spark / Databricks | [spark](https://ardea00.github.io/pylgm/spark/) |
 

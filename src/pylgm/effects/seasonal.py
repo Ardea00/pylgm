@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, diags
 
-from pylgm.data.scalars import ordered_observed_levels
+from pylgm.data.scalars import ordered_observed_levels, warn_if_unevenly_spaced
 from pylgm.ir.model import LatentBlock
 
 
@@ -67,6 +67,7 @@ def build_seasonal(
     ridge: float,
 ) -> LatentBlock:
     levels = ordered_observed_levels(frame[index])
+    warn_if_unevenly_spaced(levels, name)
     if period < 2:
         raise ValueError(f"{name} period must be at least 2; got {period}")
     if len(levels) <= period:

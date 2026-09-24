@@ -113,8 +113,8 @@ def forecast_dynamic_spatial_panel(result, effect, future_graphs: Mapping) -> pd
     ]
     steps = sdpd_forecast(x_grid[-1], v_grid[-1], rho, gamma, eta, tau, future_ws)
     records = []
-    for t, (mean, var) in zip(future_times, steps):
-        for unit, mean_i, var_i in zip(units, mean, var):
+    for t, (mean, var) in zip(future_times, steps, strict=False):
+        for unit, mean_i, var_i in zip(units, mean, var, strict=False):
             records.append({"unit": unit, "time": t,
                             "latent_mean": mean_i, "latent_variance": var_i})
     return pd.DataFrame.from_records(records)

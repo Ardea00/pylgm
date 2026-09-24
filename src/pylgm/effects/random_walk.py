@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, diags
 
-from pylgm.data.scalars import ordered_observed_levels
+from pylgm.data.scalars import ordered_observed_levels, warn_if_unevenly_spaced
 from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.ir.model import LatentBlock
 
@@ -46,6 +46,7 @@ def build_random_walk(
     order: Literal[1, 2],
 ) -> LatentBlock:
     levels = ordered_observed_levels(frame[index])
+    warn_if_unevenly_spaced(levels, name)
     if len(levels) <= order:
         raise ValueError(f"{name} requires more than {order} ordered levels")
     positions = {level: column for column, level in enumerate(levels)}

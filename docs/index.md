@@ -47,14 +47,15 @@ print(result.fitted_mean.round(3).tolist())
 | Page | Covers |
 |---|---|
 | [How it works](how-it-works.md) | One `fit()` call end to end — compile, engine, solve, hyperparameters — then prediction and forecasting |
-| [Likelihoods](likelihoods.md) | Gaussian (exact), Poisson, Bernoulli, Binomial, negative-binomial, Gamma, Beta, Weibull/exponential survival |
+| [Likelihoods](likelihoods.md) | Gaussian (exact), Poisson, Bernoulli, Binomial, negative-binomial, zero-inflated counts, Gamma, Beta, Weibull/exponential survival |
 | [Effects](effects.md) | `Fixed`, `IID`, `RW1`/`RW2`, `AR1` (optionally replicated), `Seasonal`, `MIDAS`, `SpaceTime` |
 | [Effects → Modifiers](effects.md#weighted-effects) | R-INLA's `f()` arguments as wrappers: `Weighted` (`weights`), `Copy` (`copy`), `Replicated` (`replicate`), `Grouped` (`group` + `control.group`) |
 | [Spatial effects](spatial-effects.md) | `Besag`, `ProperCAR`, `BYM2`, weighted graphs, directed `SAR`, dynamic `DynamicSpatialPanel` |
 | [Effects → Constraints](effects.md#linear-constraints-extraconstr) | Arbitrary linear constraints `A x = e` (R-INLA `extraconstr`) |
 | [Empirical Bayes and priors](empirical-bayes.md) | Type-II ML, MAP-II priors, bounded hyperparameters |
 | [INLA integration](inla.md) | Grid quadrature, simplified/full-Laplace marginals, DIC/WAIC/CPO/PIT |
-| [Prediction](prediction.md) | Fit-row and out-of-sample prediction, and forecasting new levels |
+| [Prediction](prediction.md) | Fit-row and out-of-sample prediction, forecasting new levels, and joint posterior draws |
+| [Linear observations](linear-observations.md) | Aggregates as noisy observations or exact constraints on the predictor grid — temporal disaggregation and nowcasting |
 | [Model comparison](model-comparison.md) | Rolling-origin backtests, candidate selection, calibration metrics, artifacts |
 | [Spark](spark.md) | Spark / Databricks data boundary |
 | [Comparison](comparison.md) | Measured against a GLM, XGBoost and a Metropolis sampler — including where pyLGM loses |

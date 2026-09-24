@@ -873,11 +873,6 @@ class CompiledZeroInflated(_CompiledLikelihood):
         base = np.asarray(self.base.cdf(eta, y), dtype=float)
         return np.where(y < 0.0, 0.0, self.pi + (1.0 - self.pi) * base)
 
-    def observed_zero_fraction(self, eta: np.ndarray) -> np.ndarray:
-        """``P(y = 0)`` -- structural and count zeros together."""
-        log_p0, _, _, _ = self._at_zero(eta)
-        return np.exp(log_p0)
-
     def validate_response(self, y: np.ndarray) -> None:
         self.base.validate_response(y)
 

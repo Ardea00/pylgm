@@ -22,7 +22,6 @@ class SparseSpdFactor:
     """
 
     def __init__(self, matrix: csr_matrix, name: str) -> None:
-        self._name = name
         try:
             # permc_spec chosen for fill-in reduction on GMRF precisions.
             self._lu = splu(matrix.tocsc(), permc_spec="COLAMD")

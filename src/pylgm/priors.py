@@ -151,7 +151,6 @@ class _BoundPCBYM2Phi:
                 f"alpha={self.alpha} is not attainable for this graph; the PC prior "
                 f"admits alpha in ({floor:.6g}, 1)"
             )
-        self._d_one = d_one
         self._rate = _solve_pc_rate(d_upper, d_one, self.alpha)
         # log(-expm1(x)) rather than log1p(-exp(x)): stable when rate*d_one is
         # tiny, which happens for an alpha just above the attainable floor.

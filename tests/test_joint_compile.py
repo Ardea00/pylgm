@@ -284,6 +284,8 @@ def test_shared_rw1_over_integer_index_matches_the_private_labels():
     assert shared_labels == tuple(str(y) for y in years)
 
 
+# The gap is the point: labels must sort numerically, not by string.
+@pytest.mark.filterwarnings("ignore:.*not evenly spaced:UserWarning")
 def test_shared_rw1_over_float_index_matches_the_private_labels():
     values = [1.5, 2.5, 3.5, 10.5, 11.5, 12.5]
     private_labels, shared_labels = _rw1_labels_match_private(values)

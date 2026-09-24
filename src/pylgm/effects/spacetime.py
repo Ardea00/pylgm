@@ -8,7 +8,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix, identity
 from scipy.sparse.csgraph import connected_components
 
-from pylgm.data.scalars import ordered_observed_levels
+from pylgm.data.scalars import ordered_observed_levels, warn_if_unevenly_spaced
 from pylgm.effects.besag import _scaled_structure
 from pylgm.effects.graph import normalize_graph
 from pylgm.effects.kronecker import kron_block
@@ -63,7 +63,9 @@ def build_spacetime(
     else:
         areas = tuple(map(str, ordered_observed_levels(frame[space])))
         w = None
-    times = tuple(map(str, ordered_observed_levels(frame[time])))
+    time_levels = ordered_observed_levels(frame[time])
+    warn_if_unevenly_spaced(time_levels, name)
+    times = tuple(map(str, time_levels))
     S, T = len(areas), len(times)
     if interaction in _TIME_STRUCTURED and T <= order:
         raise ValueError(f"{name} type {interaction} requires more than {order} time levels")

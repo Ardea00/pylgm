@@ -941,7 +941,7 @@ def _shared_incidences(entry, frames, starts, sizes, total, outcomes=()):
         )
     position_of = {level: i for i, level in enumerate(levels)}
     incidences = []
-    for start, size, frame in zip(starts, sizes, frames):
+    for start, size, frame in zip(starts, sizes, frames, strict=False):
         rows = np.arange(start, start + size)
         cols = np.array([position_of[v] for v in frame[index].tolist()])
         incidences.append(
@@ -1063,7 +1063,7 @@ def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> Laten
     default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
     design = sum(
         _resolve_scale(scale, resolved, default) * incidence
-        for scale, incidence in zip(scales, incidences)
+        for scale, incidence in zip(scales, incidences, strict=False)
     ).tocsr()
     return LatentBlock(
         entry.name, template.labels, design, template.precision, template.constraints
@@ -1098,7 +1098,7 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
         total += size
 
     blocks: list[LatentBlock] = []
-    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
+    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames, strict=False)):
         before, after = starts[position], total - starts[position] - sizes[position]
         for effect in model.predictor.effects:
             try:
@@ -1118,13 +1118,13 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
 
     y = np.concatenate([
         frame[name].fillna(0.0).to_numpy(dtype=float)
-        for name, frame in zip(outcomes, frames)
+        for name, frame in zip(outcomes, frames, strict=False)
     ])
     observed = np.concatenate([panels[name].observed for name in outcomes])
-    offset = np.concatenate([_offset_vector(model, frame) for model, frame in zip(joint.submodels, frames)])
+    offset = np.concatenate([_offset_vector(model, frame) for model, frame in zip(joint.submodels, frames, strict=False)])
 
     parts = []
-    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
+    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames, strict=False)):
         mask = np.zeros(total, dtype=bool)
         mask[starts[position] : starts[position] + sizes[position]] = True
         # Gaussian's estimable scalar is `sigma`, not `phi`/`shape`, so it needs
@@ -2194,7 +2194,7 @@ def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLG
 
     fitted = dict(result.hyperparameters or {})
     contexts = {}
-    for outcome, model in zip(joint.outcomes, joint.submodels):
+    for outcome, model in zip(joint.outcomes, joint.submodels, strict=False):
         panel = panels[outcome]
         entries, slices, used_blocks = [], [], []
 
@@ -2336,7 +2336,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
     # effect chain, then pad and rename what it produced. A sub-model with no
     # declared Hyperparameter returns None, in which case its blocks are plain
     # ScalableBlocks built from the compile_joint path.
-    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames)):
+    for position, (outcome, model, frame) in enumerate(zip(outcomes, joint.submodels, frames, strict=False)):
         before, after = starts[position], total - starts[position] - sizes[position]
         sub_family = compile_family(model, panels[outcome])
         if sub_family is None:
@@ -2385,7 +2385,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         def build(values, scales=scales, incidences=incidences, default=default):
             return sum(
                 _resolve_scale(scale, values, default) * incidence
-                for scale, incidence in zip(scales, incidences)
+                for scale, incidence in zip(scales, incidences, strict=False)
             ).tocsr()
 
         names = tuple(dict.fromkeys(s.name for s in estimated))
@@ -2412,11 +2412,11 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
 
     y = np.concatenate([
         frame[name].fillna(0.0).to_numpy(dtype=float)
-        for name, frame in zip(outcomes, frames)
+        for name, frame in zip(outcomes, frames, strict=False)
     ])
     observed = np.concatenate([panels[name].observed for name in outcomes])
     offset = np.concatenate([
-        _offset_vector(model, frame) for model, frame in zip(joint.submodels, frames)
+        _offset_vector(model, frame) for model, frame in zip(joint.submodels, frames, strict=False)
     ])
 
     masks = []
@@ -2433,7 +2433,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         its fixed value -- the same resolution compile_lgm does at its initial.
         """
         parts = []
-        for mask, model, frame in zip(masks, submodels, frames):
+        for mask, model, frame in zip(masks, submodels, frames, strict=False):
             # Gaussian's estimable scalar is `sigma`, not `phi`/`shape`, so it
             # needs the same special case every other dispatch site in this
             # module gives it (compile_lgm, compile_family) -- _estimable_scalar

@@ -46,8 +46,8 @@ def _pad_block_rows(block: LatentBlock, before: int, after: int) -> LatentBlock:
 # A scaled shared field enters slice k as `scale_k * u`. The sentinel
 # ("<name>", "inverse") means "the reciprocal of the hyperparameter <name>",
 # which is how the Knorr-Held & Best (delta, delta^-1) pairing is carried
-# through compilation without inventing an expression language.
-InverseOf = tuple[str, str]
+# through compilation without inventing an expression language (see
+# Shared.scales_for).
 
 
 @dataclass(frozen=True)
