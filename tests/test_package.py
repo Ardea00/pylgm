@@ -41,7 +41,7 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
     }
 
     assert expected.issubset(set(pylgm.__all__))
-    assert pylgm.__version__ == "0.6.0"
+    assert pylgm.__version__ == "0.7.0rc1"
     assert metadata["project"]["version"] == pylgm.__version__
 
 
@@ -54,7 +54,7 @@ def test_docs_do_not_claim_a_different_version_than_the_package() -> None:
     import re
 
     root = Path(__file__).parents[1]
-    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.6.0" -> "0.6"
+    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.7.0rc1" -> "0.7"
     roadmap = (root / "docs" / "roadmap.md").read_text(encoding="utf-8")
 
     claimed = set(re.findall(r"(?:pyLGM|Shipped in) (\d+\.\d+)", roadmap))
@@ -251,6 +251,30 @@ def test_method_comparison_example_reproduces_its_documented_numbers():
     assert "pyLGM (Besag)" in out and "XGBoost" in out
     assert "95% interval coverage" in out
     assert "Metropolis" in out
+
+
+def test_boosted_offset_example_shows_the_combination_and_the_leakage():
+    """Guards the numbers in the boosted_offset README.
+
+    xgboost is deliberately NOT a pyLGM dependency, so this skips when absent.
+    """
+    pytest.importorskip("xgboost")
+    root = Path(__file__).parents[1]
+    ns = runpy.run_path(str(root / "examples/boosted_offset/run.py"))
+    out = ns["main"]()
+    rmse, field = out["eta_rmse"], out["field"]
+
+    # The point of combining: the hybrid beats either method on its own.
+    combined = rmse["boost -> LGM (out-of-fold offset)"]
+    assert combined < 0.7 * min(rmse["boosting alone"], rmse["pyLGM alone"])
+
+    # The point of doing it correctly: an in-sample offset barely moves the
+    # point error but shrinks the field and decalibrates its intervals.
+    honest, leaky = field["boost -> LGM (out-of-fold offset)"], field["boost -> LGM (in-sample offset)"]
+    assert rmse["boost -> LGM (in-sample offset)"] < 1.3 * combined
+    assert leaky["field_sd"] < 0.75 * honest["field_sd"]
+    assert leaky["area.precision"] > 1.5 * honest["area.precision"]
+    assert honest["coverage95"] > 0.9 and leaky["coverage95"] < 0.8
 
 def test_columbus_example_reproduces_published_anselin_values():
     """The credibility anchor: OLS must match Anselin (1988) Table 12.1 exactly,

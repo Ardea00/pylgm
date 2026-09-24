@@ -133,9 +133,14 @@ Three differences matter beyond accuracy:
   or periods are ordered, pyLGM takes that as a graph or an index. A tree must
   rediscover it from data, which costs the data you did not have.
 
-**They compose.** These are not exclusive: boosting the residuals of a fitted
-LGM, or feeding an LGM's smoothed component in as a feature, is often better
-than either alone.
+**They compose.** These are not exclusive, and the composition is concrete:
+put the booster's raw margin in pyLGM's `offset`, so one linear predictor
+carries a boosted nonlinear term *and* a structured latent field with its
+posterior. On a panel built to contain both kinds of signal at once, that
+halves the held-out error of either method alone — and recovers the spatial
+field better than pyLGM does unaided. The reverse order works too, through
+`base_margin`, but forfeits the posterior. See
+[combining with gradient boosting](boosting.md).
 
 ## Versus MCMC and Monte Carlo
 
