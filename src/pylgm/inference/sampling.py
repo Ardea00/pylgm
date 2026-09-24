@@ -1,5 +1,6 @@
 """Joint posterior draws of the linear predictor on the prediction grid."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -33,6 +34,29 @@ class GridSampler:
             deviations = self.posterior.sample_deviations(n, rng)
         eta = self.offset + np.asarray(self.design @ (self.mean + deviations).T).T
         return eta if self.row_order is None else eta[:, self.row_order]
+
+
+@dataclass(frozen=True)
+class RefitSampler:
+    """A grid point's conditional posterior, rebuilt only when it is drawn from.
+
+    An integrated result would otherwise keep every grid point's sampling factor
+    alive -- ``O(points * p * d)`` memory -- for draws that may never be asked
+    for. ``refit`` re-runs that point's conditional fit and returns a
+    ``GridSampler``; its cost is one fit per point that receives draws.
+    """
+
+    refit: Callable[[], GridSampler]
+    row_order: np.ndarray | None = None
+
+    def reordered(self, order: np.ndarray) -> "RefitSampler":
+        return replace(self, row_order=order if self.row_order is None else self.row_order[order])
+
+    def draw(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        sampler = self.refit()
+        if self.row_order is not None:
+            sampler = sampler.reordered(self.row_order)
+        return sampler.draw(n, rng)
 
 
 def sample_mixture(components, n, rng) -> np.ndarray:

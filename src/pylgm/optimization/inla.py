@@ -1,6 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from itertools import product
 
 import numpy as np
@@ -20,6 +21,7 @@ from pylgm.inference.result import (
     TabulatedMarginals,
     quadratic_form_diagonal,
 )
+from pylgm.inference.sampling import RefitSampler
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 
 _SN_C = (4.0 - math.pi) * math.sqrt(2.0) / math.pi ** 1.5
@@ -842,16 +844,31 @@ def integrate_inla(
         observation_variance=observation_acc,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
         latent_marginal_table=latent_marginal_table, latent_variances=latent_variance,
-        mixture=_sampling_mixture(kept, weights),
+        mixture=_sampling_mixture(kept, weights, family, conditional_fit, allow_large_dense),
     )
 
 
-def _sampling_mixture(kept, weights) -> tuple:
-    """``(weight, GridSampler)`` per kept grid point, or ``()`` if any lacks one."""
-    samplers = [getattr(cond, "_sampler", None) for (_, _, cond, _, _) in kept]
-    if any(sampler is None for sampler in samplers):
+def _sampling_mixture(kept, weights, family, conditional_fit, allow_large_dense) -> tuple:
+    """``(weight, RefitSampler)`` per kept grid point, or ``()`` if any lacks a sampler.
+
+    Keeps each point's theta, not its fitted factor: the conditional is refitted
+    at ``sample()`` time, and only for points that receive draws.
+    """
+    if any(getattr(cond, "_sampler", None) is None for (_, _, cond, _, _) in kept):
         return ()
-    return tuple(zip((float(w) for w in weights), samplers, strict=True))
+
+    def refit(theta):
+        compiled = family.materialize(theta)
+        conditional = (
+            conditional_fit(compiled, allow_large_dense=True)
+            if allow_large_dense else conditional_fit(compiled)
+        )
+        return conditional._sampler
+
+    return tuple(
+        (float(w), RefitSampler(partial(refit, dict(theta))))
+        for (_, _, _, theta, _), w in zip(kept, weights, strict=True)
+    )
 
 
 @dataclass(frozen=True)

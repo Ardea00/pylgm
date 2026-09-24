@@ -135,3 +135,29 @@ def test_sample_size_must_be_a_positive_integer(n):
     result = _model().fit(grid, constraints=constraints)
     with pytest.raises(ValueError, match="positive integer"):
         result.sample(n)
+
+
+def test_an_integrated_result_does_not_retain_a_factor_per_grid_point():
+    """Keeping every grid point's dense sampling factor alive after the fit costs
+    O(points * p * d) memory; the mixture must keep theta and refit on demand."""
+    import gc
+    import tracemalloc
+
+    frame = pd.DataFrame({"u": ["a"] * 300, "t": range(300)})
+    frame["y"] = np.sin(np.arange(300) / 7.0)
+    rho = Hyperparameter("rho", initial=0.5, transform="logit")
+    model = LGM(response="y", likelihood=Gaussian(0.5),
+                predictor=AR1("ar", "t", precision=1.0, rho=rho), panel=("u",), time="t")
+
+    gc.collect()
+    tracemalloc.start()
+    result = model.fit(frame, hyperparameters="integrate")
+    gc.collect()
+    retained, _ = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    one_factor = 300 * 300 * 8
+    assert result.diagnostics["inla_grid_points"] >= 5
+    assert retained < 4 * one_factor  # the integrated covariance plus change
+    draws = result.sample(4_000, 0)
+    _assert_moments_match(draws, result.predictive_mean, result.predictive_variance)
