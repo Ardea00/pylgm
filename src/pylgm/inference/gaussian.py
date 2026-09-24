@@ -139,6 +139,45 @@ def _block_slices(model: CompiledLGM) -> Mapping[str, slice]:
     return result
 
 
+def _condition_on_data_constraints(
+    reduced_mean: np.ndarray,
+    logdet_posterior: float,
+    precision: np.ndarray,
+    rows: np.ndarray,
+    rhs: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, tuple | None, float]:
+    """Score and impose data rows ``rows @ z = rhs`` on ``z ~ N(reduced_mean, precision^-1)``.
+
+    Returns the conditioned mean, the basis ``N`` of ``null(rows)`` with the factor
+    of ``N^T P N`` (so the conditioned covariance is ``N (N^T P N)^-1 N^T``), and
+    ``log N(rhs; rows @ mean, rows P^-1 rows^T)``. Everything stays in precision
+    form: a vague direction (``Fixed`` prior) has a tiny precision, never a huge
+    covariance to difference, so the density stays exact where kriging would
+    cancel catastrophically. ``logdet(rows P^-1 rows^T)`` comes from the identity
+    ``logdet(N^T P N) = logdet(P) + logdet(rows P^-1 rows^T) - logdet(rows rows^T)``.
+    """
+    # One SVD gives null(rows), the least-norm particular solution and the gram
+    # logdet; the rows are full rank (redundant ones were dropped at projection).
+    left, singular, right = np.linalg.svd(rows)
+    null = right[rows.shape[0]:].T
+    particular = right[: rows.shape[0]].T @ ((left.T @ rhs) / singular)
+    logdet_gram = float(2.0 * np.log(singular).sum())
+    null_factor, logdet_null = _factor_positive_definite(
+        null.T @ precision @ null, "data-constrained posterior precision"
+    )
+    if null.shape[1]:
+        step = cho_solve(null_factor, null.T @ (precision @ (reduced_mean - particular)))
+        conditioned = particular + null @ step
+    else:
+        conditioned = particular
+    gap = conditioned - reduced_mean
+    log_density = -0.5 * (
+        rhs.size * np.log(2 * np.pi) - logdet_posterior + logdet_null + logdet_gram
+        + gap @ precision @ gap
+    )
+    return conditioned, null, null_factor, float(log_density)
+
+
 def _fit_dense(model: CompiledLGM) -> GaussianResult:
     variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
@@ -146,17 +185,23 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
 
     precision = model.precision.toarray()
     latent_size = precision.shape[0]
-    constraints = model.constraints
     design = model.design
     y = model.y
     offset = model.offset
     observed = model.observed
+    # Condition on the structural rows by reduction; the trailing data rows are
+    # exact observations of A_D x, scored and then imposed by a second reduction.
+    structural_count = model.constraints.shape[0] - model.data_constraint_count
+    constraints = model.constraints[:structural_count]
+    constraint_rhs = model.constraint_rhs[:structural_count]
 
     basis = _constraint_null_space(constraints, latent_size)
-    x_p = _constraint_particular_solution(constraints, model.constraint_rhs, latent_size)
+    x_p = _constraint_particular_solution(constraints, constraint_rhs, latent_size)
     observed_design = design[observed]
-    reduced_design = np.asarray(observed_design @ basis)
-    reduced_precision = basis.T @ precision @ basis
+    # With no structural rows the basis is the identity: skip the O(p^3) products.
+    identity = not constraints.shape[0]
+    reduced_design = np.asarray(observed_design.toarray() if identity else observed_design @ basis)
+    reduced_precision = precision if identity else basis.T @ precision @ basis
     residual = y[observed] - offset[observed]
     # Nonzero-rhs constraint: x = x_p + basis @ z shifts the likelihood residual
     # by design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p),
@@ -179,16 +224,12 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         score = np.asarray(reduced_design.T @ residual / variance).reshape(-1) - prior_linear
         assert factor is not None
         reduced_mean = cho_solve(factor, score)
-        reduced_covariance = cho_solve(factor, np.eye(basis.shape[1]))
         if x_p is not None:
             assert prior_factor is not None
             prior_mean = cho_solve(prior_factor, -prior_linear)
     else:
         reduced_mean = np.empty(0)
-        reduced_covariance = np.empty((0, 0))
 
-    mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
-    covariance = basis @ reduced_covariance @ basis.T
     posterior_residual = residual - reduced_design @ reduced_mean
     centered = reduced_mean - prior_mean
     quadratic = float(
@@ -199,6 +240,25 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     log_marginal_likelihood = -0.5 * (
         n_observed * np.log(2 * np.pi * variance) - logdet_prior + logdet_posterior + quadratic
     ) + model.log_likelihood_normalization
+
+    covariance_basis = basis
+    if model.data_constraint_count:
+        # log p(y, e) = log p(y) + log p(e | y): the data rows are exact observations.
+        data_rows = model.constraints[structural_count:]
+        data_rhs = model.constraint_rhs[structural_count:]
+        if x_p is not None:
+            data_rhs = data_rhs - data_rows @ x_p
+        reduced_mean, null, factor, data_log_density = _condition_on_data_constraints(
+            reduced_mean, logdet_posterior, posterior_precision,
+            data_rows if identity else data_rows @ basis, data_rhs,
+        )
+        log_marginal_likelihood += data_log_density
+        covariance_basis = null if identity else basis @ null
+
+    width = covariance_basis.shape[1]
+    reduced_covariance = cho_solve(factor, np.eye(width)) if width else np.empty((0, 0))
+    mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
+    covariance = covariance_basis @ reduced_covariance @ covariance_basis.T
     prediction_design = model.prediction_design
     predictive_mean = np.asarray(
         model.prediction_offset + prediction_design @ mean
@@ -226,7 +286,7 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         diagnostics={
             "latent_dimension": int(latent_size),
             "observed_count": int(np.count_nonzero(observed)),
-            "constraint_count": int(constraints.shape[0]),
+            "constraint_count": int(model.constraints.shape[0]),
         },
     )
 

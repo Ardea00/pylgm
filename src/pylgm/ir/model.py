@@ -153,6 +153,12 @@ class CompiledLGM:
     _prediction_offset: np.ndarray = field(repr=False)
     prediction_observation_variance: float | None
     log_likelihood_normalization: float
+    data_constraint_count: int
+    """Trailing ``extra_constraints`` rows that are observed data (``LinearConstraint``).
+
+    Their rhs enters the log marginal likelihood as ``log p(e | y)``; every other
+    constraint row (intrinsic or model-level label rows) only conditions.
+    """
 
     def __init__(
         self,
@@ -171,6 +177,7 @@ class CompiledLGM:
         prediction_offset: np.ndarray | None = None,
         prediction_observation_variance: float | None = None,
         log_likelihood_normalization: float = 0.0,
+        data_constraint_count: int = 0,
     ) -> None:
         y = _numeric_array(y, "y", 1, require_finite=False)
         observed = _array(observed, "observed")
@@ -285,6 +292,14 @@ class CompiledLGM:
             )
         if not np.isfinite(log_likelihood_normalization):
             raise ModelValidationError("log likelihood normalization must be finite")
+        if (
+            isinstance(data_constraint_count, bool)
+            or not isinstance(data_constraint_count, (int, np.integer))
+            or not 0 <= data_constraint_count <= extra_constraints.shape[0]
+        ):
+            raise ModelValidationError(
+                "data constraint count must be an integer between 0 and the extra rows"
+            )
         object.__setattr__(self, "_y", _readonly_array(y))
         object.__setattr__(self, "_observed", _readonly_array(observed))
         object.__setattr__(self, "_offset", _readonly_array(offset))
@@ -304,6 +319,7 @@ class CompiledLGM:
         object.__setattr__(
             self, "log_likelihood_normalization", float(log_likelihood_normalization)
         )
+        object.__setattr__(self, "data_constraint_count", int(data_constraint_count))
 
     @property
     def y(self) -> np.ndarray:
