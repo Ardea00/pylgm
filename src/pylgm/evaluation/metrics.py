@@ -134,6 +134,33 @@ def _origin_array(records: list[dict[str, object]]) -> pd.api.extensions.Extensi
     return pd.array(values, dtype=object)
 
 
+def gaussian_crps(actual, mean, standard_deviation) -> np.ndarray:
+    """Closed-form CRPS of ``N(mean, sd^2)`` at ``actual`` (Gneiting & Raftery 2007)."""
+    z = (np.asarray(actual, dtype=float) - mean) / standard_deviation
+    return standard_deviation * (
+        z * (2.0 * norm.cdf(z) - 1.0) + 2.0 * norm.pdf(z) - 1.0 / np.sqrt(np.pi)
+    )
+
+
+def crps_from_draws(draws, actual) -> np.ndarray:
+    """CRPS of the empirical distribution of ``draws`` at ``actual``, per column.
+
+    ``draws`` is ``(n_draws, n_targets)`` -- e.g. ``result.sample(n)``, or any
+    nonlinear transform of it (shares, growth rates) -- and ``actual`` has one
+    value per column. Energy form ``E|X - y| - E|X - X'| / 2``, with the pairwise
+    term computed from the sorted draws in ``O(n log n)``.
+    """
+    draws = np.asarray(draws, dtype=float)
+    actual = np.asarray(actual, dtype=float)
+    if draws.ndim != 2 or actual.shape != (draws.shape[1],):
+        raise ValueError("draws must be (n_draws, n_targets) with one actual per target")
+    count = draws.shape[0]
+    ordered = np.sort(draws, axis=0)
+    rank_weights = (2.0 * np.arange(1, count + 1) - count - 1.0)[:, None]
+    spread = (rank_weights * ordered).sum(axis=0) / count**2
+    return np.abs(draws - actual).mean(axis=0) - spread
+
+
 def score_predictions(
     predictions: pd.DataFrame, interval_levels: tuple[float, ...]
 ) -> pd.DataFrame:
@@ -152,6 +179,8 @@ def score_predictions(
     result["is_benchmark"] = _benchmark_identity(predictions)
     residual = actual - mean
     result["log_predictive_density"] = norm.logpdf(actual, loc=mean, scale=standard_deviation)
+    result["crps"] = gaussian_crps(actual, mean, standard_deviation)
+    result["pit"] = norm.cdf(actual, loc=mean, scale=standard_deviation)
     result["squared_error"] = residual**2
     result["absolute_error"] = np.abs(residual)
     for level in levels:
@@ -194,6 +223,7 @@ def _aggregate_group(
     absolute_error_sum = float(group["absolute_error"].sum())
     bias_sum = float(residual.sum())
     log_density_sum = float(group["log_predictive_density"].sum())
+    crps_sum = float(group["crps"].sum()) if "crps" in group else float("nan")
     mean_log_predictive_density = log_density_sum / count
     result: dict[str, object] = {
         "candidate": candidate,
@@ -210,6 +240,8 @@ def _aggregate_group(
         "mae": absolute_error_sum / count,
         "bias": bias_sum / count,
         "mean_log_predictive_density": mean_log_predictive_density,
+        "crps_sum": crps_sum,
+        "crps": crps_sum / count,
         # Compatibility alias for aggregate consumers. Row-level scored predictions
         # use this name for individual log densities; aggregate values are means.
         "log_predictive_density": mean_log_predictive_density,

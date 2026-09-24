@@ -117,8 +117,8 @@ time. This is the difference between a backtest and a look-ahead.
 | group | columns |
 | --- | --- |
 | point accuracy | `rmse`, `mae`, `bias` |
-| density | `log_predictive_density`, `mean_log_predictive_density` |
-| calibration | `coverage_<level>`, `average_width_<level>` |
+| density | `log_predictive_density`, `mean_log_predictive_density`, `crps` (closed-form Gaussian) |
+| calibration | `coverage_<level>`, `average_width_<level>`; per scored row, `pit` |
 | bookkeeping | `prediction_count`, `evaluation_mode`, `is_benchmark` |
 
 Coverage is the one people skip and shouldn't: a model can win on RMSE while
