@@ -227,7 +227,9 @@ def test_negative_binomial_glm_pieces():
     y = np.array([1.0, 4.0])
     np.testing.assert_allclose(like.response_mean(eta), mu)
     np.testing.assert_allclose(like.gradient(eta, y), 3.0 * (y - mu) / (3.0 + mu))
-    np.testing.assert_allclose(like.working_weights(eta, y), mu * 3.0 / (mu + 3.0))
+    # Observed information (the Laplace curvature); the Fisher one is mu*phi/(mu+phi).
+    np.testing.assert_allclose(like.working_weights(eta, y), 3.0 * mu * (3.0 + y) / (3.0 + mu) ** 2)
+    np.testing.assert_allclose(like.fisher_information(eta), mu * 3.0 / (mu + 3.0))
     assert np.all(like.working_weights(eta, y) > 0)
 
 
@@ -241,7 +243,8 @@ def test_gamma_glm_pieces():
     y = np.array([1.5, 2.0])
     np.testing.assert_allclose(like.response_mean(eta), mu)
     np.testing.assert_allclose(like.gradient(eta, y), 2.0 * (y - mu) / mu)
-    np.testing.assert_allclose(like.working_weights(eta, y), [2.0, 2.0])  # constant shape
+    # Observed information phi * y / mu (the Fisher one is the constant phi).
+    np.testing.assert_allclose(like.working_weights(eta, y), 2.0 * y / mu)
 
 
 def test_beta_glm_pieces():

@@ -147,6 +147,9 @@ class CompiledPoisson(_CompiledLikelihood):
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return self.link.inverse(eta)
 
+    def fisher_information(self, eta: np.ndarray) -> np.ndarray:
+        return self.link.inverse(eta)  # canonical link: equals the observed information
+
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return -np.exp(np.asarray(eta, dtype=float))
 
@@ -191,6 +194,9 @@ class CompiledBernoulli(_CompiledLikelihood):
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         p = self.link.inverse(eta)
         return p * (1.0 - p)
+
+    def fisher_information(self, eta: np.ndarray) -> np.ndarray:
+        return self.working_weights(eta, None)  # canonical link: y-free
 
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         p = self.link.inverse(np.asarray(eta, dtype=float))
@@ -251,6 +257,9 @@ class CompiledBinomial(_CompiledLikelihood):
         p = self.link.inverse(eta)
         return self._n() * p * (1.0 - p)
 
+    def fisher_information(self, eta: np.ndarray) -> np.ndarray:
+        return self.working_weights(eta, None)  # canonical link: y-free
+
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         p = self.link.inverse(np.asarray(eta, dtype=float))
         return -self._n() * p * (1.0 - p) * (1.0 - 2.0 * p)
@@ -307,8 +316,16 @@ class CompiledNegativeBinomial(_CompiledLikelihood):
         return self.phi * (y - mu) / (self.phi + mu)
 
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        # The observed information -d2/deta2, which the Laplace approximation is
+        # defined by. The log link is not canonical for NB2, so this differs from
+        # the Fisher information away from y = mu; it stays positive for y >= 0.
         mu = self.link.inverse(eta)
-        return mu * self.phi / (mu + self.phi)  # Fisher information in eta, > 0
+        y = np.asarray(y, dtype=float)
+        return self.phi * mu * (self.phi + y) / (self.phi + mu) ** 2
+
+    def fisher_information(self, eta: np.ndarray) -> np.ndarray:
+        mu = self.link.inverse(eta)
+        return mu * self.phi / (mu + self.phi)
 
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         mu = self.link.inverse(eta)
@@ -367,7 +384,9 @@ class CompiledGamma(_CompiledLikelihood):
         return self.phi * (y - mu) / mu
 
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.full(np.asarray(eta).shape, float(self.phi), dtype=float)  # Fisher info = phi
+        # Observed information phi * y / mu (the Fisher information is phi): the
+        # Laplace approximation is defined by the observed curvature, positive for y > 0.
+        return self.phi * np.asarray(y, dtype=float) / self.link.inverse(eta)
 
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         mu = self.link.inverse(eta)
@@ -741,12 +760,14 @@ class CompiledZeroInflated(_CompiledLikelihood):
     damped by ``w``: a zero the count process explains easily keeps its full
     influence, one it cannot keeps almost none.
 
-    WHY THE WEIGHTS ARE THE EXPECTED INFORMATION
-    --------------------------------------------
-    The *observed* second derivative at a zero is ``w h0 + w(1-w) s0^2``, whose
-    negative can be negative -- the mixture is not log-concave, so a Newton step
-    on it can fail to factor. The expected information is not, and it collapses
-    to something the base already exposes::
+    WHY THE WEIGHTS FALL BACK TO THE EXPECTED INFORMATION
+    -----------------------------------------------------
+    The Laplace approximation is defined by the observed curvature, and the
+    weights use it wherever they can. But the observed second derivative at a
+    zero is ``w h0 + w(1-w) s0^2``, whose negative can be negative -- the mixture
+    is not log-concave, so a Newton step on it can fail to factor. There the
+    weights fall back to the expected information, which is positive and
+    collapses to something the base already exposes::
 
         I(eta) = (1 - pi) [ I_base - f0 (1 - w) s0^2 ]
 
@@ -809,19 +830,14 @@ class CompiledZeroInflated(_CompiledLikelihood):
         return log_p0, s0, w, f0_gap
 
     def _base_curvature_at_zero(self, eta: np.ndarray) -> np.ndarray:
-        """``h0`` by central differences on the base score.
+        """``h0``, the base's observed second derivative at ``y = 0``.
 
-        The base exposes its expected information but not its *observed* second
-        derivative, and the two differ where it matters (negative binomial). This
-        appears only in ``third_derivative``, which feeds the simplified-Laplace
+        A base's ``working_weights`` is its observed information, so this is exact.
+        It appears only in ``third_derivative``, which feeds the simplified-Laplace
         skewness correction and never the mode.
         """
         eta = np.asarray(eta, dtype=float)
-        step = 1e-5 * np.maximum(1.0, np.abs(eta))
-        zeros = np.zeros_like(eta)
-        forward = np.asarray(self.base.gradient(eta + step, zeros), dtype=float)
-        backward = np.asarray(self.base.gradient(eta - step, zeros), dtype=float)
-        return (forward - backward) / (2.0 * step)
+        return -np.asarray(self.base.working_weights(eta, np.zeros_like(eta)), dtype=float)
 
     # ---- the likelihood surface ----------------------------------------------
     def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -842,12 +858,28 @@ class CompiledZeroInflated(_CompiledLikelihood):
         base = np.asarray(self.base.gradient(eta, y), dtype=float)
         return np.where(y <= 0.0, w * s0, base)
 
-    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def fisher_information(self, eta: np.ndarray) -> np.ndarray:
+        """The expected information ``(1 - pi)[I_base - f0 (1 - w) s0^2]`` (see above)."""
         eta = np.asarray(eta, dtype=float)
-        zeros = np.zeros_like(eta)
         _, s0, _, f0_gap = self._at_zero(eta)
-        base_information = np.asarray(self.base.working_weights(eta, zeros), dtype=float)
+        base_information = np.asarray(self.base.fisher_information(eta), dtype=float)
         return (1.0 - self.pi) * (base_information - f0_gap * s0 ** 2)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """The observed information wherever it is positive, else the expected one.
+
+        A positive count row carries the base's own curvature, exactly. At a zero
+        the observed information ``w I0 - w(1-w) s0^2`` can turn negative, and
+        there the expected information keeps the Newton step factorable. At
+        ``pi = 0`` this is exactly the base's observed information.
+        """
+        eta = np.asarray(eta, dtype=float)
+        y = np.asarray(y, dtype=float)
+        _, s0, w, _ = self._at_zero(eta)
+        at_zero = w * -self._base_curvature_at_zero(eta) - w * (1.0 - w) * s0 ** 2
+        at_zero = np.where(at_zero > 0.0, at_zero, self.fisher_information(eta))
+        positive = np.asarray(self.base.working_weights(eta, np.maximum(y, 0.0)), dtype=float)
+        return np.where(y <= 0.0, at_zero, positive)
 
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta = np.asarray(eta, dtype=float)
