@@ -1,5 +1,6 @@
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
@@ -782,7 +783,7 @@ def integrate_inla(
     y_obs = kept[0][4].y[observed]
     theta_grid = [(w, cond, compiled.likelihood)
                   for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
-    crit = _model_criteria(design_obs, offset_obs, y_obs, theta_grid)
+    crit = _model_criteria(*_criteria_inputs(kept, weights, observed))
 
     # crit.cpo/pit are computed in canonical order over observed rows only (length
     # n_observed); scatter them into full-length canonical arrays aligned with every
@@ -851,6 +852,44 @@ def _sampling_mixture(kept, weights) -> tuple:
     if any(sampler is None for sampler in samplers):
         return ()
     return tuple(zip((float(w) for w in weights), samplers, strict=True))
+
+
+@dataclass(frozen=True)
+class _RowGaussian:
+    """Independent Gaussian rows with per-row standard deviations ``sd``."""
+
+    sd: np.ndarray
+
+    def pointwise_log_density(self, eta, y):
+        return norm.logpdf(y, loc=eta, scale=self.sd)
+
+    def cdf(self, eta, y):
+        return norm.cdf(y, loc=eta, scale=self.sd)
+
+
+def _criteria_inputs(kept, weights, observed):
+    """``(design, offset, y, grid)`` for the model criteria, on the original scale.
+
+    A projected Gaussian fit divides row ``i`` by ``sigma_i`` -- a different
+    ``sigma_i`` at each grid point when it is estimated -- so its standardised
+    rows are neither comparable across the grid nor on the data's scale.
+    Un-standardising gives one theta-free design, offset and response, and a
+    per-point likelihood carrying that point's ``sigma_i``: the densities then
+    include the Jacobian ``-log sigma_i`` and the posterior predictive means mix
+    on one scale.
+    """
+    reference = kept[0][4]
+    design = reference.design[observed]
+    offset = reference.offset[observed]
+    y = reference.y[observed]
+    if reference.row_log_scale is None:
+        grid = [(w, cond, compiled.likelihood)
+                for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
+        return design, offset, y, grid
+    scale = np.exp(reference.row_log_scale[observed])
+    grid = [(w, cond, _RowGaussian(np.exp(compiled.row_log_scale[observed])))
+            for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
+    return design.multiply(scale[:, None]).tocsr(), offset * scale, y * scale, grid
 
 
 def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):

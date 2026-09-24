@@ -159,6 +159,12 @@ class CompiledLGM:
     Their rhs enters the log marginal likelihood as ``log p(e | y)``; every other
     constraint row (intrinsic or model-level label rows) only conditions.
     """
+    row_log_scale: np.ndarray | None
+    """``log sigma_i`` each row was divided by when projected, else ``None``.
+
+    A projected Gaussian fit standardises its rows; pointwise criteria (DIC,
+    WAIC, CPO) add this Jacobian back to report densities on the original scale.
+    """
 
     def __init__(
         self,
@@ -178,6 +184,7 @@ class CompiledLGM:
         prediction_observation_variance: float | None = None,
         log_likelihood_normalization: float = 0.0,
         data_constraint_count: int = 0,
+        row_log_scale: np.ndarray | None = None,
     ) -> None:
         y = _numeric_array(y, "y", 1, require_finite=False)
         observed = _array(observed, "observed")
@@ -320,6 +327,12 @@ class CompiledLGM:
             self, "log_likelihood_normalization", float(log_likelihood_normalization)
         )
         object.__setattr__(self, "data_constraint_count", int(data_constraint_count))
+        if row_log_scale is not None:
+            row_log_scale = _numeric_array(row_log_scale, "row log scale", 1)
+            if row_log_scale.size != rows:
+                raise ModelValidationError("row log scale must have one entry per design row")
+            row_log_scale = _readonly_array(row_log_scale)
+        object.__setattr__(self, "row_log_scale", row_log_scale)
 
     @property
     def y(self) -> np.ndarray:
