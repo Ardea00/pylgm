@@ -1,11 +1,36 @@
 # Roadmap
 
-pyLGM 0.6 is a bounded, correct-by-construction foundation. This page is the
+pyLGM 0.7 is a bounded, correct-by-construction foundation. This page is the
 honest map of what's shipped, what's next, and what's deliberately deferred.
 For the precise semantics of each shipped feature, follow the links into the
 [guide](index.md).
 
-## Shipped in 0.6
+## Shipped in 0.7
+
+New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
+
+- **Linear observations and exact aggregates** — `LinearObservation` (noisy
+  aggregates, with a fixed or estimated `sigma`) and `LinearConstraint` (exact
+  aggregates) on the predictor grid, for temporal disaggregation, benchmarking
+  and nowcasting. Exact aggregates are data: they enter the log marginal
+  likelihood as `log p(e | y)`, so empirical Bayes and INLA learn from them. See
+  [linear observations](linear-observations.md).
+- **Joint posterior draws** — `result.sample(n, rng)` for exact-Gaussian (dense
+  and sparse), Laplace and integrated fits, every draw meeting the exact
+  constraints; `pylgm.evaluation.crps_from_draws` scores nonlinear targets built
+  from them, and scored predictions carry `crps` and `pit`. See
+  [prediction](prediction.md#joint-posterior-draws).
+- **Likelihoods** — zero-inflated counts (`ZeroInflated`: ZIP, ZINB, ZIB);
+  negative binomial, gamma and zero-inflated Laplace fits now use the observed
+  curvature at the mode. See [likelihoods](likelihoods.md).
+- **Inference** — `mean_correction=True` moves a Laplace mean from the mode
+  toward the posterior mean; INLA explores the hyperparameter grid by density
+  and switches to CCD or a Korobov lattice past a handful of hyperparameters;
+  simulation-based calibration in `pylgm.validation`.
+- **Effects** — `RW1`/`RW2` take `scale=True` (Sørbye-Rue, R-INLA's
+  `scale.model`).
+
+## Shipped through 0.6
 
 - **Likelihoods** — Gaussian (exact engine), Poisson, Bernoulli, Binomial
   (counts `n·p` with a per-row trials column), NegativeBinomial (overdispersed
