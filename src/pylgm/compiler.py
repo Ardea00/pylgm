@@ -648,7 +648,7 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
             precision = _resolved_precision(effect.precision)
             order = 1 if isinstance(effect, RW1) else 2
             block = build_random_walk(
-                frame, effect.name, effect.index, precision, order
+                frame, effect.name, effect.index, precision, order, effect.scale
             )
         elif isinstance(effect, Seasonal):
             precision = _resolved_precision(effect.precision)
@@ -1872,7 +1872,8 @@ def _append_family_blocks(
     elif isinstance(effect, (RW1, RW2)):
         order = 1 if isinstance(effect, RW1) else 2
         block = _compiled_block(
-            effect.name, build_random_walk, frame, effect.name, effect.index, value, order
+            effect.name, build_random_walk, frame, effect.name, effect.index, value, order,
+            effect.scale,
         )
     else:
         # As in compile_lgm: never let an unrecognized effect become an RW2.

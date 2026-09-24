@@ -76,11 +76,19 @@ class IID(_ComposableEffect):
 
 @dataclass(frozen=True)
 class RW1(_ComposableEffect):
-    """A first-order random-walk latent effect."""
+    """A first-order random-walk latent effect.
+
+    ``scale=True`` applies Sørbye-Rue scaling (R-INLA's ``scale.model``), as
+    ``Besag`` and the ``RW*Structure`` between-group factors already do: the
+    precision then sets the typical marginal variance rather than the variance
+    of one increment, so a PC prior on it means the same thing across grid
+    lengths and effect types. Off by default, as in R-INLA.
+    """
 
     name: str
     index: str
     precision: float | Hyperparameter = 1.0
+    scale: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
@@ -88,15 +96,25 @@ class RW1(_ComposableEffect):
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )
+        if not isinstance(self.scale, bool):
+            raise ValueError("scale must be a boolean")
 
 
 @dataclass(frozen=True)
 class RW2(_ComposableEffect):
-    """A second-order random-walk latent effect."""
+    """A second-order random-walk latent effect.
+
+    ``scale=True`` applies Sørbye-Rue scaling (R-INLA's ``scale.model``), as
+    ``Besag`` and the ``RW*Structure`` between-group factors already do: the
+    precision then sets the typical marginal variance rather than the variance
+    of one increment, so a PC prior on it means the same thing across grid
+    lengths and effect types. Off by default, as in R-INLA.
+    """
 
     name: str
     index: str
     precision: float | Hyperparameter = 1.0
+    scale: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
@@ -104,6 +122,8 @@ class RW2(_ComposableEffect):
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )
+        if not isinstance(self.scale, bool):
+            raise ValueError("scale must be a boolean")
 
 
 @dataclass(frozen=True)

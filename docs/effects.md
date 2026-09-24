@@ -67,7 +67,7 @@ few observations are shrunk more. That is the difference the
 `IID` is also how you add a **frailty** to a survival model, and the
 unstructured half of a `BYM2` convolution.
 
-### `RW1(name, index, precision=1.0)` and `RW2(...)`
+### `RW1(name, index, precision=1.0, scale=False)` and `RW2(...)`
 
 Smoothness priors over an **ordered** index. `RW1` penalises first differences
 (the level wanders, the trend is locally flat), `RW2` penalises second
@@ -84,6 +84,13 @@ Both are **intrinsic**: rank-deficient by 1 and 2 respectively, with the null
 space (level, and level+slope) removed by sum-to-zero constraints. That null
 space is a nuisance absorbed by the intercept — which is exactly the opposite of
 [`Seasonal`](#seasonal-effect), whose null space is the signal.
+
+`scale=True` applies Sørbye-Rue scaling (R-INLA's `scale.model = TRUE`), as
+`Besag` does by default: the structure is rescaled so the geometric mean of its
+generalized marginal variances is one, and `τ` then sets the typical marginal
+variance rather than the variance of a single increment. That makes a PC prior
+on `τ` mean the same thing whatever the grid length. The default stays
+unscaled, as in R-INLA.
 
 Choose by what you believe about the trend, and note the forecasting
 consequence: past the last observation `RW1` projects a flat mean with variance
@@ -570,7 +577,7 @@ ratio and what it means for a model that mixes the two.
 between `Grouped` and `SpaceTime`.** `RW1Structure()`/`RW2Structure()` build
 their between-group precision Sørbye-Rue *scaled* (`rw_structure(n, order,
 scale=True)`), while a plain `RW1`/`RW2` passed as the *inner* effect is
-*unscaled*, the same as everywhere else in the library. So
+*unscaled* unless it is declared with `scale=True`. So
 `Grouped(RW1("u", index="t"), over="g", structure=RW1Structure())` compiles to
 exactly `kron(rw_structure(G, 1, scale=True), rw_structure(T, 1, scale=False))`
 — the outer factor scaled, the inner factor not, both spelled `RW1` in the

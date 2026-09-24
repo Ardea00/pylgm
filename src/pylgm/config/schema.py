@@ -88,8 +88,8 @@ _WRAPPER_EFFECTS = ("grouped",)
 _ALLOWED_FIELDS = {
     "grouped": {"over", "effect", "structure"},
     "iid": {"index", "precision"},
-    "rw1": {"index", "precision"},
-    "rw2": {"index", "precision"},
+    "rw1": {"index", "precision", "scale"},
+    "rw2": {"index", "precision", "scale"},
     "ar1": {"index", "precision", "rho", "group"},
     "seasonal": {"index", "precision", "period", "ridge"},
     "besag": {"index", "precision", "graph", "graph_file", "scale"},
@@ -266,6 +266,8 @@ def build_effect(config: EffectConfig, base_dir: Path) -> object:
         # Left unset, precision defaults to 1.0 -- as it does for every other type.
         simple = {"iid": IID, "rw1": RW1, "rw2": RW2}
         precision = 1.0 if config.precision is None else config.precision
+        if config.scale is not None:
+            return simple[config.type](config.name, config.index, precision, scale=config.scale)
         return simple[config.type](config.name, config.index, precision)
 
     if config.type == "ar1":
