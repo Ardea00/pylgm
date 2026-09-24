@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.linalg import null_space, qr
+from scipy.linalg import orth, qr
 from scipy.sparse import csr_matrix, issparse, vstack
 
 from pylgm.exceptions import ModelValidationError, UnsupportedEngineError
@@ -131,13 +131,13 @@ def _constraint_rows(model: CompiledLGM, constraints: tuple[LinearConstraint, ..
     proposed = vstack(rows, format="csr")
     proposed_rhs = np.concatenate(rhs)
 
+    # Only (rows x latent) arrays are formed: the rank reduction projects out
+    # the structural row space instead of building its latent x latent null space.
     dense_bytes = (
         (model.constraints.shape[0] + proposed.shape[0])
         * proposed.shape[1]
         * np.dtype(float).itemsize
     )
-    if model.constraints.shape[0]:
-        dense_bytes += proposed.shape[1] ** 2 * np.dtype(float).itemsize
     if dense_bytes > _MAX_DENSE_CONSTRAINT_WORKSPACE_BYTES:
         raise ModelValidationError(
             "LinearConstraint rank reduction requires up to "
@@ -154,8 +154,17 @@ def _constraint_rows(model: CompiledLGM, constraints: tuple[LinearConstraint, ..
     if np.max(np.abs(combined @ solution - combined_rhs), initial=0.0) > 1e-9 * scale:
         raise ModelValidationError("linear constraints are mutually inconsistent")
 
-    reduced = proposed @ null_space(model.constraints) if model.constraints.shape[0] else proposed
-    rank = np.linalg.matrix_rank(reduced)
+    # Components of the proposed rows outside the structural row space. With
+    # an orthonormal basis N of null(C0), proposed @ N and proposed @ N @ N.T
+    # differ by an orthogonal map, so rank and pivoted QR are unchanged.
+    reduced = proposed
+    if model.constraints.shape[0]:
+        basis = orth(model.constraints.T)
+        reduced = proposed - (proposed @ basis) @ basis.T
+    # The projection cancels the structural component, so the singular values
+    # of ``reduced`` are judged against the scale of the original rows.
+    tolerance = max(reduced.shape) * np.finfo(float).eps * np.linalg.norm(proposed, 2)
+    rank = np.linalg.matrix_rank(reduced, tol=tolerance) if proposed.size else 0
     if rank:
         keep = np.sort(qr(reduced.T, mode="economic", pivoting=True)[2][:rank])
         proposed, proposed_rhs = proposed[keep], proposed_rhs[keep]
