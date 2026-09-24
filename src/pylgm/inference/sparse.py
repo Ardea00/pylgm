@@ -2,9 +2,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.linalg import cho_solve, null_space
+from scipy.linalg import cho_solve, null_space, solve_triangular
 from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import splu
+from scipy.sparse.linalg import spsolve_triangular, splu
 
 from pylgm.exceptions import NumericalError
 from pylgm.inference.gaussian import _block_slices, _factor_positive_definite
@@ -96,6 +96,44 @@ class SparsePosterior:
     d_factor: object | None            # cho_factor of D (dense-only case)
     w_constraint: "np.ndarray | None"  # Sigma A_c^T  (latent x c), kriging basis
     cap_factor: object | None          # cho_factor of A_c Sigma A_c^T
+    constraint_rows: "np.ndarray | None" = None  # A_c (c x latent), for sampling
+
+    def sample_deviations(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        """``n`` draws of ``x - mean`` from the constrained posterior, ``(n, latent)``.
+
+        Unconstrained ``N(0, P_post^-1)`` via the block factorisation
+        ``P = U^T diag(A_ss, S) U`` with ``U = [[I, A_ss^-1 B], [0, I]]``: draw
+        ``a ~ N(0, A_ss^-1)`` from a symmetric LDL^T of ``A_ss``, ``c ~ N(0, S^-1)``
+        from the Schur Cholesky, then ``x_d = c``, ``x_s = a - A_ss^-1 B c``.
+        Conditioning by kriging, ``x <- x - W K^-1 A x`` (Rue & Held 2005 sec
+        2.3.3), makes every draw satisfy ``A x = 0`` so ``mean + x`` meets the rhs.
+        """
+        s, d = self.sparse_index, self.dense_index
+        out = np.zeros((self.latent_size, n))
+        if d.size:
+            factor = self.schur_factor if s.size else self.d_factor
+            out[d] = solve_triangular(
+                factor[0], rng.standard_normal((d.size, n)), lower=True, trans="T"
+            )
+        if s.size:
+            lu = splu(
+                self.a_ss_matrix.tocsc(), permc_spec="MMD_AT_PLUS_A",
+                options=dict(SymmetricMode=True), diag_pivot_thresh=0.0,
+            )
+            if not np.array_equal(lu.perm_r, lu.perm_c):
+                raise NumericalError("sampling expected a symmetric factorization")
+            scaled = rng.standard_normal((s.size, n)) / np.sqrt(lu.U.diagonal())[:, None]
+            # L D L^T = A_ss[q][:, q] with q = argsort(perm_c), so x = y[perm_c].
+            draw = spsolve_triangular(lu.L.T.tocsr(), scaled, lower=False)[lu.perm_c]
+            if d.size:
+                draw = draw - self.a_ss.solve(self.b @ out[d])
+            out[s] = draw
+        if self.constraint_rows is not None:
+            out = _kriged(
+                out, self.w_constraint, self.cap_factor, self.constraint_rows,
+                np.zeros((self.constraint_rows.shape[0], 1)),
+            )
+        return out.T
 
     def apply_inverse(self, rhs: np.ndarray) -> np.ndarray:
         """``P_post^-1 @ rhs`` via the same Schur solve as the mean; 1-D or 2-D."""
@@ -384,12 +422,17 @@ def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:
     ``eps * cond``. Re-applying the same correction to that residual is classic
     iterative refinement: each pass costs a matvec and a small triangular solve.
     """
-    scale = max(1.0, float(np.abs(rhs).max(initial=0.0)))
+    gap = rows @ mean - rhs
+    size = float(np.abs(gap).max(initial=0.0))
+    tolerance = 1e-13 * max(1.0, float(np.abs(rhs).max(initial=0.0)), size)
     for _ in range(max_passes):
-        gap = rows @ mean - rhs
-        if np.abs(gap).max(initial=0.0) <= 1e-13 * scale:
+        if size <= tolerance:
             break
         mean = mean - w @ cho_solve(factor, gap)
+        gap = rows @ mean - rhs
+        previous, size = size, float(np.abs(gap).max(initial=0.0))
+        if size > 0.5 * previous:  # stalled at the rounding floor
+            break
     return mean
 
 
@@ -563,6 +606,7 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         d_factor=d_factor,
         w_constraint=w_constraint,
         cap_factor=cap_factor_ref,
+        constraint_rows=a if constraint_count else None,
     )
     return SparseFit(
         mean=mean,

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     # result.py must not import sparse.py at runtime -- sparse.py imports
     # helpers from gaussian.py, which imports GaussianResult from here, so a
     # top-level import of SparsePosterior would be circular.
+    from pylgm.inference.sampling import GridSampler
     from pylgm.inference.sparse import SparsePosterior
 
 
@@ -797,6 +798,30 @@ class _BaseResult:
             raise NotImplementedError(_NO_POSTERIOR)
         return linear_combinations_from(self._mean, self._covariance, weights)
 
+    def _sampling_components(self) -> tuple:
+        """``(weight, GridSampler)`` pairs; empty when the engine keeps no sampler."""
+        return ()
+
+    def sample(self, n: int, rng=None) -> np.ndarray:
+        """Joint posterior draws of the linear predictor, shape ``(n, grid_rows)``.
+
+        Each row is one draw of ``eta`` on the prediction grid, aligned with
+        ``predictive_mean`` and without observation noise, so nonlinear targets
+        (shares, growth rates, ``P(eta < 0)``, CRPS/PIT) are computed per draw.
+        Every draw satisfies all exact constraints. An integrated (INLA) result
+        mixes draws across the hyperparameter grid by the integration weights.
+        ``rng`` is anything ``numpy.random.default_rng`` accepts.
+        """
+        from pylgm.inference.sampling import sample_mixture
+
+        components = self._sampling_components()
+        if not components:
+            raise NotImplementedError(
+                f"{type(self).__name__} keeps no joint posterior to sample from; "
+                "sample() is available for exact-Gaussian fits (optimized or integrated)"
+            )
+        return sample_mixture(components, n, rng)
+
     def predict(self, new_data, outcome: str | None = None):
         """Score new rows against this result's latent posterior.
 
@@ -854,6 +879,7 @@ class GaussianResult(_BaseResult):
 
     observation_variance: float | None
     _sparse_posterior: "SparsePosterior | None" = field(repr=False)
+    _sampler: "GridSampler | None" = field(repr=False)
 
     def __init__(
         self,
@@ -871,6 +897,7 @@ class GaussianResult(_BaseResult):
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
         sparse_posterior: "SparsePosterior | None" = None,
+        sampler: "GridSampler | None" = None,
     ) -> None:
         def _validate_observation_variance() -> None:
             if observation_variance is None:
@@ -885,6 +912,7 @@ class GaussianResult(_BaseResult):
                 None if observation_variance is None else float(observation_variance),
             )
             object.__setattr__(self, "_sparse_posterior", sparse_posterior)
+            object.__setattr__(self, "_sampler", sampler)
 
         self._init_common(
             labels=labels,
@@ -901,6 +929,9 @@ class GaussianResult(_BaseResult):
             extra_validate=_validate_observation_variance,
             extra_store=_store_gaussian_extras,
         )
+
+    def _sampling_components(self) -> tuple:
+        return () if self._sampler is None else ((1.0, self._sampler),)
 
 
 @dataclass(frozen=True, init=False)
@@ -1062,6 +1093,7 @@ class INLAResult(_BaseResult):
     link_name: str | None
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
     _latent_variances: np.ndarray | None = field(repr=False)
+    _mixture: tuple = field(repr=False)
 
     def __init__(
         self,
@@ -1084,6 +1116,7 @@ class INLAResult(_BaseResult):
         prediction_context: object | None = None,
         observation_variance: float | None = None,
         latent_variances: np.ndarray | None = None,
+        mixture: tuple = (),
     ) -> None:
         def _validate_inla_extras() -> None:
             if not isinstance(criteria, ModelCriteria):
@@ -1121,6 +1154,7 @@ class INLAResult(_BaseResult):
                 "_latent_variances",
                 latent_variances if latent_variances is None else _readonly_array(latent_variances),
             )
+            object.__setattr__(self, "_mixture", tuple(mixture))
 
         self._init_common(
             labels=labels,
@@ -1172,3 +1206,6 @@ class INLAResult(_BaseResult):
     @property
     def criteria(self) -> ModelCriteria:
         return self._criteria
+
+    def _sampling_components(self) -> tuple:
+        return self._mixture

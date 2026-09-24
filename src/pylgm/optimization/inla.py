@@ -841,7 +841,16 @@ def integrate_inla(
         observation_variance=observation_acc,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
         latent_marginal_table=latent_marginal_table, latent_variances=latent_variance,
+        mixture=_sampling_mixture(kept, weights),
     )
+
+
+def _sampling_mixture(kept, weights) -> tuple:
+    """``(weight, GridSampler)`` per kept grid point, or ``()`` if any lacks one."""
+    samplers = [getattr(cond, "_sampler", None) for (_, _, cond, _, _) in kept]
+    if any(sampler is None for sampler in samplers):
+        return ()
+    return tuple(zip((float(w) for w in weights), samplers, strict=True))
 
 
 def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):
