@@ -26,6 +26,7 @@ rather than remembered.
 | [`general_lgm`](https://github.com/Ardea00/pylgm/tree/main/examples/general_lgm) | The same model through both the Python and the YAML frontend |
 | [`count_glm`](https://github.com/Ardea00/pylgm/tree/main/examples/count_glm) | A Poisson count model on the Laplace engine |
 | [`method_comparison`](https://github.com/Ardea00/pylgm/tree/main/examples/method_comparison) | pyLGM against a GLM, XGBoost and a Metropolis sampler — see [comparison](comparison.md) |
+| [`boosted_offset`](https://github.com/Ardea00/pylgm/tree/main/examples/boosted_offset) | Gradient boosting **and** pyLGM in one linear predictor via `offset=` — halves the error of either alone, and shows how an in-sample offset silently decalibrates the posterior. Guide: [combining with gradient boosting](boosting.md) |
 
 ## Spatial and network structure
 
