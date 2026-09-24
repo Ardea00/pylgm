@@ -822,8 +822,7 @@ class _BaseResult:
         components = self._sampling_components()
         if not components:
             raise NotImplementedError(
-                f"{type(self).__name__} keeps no joint posterior to sample from; "
-                "sample() is available for exact-Gaussian fits (optimized or integrated)"
+                f"{type(self).__name__} keeps no joint posterior to sample from"
             )
         return sample_mixture(components, n, rng)
 
@@ -1020,6 +1019,7 @@ class LaplaceResult(_BaseResult):
 
     _fitted_mean: np.ndarray = field(repr=False)
     link_name: str
+    _sampler: "GridSampler | None" = field(repr=False)
 
     def __init__(
         self,
@@ -1037,10 +1037,12 @@ class LaplaceResult(_BaseResult):
         *,
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
+        sampler: "GridSampler | None" = None,
     ) -> None:
         def _store_laplace_extras() -> None:
             object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
             object.__setattr__(self, "link_name", str(link_name))
+            object.__setattr__(self, "_sampler", sampler)
 
         self._init_common(
             labels=labels,
@@ -1056,6 +1058,9 @@ class LaplaceResult(_BaseResult):
             prediction_context=prediction_context,
             extra_store=_store_laplace_extras,
         )
+
+    def _sampling_components(self) -> tuple:
+        return () if self._sampler is None else ((1.0, self._sampler),)
 
     @property
     def fitted_mean(self) -> np.ndarray:

@@ -1,5 +1,6 @@
 import numpy as np
-from scipy.linalg import cho_solve
+from scipy.linalg import cho_solve, solve_triangular
+from scipy.sparse import csr_matrix
 
 from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference.gaussian import (
@@ -11,6 +12,7 @@ from pylgm.inference.gaussian import (
     preflight_dense_reference,
 )
 from pylgm.inference.result import LaplaceResult, quadratic_form_diagonal
+from pylgm.inference.sampling import GridSampler
 from pylgm.ir.model import CompiledLGM
 
 
@@ -173,10 +175,11 @@ def _fit_laplace_dense(
         weights = lk_obs.working_weights(eta, y_obs)
         hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
         factor, logdet_posterior = _factor_positive_definite(hessian, "reduced posterior precision")
-        reduced_covariance = cho_solve(factor, np.eye(reduced_dim))
+        # Covariance = F F^T with F = basis L^-T; F doubles as the sampling factor.
+        covariance_factor = solve_triangular(factor[0], basis.T, lower=True).T
         loglik_mode = lk_obs.log_likelihood(eta, y_obs)
     else:
-        reduced_covariance = np.empty((0, 0))
+        covariance_factor = np.zeros((latent_size, 0))
         logdet_posterior = 0.0
         loglik_mode = lk_obs.log_likelihood(offset_obs, y_obs)
 
@@ -186,11 +189,11 @@ def _fit_laplace_dense(
     z_mean = z
     if mean_correction and reduced_dim:
         z_mean = z + _variational_mean_shift(
-            reduced_design, reduced_covariance, factor, eta, y_obs, lk_obs
+            reduced_design, cho_solve(factor, np.eye(reduced_dim)), factor, eta, y_obs, lk_obs
         )
 
     mean = basis @ z_mean if x_p is None else x_p + basis @ z_mean
-    covariance = basis @ reduced_covariance @ basis.T
+    covariance = covariance_factor @ covariance_factor.T
     centered = z - prior_mean
     log_marginal_likelihood = float(
         loglik_mode
@@ -232,6 +235,7 @@ def _fit_laplace_dense(
             # the fit, so a rescued mode is auditable in the field.
             "newton_decrement": newton_decrement,
         },
+        sampler=GridSampler(mean, csr_matrix(design), offset, factor=covariance_factor),
     )
 
 

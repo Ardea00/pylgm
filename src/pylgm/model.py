@@ -209,7 +209,12 @@ def _rebuild_result(
         fitted_mean = (
             result.fitted_mean[caller_order] if caller_order is not None else result.fitted_mean
         )
-        return LaplaceResult(fitted_mean=fitted_mean, link_name=result.link_name, **common)
+        sampler = result._sampler
+        if sampler is not None and caller_order is not None:
+            sampler = sampler.reordered(caller_order)
+        return LaplaceResult(
+            fitted_mean=fitted_mean, link_name=result.link_name, sampler=sampler, **common
+        )
     if isinstance(result, INLAResult):
         fitted_mean = (
             result.fitted_mean[caller_order]
