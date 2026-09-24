@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix, issparse, vstack
 from pylgm.exceptions import ModelValidationError, UnsupportedEngineError
 from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian
+from pylgm.parameters import Hyperparameter
 
 
 _MAX_DENSE_CONSTRAINT_WORKSPACE_BYTES = 64 * 1024 * 1024
@@ -45,19 +46,31 @@ def _vector(value: object, name: str) -> np.ndarray:
 class LinearObservation:
     """Independent Gaussian observations ``values = operator @ eta + error``.
 
-    The operator has one column per predictor-grid row. ``sigma`` is either one
-    positive standard deviation or a vector aligned with ``values``.
+    The operator has one column per predictor-grid row. ``sigma`` is one positive
+    standard deviation, a vector aligned with ``values``, or a ``Hyperparameter``:
+    one scalar standard deviation for the whole block, estimated by empirical
+    Bayes or integrated by INLA like any effect hyperparameter.
     """
 
     values: np.ndarray = field(repr=False)
     operator: csr_matrix = field(repr=False)
-    sigma: np.ndarray = field(repr=False)
+    sigma: np.ndarray | Hyperparameter = field(repr=False)
 
     def __init__(self, values: object, operator: object, sigma: object) -> None:
         values = _vector(values, "LinearObservation values")
         operator = _matrix(operator, "LinearObservation operator")
         if operator.shape[0] != values.size:
             raise ValueError("LinearObservation operator rows must match values")
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "operator", operator)
+        if isinstance(sigma, Hyperparameter):
+            if sigma.transform != "log":
+                raise ValueError(
+                    "LinearObservation sigma is a standard deviation; its Hyperparameter "
+                    f"must use transform='log', not {sigma.transform!r}"
+                )
+            object.__setattr__(self, "sigma", sigma)
+            return
         raw_sigma = np.asarray(sigma)
         if raw_sigma.ndim == 0:
             if not np.issubdtype(raw_sigma.dtype, np.number) or not np.isrealobj(raw_sigma):
@@ -74,8 +87,6 @@ class LinearObservation:
             raise ValueError("LinearObservation sigma must be finite and positive")
         sigma = np.array(sigma, dtype=float, copy=True)
         sigma.setflags(write=False)
-        object.__setattr__(self, "values", values)
-        object.__setattr__(self, "operator", operator)
         object.__setattr__(self, "sigma", sigma)
 
 
@@ -174,6 +185,11 @@ def project_gaussian_model(
         offsets.append(model.offset[observed])
         sigmas.append(np.full(np.count_nonzero(observed), model.likelihood.sigma))
     for observation in observations:
+        if isinstance(observation.sigma, Hyperparameter):
+            raise ModelValidationError(
+                f"LinearObservation sigma {observation.sigma.name!r} is unresolved; "
+                "it is estimated through LGM.fit"
+            )
         operator = _aligned(
             observation.operator,
             model.prediction_design.shape[0],
@@ -228,7 +244,25 @@ def project_gaussian_model(
         prediction_observation_variance=model.likelihood.variance,
         log_likelihood_normalization=normalization,
         data_constraint_count=extra.shape[0] - model.extra_constraints.shape[0],
+        row_log_scale=np.log(sigma) if designs else None,
     )
+
+
+def observation_hyperparameters(observations) -> tuple[Hyperparameter, ...]:
+    return tuple(item.sigma for item in observations if isinstance(item.sigma, Hyperparameter))
+
+
+@dataclass(frozen=True)
+class _ConstantFamily:
+    """A model with no hyperparameters of its own, as a family of one member."""
+
+    model: CompiledLGM
+    parameter_names: tuple = ()
+    parameter_bounds = {}
+    parameter_priors = {}
+
+    def materialize(self, values):
+        return self.model
 
 
 @dataclass(frozen=True)
@@ -238,24 +272,52 @@ class _ProjectedGaussianFamily:
     constraints: tuple[LinearConstraint, ...]
 
     @property
+    def hyperparameters(self) -> tuple[Hyperparameter, ...]:
+        """The ``LinearObservation`` sigmas this family estimates beyond ``base``."""
+        return observation_hyperparameters(self.observations)
+
+    @property
     def parameter_names(self):
-        return self.base.parameter_names
+        return (*self.base.parameter_names, *(hp.name for hp in self.hyperparameters))
 
     @property
     def parameter_bounds(self):
-        return self.base.parameter_bounds
+        from pylgm.compiler import _log_bounds
+
+        bounds = dict(self.base.parameter_bounds)
+        bounds.update({hp.name: _log_bounds(hp) for hp in self.hyperparameters})
+        return bounds
 
     @property
     def parameter_priors(self):
-        return self.base.parameter_priors
+        priors = dict(self.base.parameter_priors)
+        priors.update({hp.name: hp.prior for hp in self.hyperparameters if hp.prior is not None})
+        return priors
 
     def materialize(self, values):
-        return project_gaussian_model(
-            self.base.materialize(values), self.observations, self.constraints
+        base = self.base.materialize({name: values[name] for name in self.base.parameter_names})
+        observations = tuple(
+            replace_sigma(item, values[item.sigma.name])
+            if isinstance(item.sigma, Hyperparameter) else item
+            for item in self.observations
         )
+        return project_gaussian_model(base, observations, self.constraints)
 
 
-def project_gaussian_family(family, observations, constraints):
+def replace_sigma(observation: LinearObservation, sigma: float) -> LinearObservation:
+    return LinearObservation(observation.values, observation.operator, sigma)
+
+
+def project_gaussian_family(family, observations, constraints, *, base_model=None):
+    """Wrap ``family`` (or, when it is ``None``, the fixed ``base_model``)."""
+    if family is None:
+        family = _ConstantFamily(base_model)
+    names = list(family.parameter_names) + [
+        hp.name for hp in observation_hyperparameters(observations)
+    ]
+    duplicated = sorted({name for name in names if names.count(name) > 1})
+    if duplicated:
+        raise ModelValidationError(f"hyperparameter names must be unique: {duplicated}")
     return _ProjectedGaussianFamily(family, observations, constraints)
 
 

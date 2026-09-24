@@ -12,12 +12,13 @@ from pylgm.config.schema import DataConfig
 from pylgm.data import CanonicalPanel
 from pylgm.effects import Predictor
 from pylgm.effects.spec import EffectSpec, _ComposableEffect
-from pylgm.exceptions import DataContractError, UnsupportedEngineError
+from pylgm.exceptions import DataContractError, ModelValidationError, UnsupportedEngineError
 from pylgm.inference import GaussianResult, INLAResult, LaplaceResult, fit_gaussian, fit_laplace
 from pylgm.likelihoods import Gaussian
 from pylgm.optimization.empirical_bayes import OptimizationBounds, optimize_empirical_bayes
 from pylgm.optimization.inla import integrate_inla
 from pylgm.observations import LinearConstraint, LinearObservation
+from pylgm.parameters import Hyperparameter
 
 
 _ROW_KEY = "__pylgm_row__"
@@ -466,7 +467,9 @@ class LGM:
     def _family_optimization_inputs(self, family):
         from pylgm.compiler import _model_hyperparameters
 
-        hyperparameters = list(_model_hyperparameters(self))
+        hyperparameters = list(_model_hyperparameters(self)) + [
+            ("observation", hp) for hp in getattr(family, "hyperparameters", ())
+        ]
         if family.parameter_bounds:
             bounds = dict(family.parameter_bounds)
         else:
@@ -545,6 +548,7 @@ class LGM:
 
         from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
         from pylgm.observations import (
+            observation_hyperparameters,
             project_gaussian_family,
             project_gaussian_model,
             reorder_linear_inputs,
@@ -553,9 +557,27 @@ class LGM:
         observations, constraints = reorder_linear_inputs(
             observations, constraints, panel.source_positions
         )
+        if (
+            (observations or constraints)
+            and not panel.observed.any()
+            and isinstance(self.likelihood.sigma, Hyperparameter)
+        ):
+            # Without row responses the row likelihood is a placeholder: its sigma
+            # moves neither the predictions nor the LML, so it would be a flat
+            # direction for the optimizer rather than an estimate.
+            raise ModelValidationError(
+                f"the Gaussian sigma {self.likelihood.sigma.name!r} cannot be estimated: "
+                "the model has no row responses, only linear observations or constraints; "
+                "give it a fixed value, or estimate a LinearObservation sigma instead"
+            )
 
         family = compile_family(self, panel)
-        if family is not None and (observations or constraints):
+        if observation_hyperparameters(observations):
+            family = project_gaussian_family(
+                family, observations, constraints,
+                base_model=compile_lgm(self, panel) if family is None else None,
+            )
+        elif family is not None and (observations or constraints):
             family = project_gaussian_family(family, observations, constraints)
         if hyperparameters == "integrate":
             if family is None:

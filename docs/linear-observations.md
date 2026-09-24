@@ -49,6 +49,27 @@ Use `LinearObservation` for published estimates, preliminary releases and
 other measurements with uncertainty. Its `sigma` is the standard deviation of
 the aggregate measurement, not of each fine-grid cell.
 
+`sigma` may also be a `Hyperparameter`: one scalar standard deviation for the
+whole block, estimated by empirical Bayes or integrated by INLA like any effect
+hyperparameter (`transform="log"`; a `prior` makes it MAP-II). This calibrates
+observation error, or measures the discrepancy between two sources, such as a
+national total against the sum of its regions:
+
+```python
+discrepancy = Hyperparameter("national.sigma", initial=1.0, lower=1e-3, upper=1e3)
+result = model.fit(grid, observations=[LinearObservation(national, C_national, discrepancy)])
+result.hyperparameters["national.sigma"]
+```
+
+Comparing it against a `LinearConstraint` on the same rows gives the stochastic
+versus exact aggregation ablation. Hyperparameter names must be unique across
+the model and its observations.
+
+Without row responses, the model's own Gaussian `sigma` is a placeholder: it
+moves neither the predictions nor the log marginal likelihood. Declaring it as a
+`Hyperparameter` then raises `ModelValidationError` rather than handing the
+optimizer a flat direction.
+
 Use `LinearConstraint` only for an identity that must hold exactly. pyLGM
 translates `C @ eta = e` into a constraint on the latent field,
 `C @ Z @ x = e - C @ o`, rejects incompatible systems and removes redundant
