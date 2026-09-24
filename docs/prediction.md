@@ -159,4 +159,7 @@ Every draw satisfies all exact constraints (`LinearConstraint`, intrinsic
 sum-to-zero rows) to rounding. With `hyperparameters="integrate"` the draws mix
 the conditional posteriors across the hyperparameter grid with the integration
 weights, so they carry hyperparameter uncertainty. `sample` is available for
-exact-Gaussian fits, dense or sparse; Laplace results raise `NotImplementedError`.
+exact-Gaussian fits, dense or sparse, and for Laplace fits, where the draws come
+from the Gaussian approximation at the mode (centred on the corrected mean when
+`mean_correction=True`), so they inherit its accuracy rather than the exact
+posterior's skewness.
