@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, diags, identity, kron
 
-from pylgm.data.scalars import ordered_observed_levels
+from pylgm.data.scalars import ordered_observed_levels, warn_if_unevenly_spaced
 from pylgm.ir.model import LatentBlock
 
 
@@ -55,6 +55,7 @@ def build_ar1(
     group: str | None = None,
 ) -> LatentBlock:
     levels = ordered_observed_levels(frame[index])
+    warn_if_unevenly_spaced(levels, name)
     if len(levels) < 2:
         raise ValueError(f"{name} requires at least two ordered levels")
     if group is None:
@@ -79,7 +80,7 @@ def build_ar1(
     # diagonal with each group's AR1 band contiguous.
     cells = np.array([
         group_position[str(g)] * len(levels) + time_position[t]
-        for g, t in zip(frame[group], frame[index])
+        for g, t in zip(frame[group], frame[index], strict=False)
     ])
     width = len(groups) * len(levels)
     design = csr_matrix(

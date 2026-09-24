@@ -3,6 +3,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -67,3 +68,28 @@ def ordered_observed_levels(values: pd.Series) -> tuple[object, ...]:
     if not levels:
         raise ValueError("ordered index contains no observed levels")
     return levels
+
+
+def warn_if_unevenly_spaced(levels: tuple[object, ...], name: str) -> None:
+    """Warn when numeric levels of a sequential effect skip steps.
+
+    RW, AR1 and seasonal effects relate *consecutive* levels with no notion of
+    the gap between them, so ``0, 1, 2, 5`` is silently fitted as four equal
+    steps. Only plain numbers are checked; dates and ordered categoricals carry
+    their spacing in ways a difference cannot see.
+    """
+    if len(levels) < 3 or not all(
+        isinstance(level, (int, float, np.integer, np.floating))
+        and not isinstance(level, (bool, np.bool_))
+        for level in levels
+    ):
+        return
+    steps = np.diff(np.asarray(levels, dtype=float))
+    if not np.allclose(steps, steps[0], rtol=1e-9, atol=0.0):
+        warnings.warn(
+            f"{name}: index levels are not evenly spaced (steps from {steps.min():g} to "
+            f"{steps.max():g}); the effect treats consecutive levels as one step apart. "
+            "Add the missing levels as NaN-response rows to keep the grid regular.",
+            UserWarning,
+            stacklevel=2,
+        )

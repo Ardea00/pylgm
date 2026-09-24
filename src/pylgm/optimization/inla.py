@@ -444,36 +444,6 @@ def _ccd_design(d: int, f0: float = 1.1) -> tuple[np.ndarray, np.ndarray]:
     return points, weights
 
 
-def _ccd_grid(center, hessian, evaluate, *, internal_lower, internal_upper, f0=1.1):
-    """Evaluate a CCD design, returning ``(grid, payloads, z_sq, design_weights)``.
-
-    ``z_sq`` is each point's squared whitened radius, which the caller needs for
-    the importance correction: the design integrates the *Gaussian* implied by the
-    Hessian, and dividing by that Gaussian recovers the true posterior. Without
-    that correction CCD would report the Laplace approximation back to itself and
-    the evaluated densities would do no work.
-    """
-    center = np.asarray(center, dtype=float)
-    d = center.size
-    directions = _whitening_directions(hessian)
-    design, weights = _ccd_design(d, f0)
-
-    grid, payloads, z_sq, kept_weights = [], [], [], []
-    for z, weight in zip(design, weights, strict=True):
-        u = center + directions @ z
-        if not (np.all(u >= internal_lower) and np.all(u <= internal_upper)):
-            # Outside the declared domain the transform is not invertible, so the
-            # point cannot contribute; the surviving weights renormalise below.
-            continue
-        grid.append(u)
-        payloads.append(evaluate(u))
-        z_sq.append(float(z @ z))
-        kept_weights.append(weight)
-    if not grid:
-        raise OptimizationError("the CCD design lies entirely outside the declared bounds")
-    return (np.asarray(grid), payloads, np.asarray(z_sq), np.asarray(kept_weights))
-
-
 def _predicted_grid_points(d, *, depth, prune_drop, grid_step, max_radius, cap=2_000_000):
     """How many points the explored-and-pruned box would hold under the Gaussian.
 

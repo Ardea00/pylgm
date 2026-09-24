@@ -407,7 +407,7 @@ def _design_for(context: PredictionContext, new_data: pd.DataFrame) -> np.ndarra
                 "predict() context column_slices must align one-to-one with entries"
             )
         design = np.zeros((len(new_data), context.width))
-        for block, (start, stop) in zip(blocks, context.column_slices):
+        for block, (start, stop) in zip(blocks, context.column_slices, strict=False):
             if stop - start != block.shape[1]:
                 raise ValueError(
                     f"predict() rebuilt a block of width {block.shape[1]} for a "

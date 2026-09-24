@@ -223,27 +223,30 @@ def quadratic_form_diagonal(weights, covariance) -> np.ndarray:
     return np.einsum("ij,ij->i", projected, np.asarray(weights))
 
 
-def linear_combinations_from(
-    mean: np.ndarray,
-    covariance: np.ndarray,
-    weights: csr_matrix | np.ndarray,
-) -> "GaussianMarginals":
+def _validate_weights(weights: csr_matrix | np.ndarray, width: int) -> None:
+    """A real, finite 2-D matrix with one column per latent dimension."""
     if isinstance(weights, csr_matrix):
         values = weights.data
-        width = weights.shape[1]
     elif isinstance(weights, np.ndarray):
         if weights.ndim != 2:
             raise ValueError("weights must be a two-dimensional matrix")
         values = weights
-        width = weights.shape[1]
     else:
         raise TypeError("weights must be a CSR sparse matrix or numpy array")
     if not np.issubdtype(weights.dtype, np.number) or not np.isrealobj(values):
         raise TypeError("weights must have a real numeric dtype")
     if not np.isfinite(values).all():
         raise ValueError("weights must be finite")
-    if width != mean.size:
+    if weights.shape[1] != width:
         raise ValueError("weights must have one column per latent dimension")
+
+
+def linear_combinations_from(
+    mean: np.ndarray,
+    covariance: np.ndarray,
+    weights: csr_matrix | np.ndarray,
+) -> "GaussianMarginals":
+    _validate_weights(weights, mean.size)
     with np.errstate(over="ignore", invalid="ignore"):
         result_mean = np.asarray(weights @ mean).reshape(-1)
         variance = quadratic_form_diagonal(weights, covariance)
@@ -278,6 +281,7 @@ def linear_combinations_from_variances(
     weights: csr_matrix | np.ndarray,
 ) -> "GaussianMarginals":
     """Mean projection with a precomputed variance vector (sparse path)."""
+    _validate_weights(weights, mean.size)
     result_mean = np.asarray(weights @ mean).reshape(-1)
     return GaussianMarginals(result_mean, np.asarray(variances, float))
 
@@ -793,6 +797,7 @@ class _BaseResult:
         if self._covariance is None:
             sparse_posterior = getattr(self, "_sparse_posterior", None)
             if sparse_posterior is not None:
+                _validate_weights(weights, self._mean.size)
                 variances = sparse_posterior.linear_combination_variances(weights)
                 return linear_combinations_from_variances(self._mean, variances, weights)
             raise NotImplementedError(_NO_POSTERIOR)

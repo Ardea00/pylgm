@@ -63,7 +63,7 @@ def freeze_adjacency(
         weights = w.data[w.indptr[i] : w.indptr[i + 1]]
         if weighted:
             neighbours: tuple = tuple(
-                sorted((nodes[j], float(v)) for j, v in zip(columns, weights))
+                sorted((nodes[j], float(v)) for j, v in zip(columns, weights, strict=False))
             )
         else:
             neighbours = tuple(sorted(nodes[j] for j in columns))
