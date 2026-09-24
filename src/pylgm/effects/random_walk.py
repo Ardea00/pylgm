@@ -44,6 +44,7 @@ def build_random_walk(
     index: str,
     precision: float,
     order: Literal[1, 2],
+    scale: bool = False,
 ) -> LatentBlock:
     levels = ordered_observed_levels(frame[index])
     warn_if_unevenly_spaced(levels, name)
@@ -54,7 +55,14 @@ def build_random_walk(
     columns = np.array([positions[value] for value in frame[index]])
     design = csr_matrix((np.ones(len(frame)), (rows, columns)), shape=(len(frame), len(levels)))
     difference = difference_operator(len(levels), order)
-    precision_matrix = csr_matrix(precision * (difference.T @ difference))
+    structure = (difference.T @ difference).tocsr()
+    if scale:
+        # Sparse fast path for RW1 (null = span(1)); RW2's two-dimensional null
+        # takes the dense eigendecomposition.
+        structure = csr_matrix(
+            sorbye_rue_scale(structure if order == 1 else structure.toarray(), null_dim=order)
+        )
+    precision_matrix = csr_matrix(precision * structure)
     coordinate = np.arange(len(levels), dtype=float)
     constraints = np.ones((1, len(levels)))
     if order == 2:
