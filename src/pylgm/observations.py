@@ -227,6 +227,7 @@ def project_gaussian_model(
         prediction_offset=model.prediction_offset,
         prediction_observation_variance=model.likelihood.variance,
         log_likelihood_normalization=normalization,
+        data_constraint_count=extra.shape[0] - model.extra_constraints.shape[0],
     )
 
 

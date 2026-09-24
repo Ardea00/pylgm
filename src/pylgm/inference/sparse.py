@@ -176,7 +176,9 @@ class SparseFit:
     posterior: "SparsePosterior"
 
 
-def _block_column_confinement(model: CompiledLGM) -> list[tuple[int, int, np.ndarray]]:
+def _block_column_confinement(
+    model: CompiledLGM, constraints: np.ndarray
+) -> list[tuple[int, int, np.ndarray]]:
     """For each block, its column span and the constraint rows confined to it.
 
     A row is *confined* to a block when all its nonzeros lie inside that block's
@@ -186,7 +188,7 @@ def _block_column_confinement(model: CompiledLGM) -> list[tuple[int, int, np.nda
     single-block extra constraints these models carry). A cross-block row would
     couple two reduced priors, which this decomposition cannot express.
     """
-    a = np.asarray(model.constraints, dtype=float)
+    a = np.asarray(constraints, dtype=float)
     row_mass = np.abs(a).sum(axis=1) if a.shape[0] else np.zeros(0)
     spans: list[tuple[int, int, np.ndarray]] = []
     confined_any = np.zeros(a.shape[0], dtype=bool)
@@ -269,7 +271,9 @@ def _bym2_augmented_logdet(rows: np.ndarray, precision) -> float | None:
     return logdet_star + np.log((c @ g) ** 2) - np.log(g @ g) - np.log(c @ c)
 
 
-def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) -> float:
+def _prior_logdet(
+    model: CompiledLGM, constraints: np.ndarray, spans: list[tuple[int, int, np.ndarray]]
+) -> float:
     """``logdet(basis^T Q_prior basis)`` as a per-block sum.
 
     Block-separable because every constraint row is confined to one block. A
@@ -283,7 +287,7 @@ def _prior_logdet(model: CompiledLGM, spans: list[tuple[int, int, np.ndarray]]) 
     a fallback. A block with no confined rows is full rank -- its sparse logdet
     is used directly.
     """
-    a = np.asarray(model.constraints, dtype=float)
+    a = np.asarray(constraints, dtype=float)
     total = 0.0
     for block, (start, stop, confined) in zip(model.blocks, spans, strict=True):
         q_b = block.precision
@@ -372,6 +376,23 @@ def selected_inverse_diagonal(matrix) -> np.ndarray:
     return np.array([sig[(pc[i], pc[i])] for i in range(n)])
 
 
+def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:
+    """Condition ``mean`` on ``rows @ x = rhs`` by kriging, with iterative refinement.
+
+    A vague direction (a ``Fixed`` prior pinned only by the constraints) makes the
+    capacitance ill-conditioned, so one kriging pass leaves a residual of about
+    ``eps * cond``. Re-applying the same correction to that residual is classic
+    iterative refinement: each pass costs a matvec and a small triangular solve.
+    """
+    scale = max(1.0, float(np.abs(rhs).max(initial=0.0)))
+    for _ in range(max_passes):
+        gap = rows @ mean - rhs
+        if np.abs(gap).max(initial=0.0) <= 1e-13 * scale:
+            break
+        mean = mean - w @ cho_solve(factor, gap)
+    return mean
+
+
 def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     """Partitioned Schur solve, matching ``gaussian._fit_dense``.
 
@@ -446,26 +467,39 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
 
     mean = apply_inverse(g_full)  # unconstrained posterior mean
 
-    spans = _block_column_confinement(model)
-    logdet_prior = _prior_logdet(model, spans)
-
+    # The structural rows (intrinsic + label constraints) condition the prior; the
+    # trailing data rows are exact observations scored by log p(e_D | y, structural).
     constraint_count = model.constraints.shape[0]
+    structural_count = constraint_count - model.data_constraint_count
+    structural = model.constraints[:structural_count]
+    spans = _block_column_confinement(model, structural)
+    logdet_prior = _prior_logdet(model, structural, spans)
+
     w_constraint = None
     cap_factor_ref = None
+    conditioned_mean = mean
     if constraint_count:
-        # Conditioning by kriging: correct the mean and the two SPD-identity
-        # determinant terms, logdet(basis^T Q_post basis) = logdet(Q_post)
-        # + logdet(A Q_post^-1 A^T) - logdet(A A^T).
+        # Conditioning by kriging on all rows, for the reported posterior.
         a = np.asarray(model.constraints, dtype=float)
         e = np.asarray(model.constraint_rhs, dtype=float)
         w = apply_inverse(a.T)  # latent x c
         capacitance = a @ w  # A Q_post^-1 A^T
-        cap_factor, logdet_cap = _factor_positive_definite(capacitance, "kriging capacitance")
-        _, logdet_gram = _factor_positive_definite(a @ a.T, "constraint gram")
-        logdet_posterior += logdet_cap - logdet_gram
-        mean = mean - w @ cho_solve(cap_factor, a @ mean - e)
+        cap_factor_ref, _ = _factor_positive_definite(capacitance, "kriging capacitance")
         w_constraint = w
-        cap_factor_ref = cap_factor
+        conditioned_mean = _kriged(mean, w, cap_factor_ref, a, e)
+
+    structural_factor = None
+    if structural_count:
+        # The structural rows alone, for log p(y | structural): the two SPD-identity
+        # determinant terms, logdet(basis^T Q_post basis) = logdet(Q_post)
+        # + logdet(A Q_post^-1 A^T) - logdet(A A^T).
+        rows_s, e_s = a[:structural_count], e[:structural_count]
+        structural_factor, logdet_cap = _factor_positive_definite(
+            capacitance[:structural_count, :structural_count], "kriging capacitance"
+        )
+        _, logdet_gram = _factor_positive_definite(rows_s @ rows_s.T, "constraint gram")
+        logdet_posterior += logdet_cap - logdet_gram
+        mean = _kriged(mean, w[:, :structural_count], structural_factor, rows_s, e_s)
 
         # Two-term quadratic (robust to the confounded near-singular Q_post):
         # (r0 - Z mu*)^T (r0 - Z mu*) / var + (mu* - nu)^T Q (mu* - nu), where
@@ -474,11 +508,11 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
         # augmented factor densifies. Correct, but defeats sparsity: nonzero-rhs
         # extra-constraints do not scale on this path.
-        if np.any(e):
-            a_sp = csr_matrix(a)
+        if np.any(e_s):
+            a_sp = csr_matrix(rows_s)
             aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
-            w_aug = aug.solve(a.T)
-            nu = w_aug @ np.linalg.solve(a @ w_aug, e)
+            w_aug = aug.solve(rows_s.T)
+            nu = w_aug @ np.linalg.solve(rows_s @ w_aug, e_s)
         else:
             nu = np.zeros(latent_size)
         prior_residual = mean - nu
@@ -497,6 +531,23 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         + logdet_posterior
         + quadratic
     ) + model.log_likelihood_normalization
+
+    if structural_count < constraint_count:
+        # log p(e_D | y, structural) = log N(e_D; A_D mu_S, K_DD - K_DS K_SS^-1 K_SD),
+        # the Schur complement of the capacitance already factored above.
+        data = slice(structural_count, constraint_count)
+        covariance = capacitance[data, data]
+        if structural_count:
+            cross = capacitance[:structural_count, data]
+            covariance = covariance - cross.T @ cho_solve(structural_factor, cross)
+        data_factor, logdet_data = _factor_positive_definite(
+            covariance, "data constraint covariance"
+        )
+        gap = e[data] - a[data] @ mean
+        log_marginal_likelihood += -0.5 * (
+            gap.size * np.log(2 * np.pi) + logdet_data + gap @ cho_solve(data_factor, gap)
+        )
+    mean = conditioned_mean
     predictive_mean = np.asarray(
         model.prediction_offset + model.prediction_design @ mean
     ).reshape(-1)

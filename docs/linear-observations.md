@@ -54,6 +54,23 @@ translates `C @ eta = e` into a constraint on the latent field,
 `C @ Z @ x = e - C @ o`, rejects incompatible systems and removes redundant
 rows before inference.
 
+An exact constraint is *data*: its right-hand side enters the log marginal
+likelihood as
+
+$$
+\log p(y, e \mid \theta) = \log p(y \mid \theta)
+  + \log \mathcal{N}\bigl(e;\ A\mu_{\text{post}},\ A Q_{\text{post}}^{-1} A^\top\bigr),
+$$
+
+where $\mu_{\text{post}}$ and $Q_{\text{post}}$ condition on $y$ and on the
+structural constraints only (intrinsic sum-to-zero rows and `LGM(constraints=...)`
+label rows, which remain pure conditioning, as R-INLA's `extraconstr`). Empirical
+Bayes and INLA therefore learn hyperparameters from the aggregates, and an AR1
+fitted to annual totals alone recovers the Chow-Lin likelihood. The density is
+that of the kept rows: supplying `2 C, 2 e` instead of `C, e` shifts the log
+marginal likelihood by `-rows * log 2`, a constant in $\theta$ that leaves the
+hyperparameter estimates unchanged.
+
 The returned `predictive_mean` and `predictive_variance` remain aligned with
 the original fine grid, rather than with the shorter aggregate-observation
 vector. The likelihood is standardized internally, including the Jacobian
@@ -64,6 +81,6 @@ declared heterogeneous observation variances.
 
 Linear observations currently support Gaussian `LGM` models with pandas input.
 They work with fixed fits, empirical-Bayes optimization and INLA integration.
-Exact cross-block constraints use the dense Gaussian path; models large enough
-to route to the sparse solver still inherit its existing restriction against
-cross-block constraint rows.
+Exact constraints run on both the dense and the sparse Gaussian paths; on the
+sparse path a `LinearConstraint` row may span several latent blocks (label
+constraints passed to `LGM(constraints=...)` must still touch a single block).
