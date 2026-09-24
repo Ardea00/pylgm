@@ -155,6 +155,11 @@ share = draws[:, :20] / draws[:, :20].sum(axis=1, keepdims=True)
 p_contraction = (draws[:, 4:] < draws[:, :-4]).mean(axis=0)
 ```
 
+For a nonlinear target, score the draws directly:
+`pylgm.evaluation.crps_from_draws(target_draws, actual)` is the CRPS of their
+empirical distribution per column, and `(target_draws <= actual).mean(axis=0)`
+is the PIT.
+
 Every draw satisfies all exact constraints (`LinearConstraint`, intrinsic
 sum-to-zero rows) to rounding. With `hyperparameters="integrate"` the draws mix
 the conditional posteriors across the hyperparameter grid with the integration
