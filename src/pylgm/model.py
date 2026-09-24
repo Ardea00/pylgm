@@ -230,6 +230,10 @@ def _rebuild_result(
             # like predictive_mean/predictive_variance), so caller_order does not
             # permute it -- straight pass-through is correct.
             latent_variances=getattr(result, "_latent_variances", None),
+            mixture=tuple(
+                (weight, sampler if caller_order is None else sampler.reordered(caller_order))
+                for weight, sampler in result._mixture
+            ),
             **common,
         )
     # ponytail: caller_order only permutes prediction rows (predictive_mean/
@@ -238,6 +242,10 @@ def _rebuild_result(
     return GaussianResult(
         observation_variance=result.observation_variance,
         sparse_posterior=getattr(result, "_sparse_posterior", None),
+        sampler=(
+            result._sampler.reordered(caller_order)
+            if result._sampler is not None and caller_order is not None else result._sampler
+        ),
         **common,
     )
 

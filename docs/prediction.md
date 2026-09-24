@@ -136,7 +136,27 @@ and for all plug-in and empirical-Bayes fits.
 `predict` works on a result fitted from either Pandas or a Spark DataFrame,
 but `new_data` itself must always be a Pandas DataFrame — Spark `new_data` is
 not supported. **Not shipped**: a prior-based fallback for unseen levels,
-predictive quantiles or simulation, response-scale predictive variance for
+predictive quantiles (use [`sample`](#joint-posterior-draws)), response-scale predictive variance for
 non-Gaussian links, and an automatic future-frame construction helper (the
 `NaN`-response rows above are built by hand).
 
+
+## Joint posterior draws
+
+`predictive_mean` and `predictive_variance` are marginal summaries. Targets that
+are nonlinear in the predictor (shares of a total, growth rates, the probability
+of a contraction, CRPS or PIT) need the joint posterior. `result.sample(n, rng)`
+returns an `(n, grid_rows)` array of draws of the linear predictor `eta`, row-aligned
+with `predictive_mean`, without observation noise:
+
+```python
+draws = result.sample(4000, rng=0)              # rng: anything default_rng accepts
+share = draws[:, :20] / draws[:, :20].sum(axis=1, keepdims=True)
+p_contraction = (draws[:, 4:] < draws[:, :-4]).mean(axis=0)
+```
+
+Every draw satisfies all exact constraints (`LinearConstraint`, intrinsic
+sum-to-zero rows) to rounding. With `hyperparameters="integrate"` the draws mix
+the conditional posteriors across the hyperparameter grid with the integration
+weights, so they carry hyperparameter uncertainty. `sample` is available for
+exact-Gaussian fits, dense or sparse; Laplace results raise `NotImplementedError`.

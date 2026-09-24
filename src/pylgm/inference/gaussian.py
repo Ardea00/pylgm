@@ -1,10 +1,11 @@
 from collections.abc import Mapping
 
 import numpy as np
-from scipy.linalg import cho_factor, cho_solve, null_space
+from scipy.linalg import cho_factor, cho_solve, null_space, solve_triangular
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, UnsupportedEngineError
 from pylgm.inference.result import GaussianResult, quadratic_form_diagonal
+from pylgm.inference.sampling import GridSampler
 from pylgm.ir.model import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -255,10 +256,14 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
         log_marginal_likelihood += data_log_density
         covariance_basis = null if identity else basis @ null
 
-    width = covariance_basis.shape[1]
-    reduced_covariance = cho_solve(factor, np.eye(width)) if width else np.empty((0, 0))
+    # Covariance = F F^T with F = basis L^-T: F doubles as the sampling factor, and
+    # its columns span the constraint null space, so every draw meets A x = e.
+    covariance_factor = (
+        solve_triangular(factor[0], covariance_basis.T, lower=True).T
+        if covariance_basis.shape[1] else np.zeros((latent_size, 0))
+    )
     mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
-    covariance = covariance_basis @ reduced_covariance @ covariance_basis.T
+    covariance = covariance_factor @ covariance_factor.T
     prediction_design = model.prediction_design
     predictive_mean = np.asarray(
         model.prediction_offset + prediction_design @ mean
@@ -288,6 +293,9 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
             "observed_count": int(np.count_nonzero(observed)),
             "constraint_count": int(model.constraints.shape[0]),
         },
+        sampler=GridSampler(
+            mean, prediction_design, model.prediction_offset, factor=covariance_factor
+        ),
     )
 
 
@@ -321,6 +329,9 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
         block_slices=fit.block_slices,
         diagnostics=fit.diagnostics,
         sparse_posterior=fit.posterior,
+        sampler=GridSampler(
+            fit.mean, model.prediction_design, model.prediction_offset, posterior=fit.posterior
+        ),
     )
 
 
