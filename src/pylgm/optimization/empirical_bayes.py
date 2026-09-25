@@ -1,3 +1,4 @@
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -162,6 +163,21 @@ def optimize_empirical_bayes(
         raise TypeError("allow_large_dense must be a boolean")
     if fit is None:
         fit = fit_gaussian
+    # Predictive variances are never read from an intermediate objective
+    # evaluation -- only `log_marginal_likelihood` is -- yet computing them
+    # dominates the per-evaluation cost of a full Gaussian fit at scale. Skip
+    # them during the search and refit once, with variances, at the final
+    # point. Gated on `fit` actually accepting `predictive_variances` (true
+    # for the real `fit_gaussian`, false for `fit_laplace` -- INLA's/Joint's
+    # conditional fit needs every intermediate fit's variances -- and false
+    # for a test double that doesn't declare the parameter), not on identity:
+    # a test that monkeypatches the module's `fit_gaussian` global gets a
+    # stand-in with a different signature, and this must follow the
+    # signature, not the name.
+    try:
+        skip_intermediate_variances = "predictive_variances" in inspect.signature(fit).parameters
+    except (TypeError, ValueError):
+        skip_intermediate_variances = False
     names, initial_values = _validate_problem(family, bounds, initial)
     transforms = [bounds[name].transform for name in names]
     natural_lower = np.asarray([bounds[name].lower for name in names])
@@ -209,11 +225,12 @@ def optimize_empirical_bayes(
                 upper,
             )
             model = family.materialize(parameters)
-            result = (
-                fit(model, allow_large_dense=True)
-                if allow_large_dense
-                else fit(model)
-            )
+            fit_kwargs: dict[str, object] = {}
+            if allow_large_dense:
+                fit_kwargs["allow_large_dense"] = True
+            if skip_intermediate_variances:
+                fit_kwargs["predictive_variances"] = False
+            result = fit(model, **fit_kwargs)
             raw_objective = -float(result.log_marginal_likelihood)
             if penalty is not None:
                 raw_objective -= float(penalty(parameters))
@@ -311,6 +328,26 @@ def optimize_empirical_bayes(
         fail("empirical-Bayes optimization did not produce a valid final point")
     assert final_evaluation.parameters is not None
     assert final_evaluation.raw_objective is not None
+
+    if skip_intermediate_variances:
+        # The search itself never needed predictive variances, only
+        # `log_marginal_likelihood` -- refit once, with variances, at the
+        # accepted optimum so the returned fit is complete. This does not
+        # count as an extra objective evaluation/cache entry: it recomputes
+        # the same point the search already scored, just with the flag
+        # flipped, so evaluations/cache_hits diagnostics stay exactly what
+        # they would have been without this optimization.
+        final_model = family.materialize(final_evaluation.parameters)
+        final_fit_kwargs: dict[str, object] = {}
+        if allow_large_dense:
+            final_fit_kwargs["allow_large_dense"] = True
+        final_fit = fit(final_model, **final_fit_kwargs)
+        final_evaluation = _Evaluation(
+            final_evaluation.objective,
+            final_evaluation.raw_objective,
+            final_fit,
+            final_evaluation.parameters,
+        )
 
     active_bounds = tuple(
         name

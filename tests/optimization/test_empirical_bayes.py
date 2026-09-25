@@ -1,6 +1,7 @@
 from collections.abc import Callable
 import gc
 import json
+from time import perf_counter
 import weakref
 
 import numpy as np
@@ -654,6 +655,44 @@ def test_returned_fit_equals_a_rematerialized_optimum() -> None:
         result.fit.predictive_variance,
         expected.predictive_variance,
     )
+
+
+def test_intermediate_evaluations_skip_predictive_variances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the final refit at the accepted optimum should compute variances.
+
+    Every objective evaluation during the search reads only
+    `log_marginal_likelihood`, so `optimize_empirical_bayes` calls the default
+    `fit_gaussian` with `predictive_variances=False` for those, and only the
+    one extra call at the end (after the optimizer has converged) with
+    variances enabled (the default). This wraps the real `fit_gaussian` --
+    default arguments and all -- to record every call's `predictive_variances`
+    kwarg without changing its behaviour.
+    """
+    calls: list[bool] = []
+    real_fit_gaussian = fit_gaussian
+
+    def spy(model: CompiledLGM, *, predictive_variances: bool = True, **kwargs: object):
+        calls.append(predictive_variances)
+        return real_fit_gaussian(model, predictive_variances=predictive_variances, **kwargs)
+
+    monkeypatch.setattr(empirical_bayes, "fit_gaussian", spy)
+
+    family = scalar_conjugate_family(y=2.0)
+    started = perf_counter()
+    result = optimize_empirical_bayes(
+        family,
+        {"latent.precision": OptimizationBounds(initial=1.0, lower=0.05, upper=10.0)},
+    )
+    elapsed = perf_counter() - started
+
+    assert elapsed < 10.0
+    assert len(calls) >= 2
+    # Every call but the last one (the final refit) must have skipped variances.
+    assert calls[:-1] == [False] * (len(calls) - 1)
+    assert calls[-1] is True
+    assert result.fit.predictive_variance is not None
 
 
 @pytest.mark.parametrize(

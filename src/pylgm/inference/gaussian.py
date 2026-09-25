@@ -179,7 +179,7 @@ def _condition_on_data_constraints(
     return conditioned, null, null_factor, float(log_density)
 
 
-def _fit_dense(model: CompiledLGM) -> GaussianResult:
+def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
     variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
         raise NumericalError("sigma squared must be finite and positive")
@@ -268,13 +268,17 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     predictive_mean = np.asarray(
         model.prediction_offset + prediction_design @ mean
     ).reshape(-1)
-    predictive_variance = quadratic_form_diagonal(prediction_design, covariance)
+    predictive_variance = (
+        quadratic_form_diagonal(prediction_design, covariance)
+        if predictive_variances else None
+    )
 
     _require_finite("posterior mean", mean)
     _require_finite("posterior covariance", covariance)
     _require_finite("log marginal likelihood", log_marginal_likelihood)
     _require_finite("predictive mean", predictive_mean)
-    _require_finite("predictive variance", predictive_variance)
+    if predictive_variance is not None:
+        _require_finite("predictive variance", predictive_variance)
     return GaussianResult(
         labels=model.labels,
         mean=mean,
@@ -299,7 +303,7 @@ def _fit_dense(model: CompiledLGM) -> GaussianResult:
     )
 
 
-def _fit_sparse(model: CompiledLGM) -> GaussianResult:
+def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
     # ponytail: import sparse_constrained_gaussian lazily here, NOT at module
     # top. sparse.py imports _block_slices/_factor_positive_definite from this
     # module at its top level; a top-level back-import would be circular and
@@ -309,11 +313,15 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
 
     variance = float(model.likelihood.variance)
     fit = sparse_constrained_gaussian(model)
-    predictive_variance = fit.posterior.predictive_variances(model.prediction_design)
+    predictive_variance = (
+        fit.posterior.predictive_variances(model.prediction_design)
+        if predictive_variances else None
+    )
     _require_finite("posterior mean", fit.mean)
     _require_finite("log marginal likelihood", fit.log_marginal_likelihood)
     _require_finite("predictive mean", fit.predictive_mean)
-    _require_finite("predictive variance", predictive_variance)
+    if predictive_variance is not None:
+        _require_finite("predictive variance", predictive_variance)
     return GaussianResult(
         labels=model.labels,
         mean=fit.mean,
@@ -335,20 +343,30 @@ def _fit_sparse(model: CompiledLGM) -> GaussianResult:
     )
 
 
-def fit_gaussian(model: CompiledLGM, *, allow_large_dense: bool = False) -> GaussianResult:
+def fit_gaussian(
+    model: CompiledLGM, *, allow_large_dense: bool = False, predictive_variances: bool = True
+) -> GaussianResult:
     """Fit the small/medium exact Gaussian dense reference engine.
 
     The explicit override disables conservative memory and dimension guards. It does
     not change the algorithm's O(p^2) covariance storage or O(p^3) dense solve cost.
+
+    ``predictive_variances=False`` skips the predictive-variance computation
+    (``GaussianResult.predictive_variance`` is then ``None``), for callers that
+    only need ``log_marginal_likelihood`` -- e.g. intermediate empirical-Bayes
+    objective evaluations, where predictive variances are never read but can
+    dominate the per-evaluation cost.
     """
     if not isinstance(model.likelihood, CompiledGaussian):
         raise UnsupportedEngineError("exact Gaussian inference requires a Gaussian likelihood")
     if type(allow_large_dense) is not bool:
         raise TypeError("allow_large_dense must be a boolean")
+    if type(predictive_variances) is not bool:
+        raise TypeError("predictive_variances must be a boolean")
     if not allow_large_dense and _exceeds_dense_threshold(model):
-        return _fit_sparse(model)
+        return _fit_sparse(model, predictive_variances=predictive_variances)
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            return _fit_dense(model)
+            return _fit_dense(model, predictive_variances=predictive_variances)
     except FloatingPointError as error:
         raise NumericalError("exact Gaussian numerical calculation was non-finite") from error
