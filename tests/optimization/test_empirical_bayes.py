@@ -963,3 +963,49 @@ def test_line_search_stall_at_an_unusable_point_still_fails(monkeypatch) -> None
         optimize_empirical_bayes(
             family, bounds, fit=lambda model, **kwargs: _QuadraticFit(model, 1.5)
         )
+
+
+class _NoisyQuadraticFit:
+    """A quadratic LML peaking at ``target``, plus high-frequency jitter.
+
+    Mimics the noise a rebuilt ill-conditioned posterior precision leaves in the
+    log-determinant: reproducible at a fixed point, but varying by ~1e-7 between
+    two very close points. A default-size forward-difference step (~1.5e-8) would
+    measure this jitter instead of the quadratic's gradient and thrash; the
+    optimizer's larger `eps` must see through it and still converge quickly.
+    """
+
+    def __init__(self, value, target):
+        jitter = 3e-7 * np.sin(1.0e8 * value)
+        self.log_marginal_likelihood = -((value - target) ** 2) + jitter
+
+
+def test_finite_difference_step_survives_ill_conditioned_noise_floor(monkeypatch) -> None:
+    name = "tau"
+    target = 1.7
+    fam = _ScalarFamily(name, target)
+    bounds = {name: OptimizationBounds(1.0, 0.1, 10.0)}
+
+    result = optimize_empirical_bayes(
+        fam, bounds, fit=lambda m, **k: _NoisyQuadraticFit(m, target)
+    )
+
+    assert result.diagnostics.converged
+    assert result.parameters[name] == pytest.approx(target, abs=5e-3)
+
+    # With scipy's default (noise-blind) forward-difference step, the same
+    # noise leaves the optimizer stuck near the start after 100+ evaluations --
+    # this pins the regression the `eps` override fixes.
+    import scipy.optimize
+
+    real_minimize = scipy.optimize.minimize
+
+    def default_step_minimize(fun, x0, **kwargs):
+        kwargs["options"] = {"ftol": 1e-12, "gtol": 1e-10}
+        return real_minimize(fun, x0, **kwargs)
+
+    monkeypatch.setattr(scipy.optimize, "minimize", default_step_minimize)
+    stuck = optimize_empirical_bayes(
+        fam, bounds, fit=lambda m, **k: _NoisyQuadraticFit(m, target)
+    )
+    assert abs(stuck.parameters[name] - target) > 0.1
