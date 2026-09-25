@@ -49,6 +49,25 @@ class SparseSpdFactor:
     def solve(self, b: np.ndarray) -> np.ndarray:
         return self._lu.solve(np.asarray(b, dtype=float))
 
+    # Symmetric mode gives A[q][:, q] = L D L^T with q = argsort(perm_c), L unit
+    # lower triangular and D = diag(U) > 0: a square root of A without a sparse
+    # Cholesky.
+    def half_solve(self, b: np.ndarray) -> np.ndarray:
+        """``G = D^-1/2 L^-1 b[q]``, so that ``b^T A^-1 b = G^T G`` (1-D or 2-D ``b``)."""
+        b = np.asarray(b, dtype=float)
+        solved = spsolve_triangular(
+            self._lu.L.tocsr(), b[np.argsort(self._lu.perm_c)], lower=True, unit_diagonal=True
+        )
+        return (solved.T / np.sqrt(self._lu.U.diagonal())).T
+
+    def half_solve_transpose(self, z: np.ndarray) -> np.ndarray:
+        """``x = (L^-T D^-1/2 z)[perm_c]``: for ``z ~ N(0, I)``, ``x ~ N(0, A^-1)``."""
+        z = np.asarray(z, dtype=float)
+        scaled = (z.T / np.sqrt(self._lu.U.diagonal())).T
+        return spsolve_triangular(self._lu.L.T.tocsr(), scaled, lower=False, unit_diagonal=True)[
+            self._lu.perm_c
+        ]
+
     @property
     def logdet(self) -> float:
         return self._logdet
@@ -129,15 +148,7 @@ class SparsePosterior:
                 factor[0], rng.standard_normal((d.size, n)), lower=True, trans="T"
             )
         if s.size:
-            lu = splu(
-                self.a_ss_matrix.tocsc(), permc_spec="MMD_AT_PLUS_A",
-                options=dict(SymmetricMode=True), diag_pivot_thresh=0.0,
-            )
-            if not np.array_equal(lu.perm_r, lu.perm_c):
-                raise NumericalError("sampling expected a symmetric factorization")
-            scaled = rng.standard_normal((s.size, n)) / np.sqrt(lu.U.diagonal())[:, None]
-            # L D L^T = A_ss[q][:, q] with q = argsort(perm_c), so x = y[perm_c].
-            draw = spsolve_triangular(lu.L.T.tocsr(), scaled, lower=False)[lu.perm_c]
+            draw = self.a_ss.half_solve_transpose(rng.standard_normal((s.size, n)))
             if d.size:
                 draw = draw - self.a_ss.solve(self.b @ out[d])
             out[s] = draw
@@ -523,6 +534,22 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
 
     mean = apply_inverse(g_full)  # unconstrained posterior mean
 
+    def half_inverse(rhs: np.ndarray) -> np.ndarray:
+        """``G`` with ``G^T G = rhs^T Q_post^-1 rhs``, through the Schur partition.
+
+        ``Q_post = U^T diag(A_ss, S) U`` with ``U = [[I, A_ss^-1 B], [0, I]]``, so
+        ``G`` stacks the half-solves of ``U^-T rhs`` against ``A_ss`` and ``S``.
+        """
+        parts = []
+        if n_s:
+            v_s = rhs[sparse_index]
+            parts.append(a_s.half_solve(v_s))
+        if m:
+            v_d = rhs[dense_index] - (b.T @ a_s.solve(v_s) if n_s else 0.0)
+            factor = schur_factor if n_s else d_factor
+            parts.append(solve_triangular(factor[0], v_d, lower=True))
+        return np.vstack(parts)
+
     # The structural rows (intrinsic + label constraints) condition the prior; the
     # trailing data rows are exact observations scored by log p(e_D | y, structural).
     constraint_count = model.constraints.shape[0]
@@ -539,8 +566,16 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         a = np.asarray(model.constraints, dtype=float)
         e = np.asarray(model.constraint_rhs, dtype=float)
         w = apply_inverse(a.T)  # latent x c
-        capacitance = a @ w  # A Q_post^-1 A^T
-        cap_factor_ref, _ = _factor_positive_definite(capacitance, "kriging capacitance")
+        # The capacitance K = A Q_post^-1 A^T is never formed: near-unit-root
+        # fields and nearly redundant aggregates push cond(K) past 1/eps, where
+        # Cholesky on K fails although K is positive definite. With G such that
+        # K = G^T G, QR gives K = R^T R from sqrt(cond K). R is block upper
+        # triangular over [structural | data] rows, so R_SS factors K_SS and R_DD
+        # factors the Schur complement K_DD - K_DS K_SS^-1 K_SD directly.
+        r_factor = np.linalg.qr(half_inverse(a.T), mode="r")
+        if not np.all(np.isfinite(r_factor)) or np.any(np.diag(r_factor) == 0.0):
+            raise NumericalError("kriging capacitance must be positive definite")
+        cap_factor_ref = (r_factor, False)
         w_constraint = w
         conditioned_mean = _kriged(mean, w, cap_factor_ref, a, e)
 
@@ -550,9 +585,9 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         # determinant terms, logdet(basis^T Q_post basis) = logdet(Q_post)
         # + logdet(A Q_post^-1 A^T) - logdet(A A^T).
         rows_s, e_s = a[:structural_count], e[:structural_count]
-        structural_factor, logdet_cap = _factor_positive_definite(
-            capacitance[:structural_count, :structural_count], "kriging capacitance"
-        )
+        r_structural = r_factor[:structural_count, :structural_count]
+        structural_factor = (r_structural, False)
+        logdet_cap = float(2.0 * np.log(np.abs(np.diag(r_structural))).sum())
         _, logdet_gram = _factor_positive_definite(rows_s @ rows_s.T, "constraint gram")
         logdet_posterior += logdet_cap - logdet_gram
         mean = _kriged(mean, w[:, :structural_count], structural_factor, rows_s, e_s)
@@ -592,16 +627,13 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         # log p(e_D | y, structural) = log N(e_D; A_D mu_S, K_DD - K_DS K_SS^-1 K_SD),
         # the Schur complement of the capacitance already factored above.
         data = slice(structural_count, constraint_count)
-        covariance = capacitance[data, data]
-        if structural_count:
-            cross = capacitance[:structural_count, data]
-            covariance = covariance - cross.T @ cho_solve(structural_factor, cross)
-        data_factor, logdet_data = _factor_positive_definite(
-            covariance, "data constraint covariance"
-        )
+        r_data = r_factor[data, data]
         gap = e[data] - a[data] @ mean
+        whitened = solve_triangular(r_data, gap, trans="T")
         log_marginal_likelihood += -0.5 * (
-            gap.size * np.log(2 * np.pi) + logdet_data + gap @ cho_solve(data_factor, gap)
+            gap.size * np.log(2 * np.pi)
+            + 2.0 * np.log(np.abs(np.diag(r_data))).sum()
+            + whitened @ whitened
         )
     mean = conditioned_mean
     predictive_mean = np.asarray(
