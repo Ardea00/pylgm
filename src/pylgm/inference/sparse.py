@@ -2,9 +2,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.linalg import cho_solve, null_space
+from scipy.linalg import cho_solve, null_space, solve_triangular
 from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import splu
+from scipy.sparse.linalg import spsolve_triangular, splu
 
 from pylgm.exceptions import NumericalError
 from pylgm.inference.gaussian import _block_slices, _factor_positive_definite
@@ -14,18 +14,28 @@ from pylgm.ir.model import CompiledLGM
 class SparseSpdFactor:
     """SuperLU factor of a sparse SPD matrix, with an exact log-determinant.
 
-    Uses ``splu`` (not a sparse Cholesky, which SciPy does not ship). For an
-    SPD matrix ``logdet = sum(log(diag(U)))`` from the LU factor; the row/column
-    permutations contribute a determinant of +/-1, which cancels for the SPD
-    magnitude. A non-positive product of diagonal entries means the matrix was
-    not positive definite -- surfaced as NumericalError to match the dense path.
+    Uses ``splu`` (not a sparse Cholesky, which SciPy does not ship) in
+    symmetric mode: the ``COLAMD`` fill-reducing ordering applied symmetrically,
+    with diagonal pivoting only (``diag_pivot_thresh=0``), so ``P A P^T = L U``
+    with the same permutation on both sides. Then ``U = D L^T`` and ``diag(U)``
+    holds the LDL^T pivots, all positive iff the matrix is positive definite,
+    and ``logdet = sum(log(diag(U)))``. A non-positive pivot is surfaced as
+    NumericalError to match the dense path.
+
+    Partial (threshold) pivoting, SuperLU's default, permutes rows
+    independently of columns: ``diag(U)`` then carries signs of an unsymmetric
+    factorisation and can be negative on an SPD matrix (``[[1e-3, 1], [1, 1e4]]``
+    gives ``diag(U) = [1, -9]``), wrongly rejecting it. ``COLAMD`` rather than
+    ``MMD_AT_PLUS_A`` keeps the former fill (MMD fills in up to 41% more on
+    these precisions).
     """
 
     def __init__(self, matrix: csr_matrix, name: str) -> None:
-        self._name = name
         try:
-            # permc_spec chosen for fill-in reduction on GMRF precisions.
-            self._lu = splu(matrix.tocsc(), permc_spec="COLAMD")
+            self._lu = splu(
+                matrix.tocsc(), permc_spec="COLAMD",
+                options=dict(SymmetricMode=True), diag_pivot_thresh=0.0,
+            )
         except (RuntimeError, ValueError) as error:
             raise NumericalError(f"{name} must be positive definite") from error
         diag_u = self._lu.U.diagonal()
@@ -35,6 +45,19 @@ class SparseSpdFactor:
 
     def solve(self, b: np.ndarray) -> np.ndarray:
         return self._lu.solve(np.asarray(b, dtype=float))
+
+    def half_solve(self, b: np.ndarray) -> np.ndarray:
+        """``G = D^-1/2 L^-1 b[q]``, so that ``b^T A^-1 b = G^T G`` (1-D or 2-D ``b``).
+
+        Symmetric mode gives ``A[q][:, q] = L D L^T`` with ``q = argsort(perm_c)``,
+        ``L`` unit lower triangular and ``D = diag(U) > 0``: a square root of
+        ``A`` without a sparse Cholesky.
+        """
+        b = np.asarray(b, dtype=float)
+        solved = spsolve_triangular(
+            self._lu.L.tocsr(), b[np.argsort(self._lu.perm_c)], lower=True, unit_diagonal=True
+        )
+        return (solved.T / np.sqrt(self._lu.U.diagonal())).T
 
     @property
     def logdet(self) -> float:
@@ -446,6 +469,22 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
 
     mean = apply_inverse(g_full)  # unconstrained posterior mean
 
+    def half_inverse(rhs: np.ndarray) -> np.ndarray:
+        """``G`` with ``G^T G = rhs^T Q_post^-1 rhs``, through the Schur partition.
+
+        ``Q_post = U^T diag(A_ss, S) U`` with ``U = [[I, A_ss^-1 B], [0, I]]``, so
+        ``G`` stacks the half-solves of ``U^-T rhs`` against ``A_ss`` and ``S``.
+        """
+        parts = []
+        if n_s:
+            v_s = rhs[sparse_index]
+            parts.append(a_s.half_solve(v_s))
+        if m:
+            v_d = rhs[dense_index] - (b.T @ a_s.solve(v_s) if n_s else 0.0)
+            factor = schur_factor if n_s else d_factor
+            parts.append(solve_triangular(factor[0], v_d, lower=True))
+        return np.vstack(parts)
+
     spans = _block_column_confinement(model)
     logdet_prior = _prior_logdet(model, spans)
 
@@ -459,8 +498,16 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         a = np.asarray(model.constraints, dtype=float)
         e = np.asarray(model.constraint_rhs, dtype=float)
         w = apply_inverse(a.T)  # latent x c
-        capacitance = a @ w  # A Q_post^-1 A^T
-        cap_factor, logdet_cap = _factor_positive_definite(capacitance, "kriging capacitance")
+        # The capacitance K = A Q_post^-1 A^T is never formed: under aggregate
+        # constraints on near-unit-root fields cond(K) approaches 1/eps, and
+        # Cholesky on the formed K loses the digits the LML needs or fails on a
+        # positive definite K. With G such that K = G^T G, QR gives K = R^T R
+        # from sqrt(cond K); (R, False) is a cho_solve factor of K.
+        r_factor = np.linalg.qr(half_inverse(a.T), mode="r")
+        if not np.all(np.isfinite(r_factor)) or np.any(np.diag(r_factor) == 0.0):
+            raise NumericalError("kriging capacitance must be positive definite")
+        cap_factor = (r_factor, False)
+        logdet_cap = float(2.0 * np.log(np.abs(np.diag(r_factor))).sum())
         _, logdet_gram = _factor_positive_definite(a @ a.T, "constraint gram")
         logdet_posterior += logdet_cap - logdet_gram
         mean = mean - w @ cho_solve(cap_factor, a @ mean - e)
