@@ -15,23 +15,28 @@ class SparseSpdFactor:
     """SuperLU factor of a sparse SPD matrix, with an exact log-determinant.
 
     Uses ``splu`` (not a sparse Cholesky, which SciPy does not ship) in
-    symmetric mode: a symmetric fill-reducing ordering (``MMD_AT_PLUS_A``) with
-    diagonal pivoting only (``diag_pivot_thresh=0``), so ``P A P^T = L U`` with
+    symmetric mode: the ``COLAMD`` fill-reducing ordering applied symmetrically,
+    with diagonal pivoting only (``diag_pivot_thresh=0``), so ``P A P^T = L U`` with
     the same permutation on both sides. Then ``U = D L^T`` and ``diag(U)`` holds
     the LDL^T pivots, all positive iff the matrix is positive definite, and
     ``logdet = sum(log(diag(U)))``. A non-positive pivot is surfaced as
     NumericalError to match the dense path.
 
-    Partial (threshold) pivoting, as with the default ``COLAMD`` ordering,
-    permutes rows independently of columns: ``diag(U)`` then carries signs of
-    an unsymmetric factorisation and can be negative on an SPD matrix
-    (``[[1e-3, 1], [1, 1e4]]`` gives ``diag(U) = [1, -9]``), wrongly rejecting it.
+    Partial (threshold) pivoting, SuperLU's default, permutes rows
+    independently of columns: ``diag(U)`` then carries signs of an unsymmetric
+    factorisation and can be negative on an SPD matrix (``[[1e-3, 1], [1, 1e4]]``
+    gives ``diag(U) = [1, -9]``), wrongly rejecting it.
+
+    ``COLAMD`` rather than ``MMD_AT_PLUS_A``: on the GMRF posterior precisions
+    here MMD fills in up to 41% more, which made the large SAR fit 42% slower
+    (the variance solves dominate); COLAMD in symmetric mode keeps the fill,
+    and the speed, of the former unsymmetric factor.
     """
 
     def __init__(self, matrix: csr_matrix, name: str) -> None:
         try:
             self._lu = splu(
-                matrix.tocsc(), permc_spec="MMD_AT_PLUS_A",
+                matrix.tocsc(), permc_spec="COLAMD",
                 options=dict(SymmetricMode=True), diag_pivot_thresh=0.0,
             )
         except (RuntimeError, ValueError) as error:
