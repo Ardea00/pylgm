@@ -36,6 +36,18 @@ def test_solve_matches_dense():
     assert np.allclose(factor.solve(rhs), np.linalg.solve(m, rhs), atol=1e-8)
 
 
+def test_spd_with_small_leading_pivot_is_accepted():
+    # Partial pivoting (COLAMD, threshold 1) swaps the rows here and yields
+    # diag(U) = [1, -9] on an SPD matrix; symmetric mode must accept it.
+    m = np.array([[1e-3, 1.0], [1.0, 1e4]])
+    factor = SparseSpdFactor(csr_matrix(m), "test")
+    sign, logdet = np.linalg.slogdet(m)
+    assert sign > 0
+    assert np.isclose(factor.logdet, logdet, atol=1e-10)
+    b = np.array([1.0, 2.0])
+    assert np.allclose(factor.solve(b), np.linalg.solve(m, b))
+
+
 def test_non_spd_raises():
     m = csr_matrix(np.diag([1.0, -1.0, 1.0]))
     with pytest.raises(NumericalError):

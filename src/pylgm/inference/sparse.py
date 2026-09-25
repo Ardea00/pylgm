@@ -14,17 +14,31 @@ from pylgm.ir.model import CompiledLGM
 class SparseSpdFactor:
     """SuperLU factor of a sparse SPD matrix, with an exact log-determinant.
 
-    Uses ``splu`` (not a sparse Cholesky, which SciPy does not ship). For an
-    SPD matrix ``logdet = sum(log(diag(U)))`` from the LU factor; the row/column
-    permutations contribute a determinant of +/-1, which cancels for the SPD
-    magnitude. A non-positive product of diagonal entries means the matrix was
-    not positive definite -- surfaced as NumericalError to match the dense path.
+    Uses ``splu`` (not a sparse Cholesky, which SciPy does not ship) in
+    symmetric mode: the ``COLAMD`` fill-reducing ordering applied symmetrically,
+    with diagonal pivoting only (``diag_pivot_thresh=0``), so ``P A P^T = L U`` with
+    the same permutation on both sides. Then ``U = D L^T`` and ``diag(U)`` holds
+    the LDL^T pivots, all positive iff the matrix is positive definite, and
+    ``logdet = sum(log(diag(U)))``. A non-positive pivot is surfaced as
+    NumericalError to match the dense path.
+
+    Partial (threshold) pivoting, SuperLU's default, permutes rows
+    independently of columns: ``diag(U)`` then carries signs of an unsymmetric
+    factorisation and can be negative on an SPD matrix (``[[1e-3, 1], [1, 1e4]]``
+    gives ``diag(U) = [1, -9]``), wrongly rejecting it.
+
+    ``COLAMD`` rather than ``MMD_AT_PLUS_A``: on the GMRF posterior precisions
+    here MMD fills in up to 41% more, which made the large SAR fit 42% slower
+    (the variance solves dominate); COLAMD in symmetric mode keeps the fill,
+    and the speed, of the former unsymmetric factor.
     """
 
     def __init__(self, matrix: csr_matrix, name: str) -> None:
         try:
-            # permc_spec chosen for fill-in reduction on GMRF precisions.
-            self._lu = splu(matrix.tocsc(), permc_spec="COLAMD")
+            self._lu = splu(
+                matrix.tocsc(), permc_spec="COLAMD",
+                options=dict(SymmetricMode=True), diag_pivot_thresh=0.0,
+            )
         except (RuntimeError, ValueError) as error:
             raise NumericalError(f"{name} must be positive definite") from error
         diag_u = self._lu.U.diagonal()

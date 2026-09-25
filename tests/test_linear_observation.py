@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.linalg import null_space, qr
 from scipy.sparse import eye
 
 from pylgm import AR1, Fixed, Gaussian, Hyperparameter, IID, LGM, LinearConstraint
@@ -82,6 +83,65 @@ def test_large_sparse_constraints_fail_before_dense_rank_reduction():
 
     with pytest.raises(ModelValidationError, match="dense workspace"):
         _constraint_rows(model, (constraint,))
+
+
+def _structural_model(width, structural):
+    return type(
+        "Model",
+        (),
+        {
+            "prediction_design": eye(width, format="csr"),
+            "prediction_offset": np.zeros(width),
+            "constraints": structural,
+            "constraint_rhs": np.zeros(structural.shape[0]),
+            "extra_constraints": structural,
+            "extra_constraint_rhs": np.zeros(structural.shape[0]),
+        },
+    )()
+
+
+def _null_space_reference(structural, proposed):
+    """Rows kept by the former reduction, ``proposed @ null_space(structural)``."""
+    reduced = proposed @ null_space(structural)
+    rank = np.linalg.matrix_rank(reduced)
+    return np.sort(qr(reduced.T, mode="economic", pivoting=True)[2][:rank])
+
+
+def test_rank_reduction_drops_rows_implied_by_structural_constraints():
+    # Row 0 lies in the structural row space, rows 2 and 3 repeat row 1.
+    rng = np.random.default_rng(0)
+    width = 12
+    structural = rng.standard_normal((3, width))
+    fresh = rng.standard_normal(width)
+    proposed = np.vstack([structural[0] + structural[2], fresh, 2.0 * fresh, 3.0 * fresh])
+    rows, _ = _constraint_rows(
+        _structural_model(width, structural), (LinearConstraint(proposed, np.zeros(4)),)
+    )
+    assert rows.shape[0] == 4
+    keep = _null_space_reference(structural, proposed)
+    assert keep.tolist() == [3]
+    assert np.allclose(rows[3], proposed[3])
+
+
+def test_rank_reduction_with_structural_constraints_skips_latent_square_workspace():
+    # 120 centring rows plus 119 aggregate rows on 4800 latents (a regional
+    # nowcast) once needed a dense latent x latent null space (~176 MiB).
+    width, groups = 4800, 120
+    structural = np.zeros((groups, width))
+    for group in range(groups):
+        structural[group, group::groups] = 1.0
+    aggregates = np.zeros((119, width))
+    for row in range(119):
+        aggregates[row, 40 * row: 40 * row + 40] = 1.0
+    rows, _ = _constraint_rows(
+        _structural_model(width, structural),
+        (LinearConstraint(aggregates, np.zeros(119)),),
+    )
+    # Both row sets sum to the all-ones vector, and the 119 blocks of 40 leave
+    # the last 40 latents free: rank(C0; A) - rank(C0) = 118.
+    expected = np.linalg.matrix_rank(np.vstack([structural, aggregates])) - groups
+    assert rows.shape[0] == groups + expected
+    assert np.linalg.matrix_rank(rows) == rows.shape[0]
 
 
 @pytest.mark.parametrize("mode", ["optimize", "integrate"])
