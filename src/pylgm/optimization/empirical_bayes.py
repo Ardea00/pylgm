@@ -250,7 +250,26 @@ def optimize_empirical_bayes(
             start,
             method="L-BFGS-B",
             bounds=scipy_bounds,
-            options={"ftol": 1e-12, "gtol": 1e-10},
+            options={
+                "ftol": 1e-12,
+                "gtol": 1e-8,
+                # Forward finite differences on `objective` (no analytic jac):
+                # scipy's default step (sqrt(machine eps) ~= 1.5e-8 on the log/logit
+                # internal scale) is far below the numerical noise floor of a
+                # posterior log-determinant evaluation. The posterior precision here
+                # has condition number ~1e9-1e14, so re-forming and re-factorizing it
+                # at two nearby x values reproduces exactly at a fixed x but differs
+                # by ~1e-7..1e-6 between nearby x's (verified both on the sparse splu
+                # path and on the dense Cholesky path -- this is generic
+                # ill-conditioning of the posterior precision, not specific to splu).
+                # A default-size FD step measures that noise, not the gradient, and
+                # L-BFGS-B then thrashes, taking dozens of evaluations without making
+                # progress. `eps` here is chosen comfortably above the observed noise
+                # floor (diff/eps is noise-dominated below ~1e-7 and signal-dominated
+                # at 1e-6) while remaining a small step on the internal log/logit
+                # scale.
+                "eps": 1e-6,
+            },
         )
     elapsed_seconds = perf_counter() - started
 
