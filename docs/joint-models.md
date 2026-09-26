@@ -234,6 +234,90 @@ object to more than one `Shared` entry (or letting the `(delta, delta⁻¹)`
 shorthand produce the same object twice) dedups instead of raising, since it
 is the same declaration, not a collision.
 
+## Linear observations and constraints
+
+`Joint.fit` accepts `observations` and `constraints`, each a mapping from
+sub-model response name to a list of
+[`LinearObservation`](linear-observations.md) / `LinearConstraint`:
+
+```python
+result = joint.fit(
+    frame,
+    observations={"gdp_quarterly": [LinearObservation(values, operator, sigma)]},
+    constraints={"gdp_quarterly": [LinearConstraint(operator, rhs)]},
+)
+```
+
+Operator columns are the rows of the caller's `frame`, in caller order —
+`operator.shape[1] == len(frame)` — exactly like `LGM.fit`. Each operator acts
+on that outcome's linear predictor `eta` (the link scale, e.g. log for a
+Poisson sub-model), not on the response mean.
+
+**Row rule.** Sub-model `k` keeps the rows where its own response is
+non-null, as always. If `k` is also named in `observations` or `constraints`,
+it additionally keeps every row that a *nonzero* entry of one of its
+operators references — these become unobserved-but-predicted rows of `k` (for
+example, the future quarters a nowcast aggregates over). A row `k` does not
+reference stays dropped, as it always has. If `k` is named but its response
+column is absent from `frame` altogether, it is treated as all-NaN.
+
+**Example — regional quarterly nowcast.** Say `gdp_quarterly` is a regional
+outcome with mostly-missing recent quarters, and `gdp_indicator` is a
+correlated proxy (available every quarter) sharing a temporal field with it.
+An observation ties the regions' quarterly sum to a published national
+quarterly total; a constraint ties the same regions' annual sums to
+already-released annual figures:
+
+```python
+import numpy as np
+
+quarters_to_nowcast = frame.index[frame["quarter"] == "2026Q2"].to_numpy()
+operator = np.zeros(len(frame))
+operator[quarters_to_nowcast] = 1.0  # sum this quarter across regions
+
+national_quarterly = LinearObservation(
+    values=[national_total_2026q2], operator=operator[None, :], sigma=se_national,
+)
+
+annual_rows = frame.index[frame["region"] == "north"].to_numpy()
+annual_operator = np.zeros(len(frame))
+annual_operator[annual_rows] = 1.0
+annual_constraint = LinearConstraint(annual_operator[None, :], rhs=[released_annual_north])
+
+result = joint.fit(
+    frame,
+    observations={"gdp_quarterly": [national_quarterly]},
+    constraints={"gdp_quarterly": [annual_constraint]},
+)
+```
+
+**Pseudo-rows.** Each `LinearObservation` adds a Gaussian pseudo-row,
+standardized by `1 / sigma`, under a unit-Gaussian mixture part appended
+after the sub-models' own rows; the sub-model rows keep their own
+likelihoods (Poisson, Binomial, ...), unlike `LGM.fit`'s all-Gaussian
+projection. `log_likelihood_normalization` is reduced by `sum(log sigma)`
+accordingly.
+
+**Constraints** are exact equality constraints on the predictor grid,
+conditioned on after finding the mode: exact for an all-Gaussian stack, and
+an approximation for a non-Gaussian one — the same R-INLA `extraconstr`-style
+approximation `LGM.fit` already uses.
+
+`sigma` may be a `Hyperparameter`: it is then estimated by empirical Bayes
+alongside every other joint hyperparameter (sub-model likelihood parameters
+and `Shared` scales), from the same flat hyperparameter namespace described
+above.
+
+`hyperparameters="integrate"` works with observations and constraints: INLA
+integrates over every joint hyperparameter, including a `Hyperparameter`
+sigma, so predictive intervals carry the hyperparameter uncertainty that the
+empirical-Bayes plug-in ignores. `latent_strategy="simplified_laplace"` is
+supported; `latent_strategy="laplace"` rejects constraints, as on `LGM` (and
+see the caveat below). Model criteria (DIC/WAIC/CPO/PIT) cover the
+`LinearObservation` rows too: `result.criteria.cpo` lists the sub-model rows
+in stacked order (NaN at unobserved rows) followed by one entry per
+observation row, each read on its original `sigma` scale.
+
 ## Not supported yet
 
 - **`latent_strategy="laplace"` is not recommended on joint models.** Under
@@ -258,7 +342,10 @@ is the same declaration, not a collision.
 - **NaN-response hold-out.** `LGM.fit` keeps NaN-response rows as *unobserved*
   — excluded from the likelihood, but still assigned fitted values on the
   predictor. `Joint.fit` instead drops each sub-model's NaN-response rows before
-  compiling, so that idiom does nothing on a `Joint`.
+  compiling, so that idiom does nothing on a `Joint` — except that a row
+  referenced by a nonzero entry of that outcome's `observations`/`constraints`
+  operator is kept as an unobserved-but-predicted row (see "Linear observations
+  and constraints" above).
 
   This is deliberate, not an oversight. In the long-stacked layout joint models
   are normally given — one row per (outcome, unit) pair — every row is NaN for

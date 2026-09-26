@@ -12,6 +12,7 @@ from scipy.special import logsumexp
 from scipy.stats import norm
 
 from pylgm.exceptions import NumericalError, OptimizationError, UnsupportedEngineError
+from pylgm.likelihoods import CompiledMixture
 from pylgm.inference import LaplaceResult, fit_gaussian
 from pylgm.inference.result import (
     GaussianMarginals,
@@ -753,7 +754,7 @@ def integrate_inla(
     design_obs = full_design[observed]
     offset_obs = kept[0][4].offset[observed]
     y_obs = kept[0][4].y[observed]
-    theta_grid = [(w, cond, compiled.likelihood)
+    theta_grid = [(w, cond, compiled.likelihood.restrict(observed))
                   for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
     crit = _model_criteria(*_criteria_inputs(kept, weights, observed))
 
@@ -799,7 +800,7 @@ def integrate_inla(
                 "guard; use latent_strategy='gaussian' or 'simplified_laplace'"
             )
         laplace_grid = [
-            (w, cond, compiled.likelihood, compiled.precision)
+            (w, cond, compiled.likelihood.restrict(observed), compiled.precision)
             for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)
         ]
         latent_marginal_table = _full_laplace_marginals(design_obs, offset_obs, y_obs, laplace_grid)
@@ -854,6 +855,25 @@ class _RowGaussian:
         return norm.cdf(y, loc=eta, scale=self.sd)
 
 
+@dataclass(frozen=True)
+class _RowScaled:
+    """A likelihood fitted on rows divided by ``sd``, read back on the original scale.
+
+    A projected joint standardises only its LinearObservation pseudo-rows (the
+    sub-model rows carry ``sd == 1``), so, unlike ``_RowGaussian``, the rows
+    keep their own likelihoods: ``p(y | eta) = p_std(y / sd | eta / sd) / sd``.
+    """
+
+    base: object
+    sd: np.ndarray
+
+    def pointwise_log_density(self, eta, y):
+        return self.base.pointwise_log_density(eta / self.sd, y / self.sd) - np.log(self.sd)
+
+    def cdf(self, eta, y):
+        return self.base.cdf(eta / self.sd, y / self.sd)
+
+
 def _criteria_inputs(kept, weights, observed):
     """``(design, offset, y, grid)`` for the model criteria, on the original scale.
 
@@ -863,20 +883,28 @@ def _criteria_inputs(kept, weights, observed):
     Un-standardising gives one theta-free design, offset and response, and a
     per-point likelihood carrying that point's ``sigma_i``: the densities then
     include the Jacobian ``-log sigma_i`` and the posterior predictive means mix
-    on one scale.
+    on one scale. A joint's mixture likelihood is first restricted to the
+    observed rows, and its pseudo-rows are un-standardised through ``_RowScaled``.
     """
     reference = kept[0][4]
     design = reference.design[observed]
     offset = reference.offset[observed]
     y = reference.y[observed]
     if reference.row_log_scale is None:
-        grid = [(w, cond, compiled.likelihood)
+        grid = [(w, cond, compiled.likelihood.restrict(observed))
                 for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
         return design, offset, y, grid
     scale = np.exp(reference.row_log_scale[observed])
-    grid = [(w, cond, _RowGaussian(np.exp(compiled.row_log_scale[observed])))
+    grid = [(w, cond, _row_scaled(compiled, observed))
             for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
     return design.multiply(scale[:, None]).tocsr(), offset * scale, y * scale, grid
+
+
+def _row_scaled(compiled, observed):
+    sd = np.exp(compiled.row_log_scale[observed])
+    if isinstance(compiled.likelihood, CompiledMixture):
+        return _RowScaled(compiled.likelihood.restrict(observed), sd)
+    return _RowGaussian(sd)
 
 
 def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):

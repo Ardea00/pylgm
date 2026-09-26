@@ -8,7 +8,7 @@ from scipy.sparse import csr_matrix, issparse, vstack
 
 from pylgm.exceptions import ModelValidationError, UnsupportedEngineError
 from pylgm.ir.model import CompiledLGM, LatentBlock
-from pylgm.likelihoods import CompiledGaussian
+from pylgm.likelihoods import CompiledGaussian, CompiledMixture
 from pylgm.parameters import Hyperparameter
 
 
@@ -257,6 +257,82 @@ def project_gaussian_model(
     )
 
 
+def project_joint_model(model, observations, constraints):
+    """Append standardized ``LinearObservation`` pseudo-rows to a stacked joint model.
+
+    Unlike :func:`project_gaussian_model`, the sub-model rows keep their own
+    likelihoods; only the pseudo-rows are divided by ``sigma``, under a unit
+    Gaussian part appended to the mixture after every grid row.
+    """
+    rows = model.design.shape[0]
+    grid_rows = model.prediction_design.shape[0]
+    designs, values, offsets, sigmas = [], [], [], []
+    for observation in observations:
+        if isinstance(observation.sigma, Hyperparameter):
+            raise ModelValidationError(
+                f"LinearObservation sigma {observation.sigma.name!r} is unresolved; "
+                "it is estimated through Joint.fit"
+            )
+        operator = _aligned(observation.operator, grid_rows, "LinearObservation operator")
+        designs.append(operator @ model.prediction_design)
+        values.append(observation.values)
+        offsets.append(np.asarray(operator @ model.prediction_offset).reshape(-1))
+        sigmas.append(observation.sigma)
+    if designs:
+        added_design = vstack(designs, format="csr")
+        added_y, added_offset, sigma = map(np.concatenate, (values, offsets, sigmas))
+        inverse_sigma = 1.0 / sigma
+        added_design = added_design.multiply(inverse_sigma[:, None]).tocsr()
+        added_y, added_offset = added_y * inverse_sigma, added_offset * inverse_sigma
+        normalization = model.log_likelihood_normalization - float(np.log(sigma).sum())
+    else:
+        added_design = csr_matrix((0, model.design.shape[1]))
+        added_y = added_offset = np.empty(0)
+        normalization = model.log_likelihood_normalization
+    added = added_y.size
+    design = vstack([model.design, added_design], format="csr")
+
+    blocks, start = [], 0
+    for block in model.blocks:
+        stop = start + block.design.shape[1]
+        blocks.append(
+            LatentBlock(
+                block.name, block.labels, design[:, start:stop],
+                block.precision, block.constraints,
+            )
+        )
+        start = stop
+
+    likelihood = model.likelihood
+    if added:
+        parts = (
+            model.likelihood.parts
+            if isinstance(model.likelihood, CompiledMixture)
+            else ((np.ones(rows, dtype=bool), model.likelihood),)
+        )
+        padding = np.zeros(added, dtype=bool)
+        parts = tuple((np.concatenate([mask, padding]), lk) for mask, lk in parts)
+        pseudo = np.concatenate([np.zeros(rows, dtype=bool), np.ones(added, dtype=bool)])
+        likelihood = CompiledMixture((*parts, (pseudo, CompiledGaussian(1.0))), rows + added)
+    extra, extra_rhs = _constraint_rows(model, constraints)
+    intrinsic_count = model.constraints.shape[0] - model.extra_constraints.shape[0]
+    return CompiledLGM(
+        y=np.concatenate([model.y, added_y]),
+        observed=np.concatenate([model.observed, np.ones(added, dtype=bool)]),
+        offset=np.concatenate([model.offset, added_offset]),
+        design=design, precision=model.precision,
+        constraints=np.vstack([model.constraints[:intrinsic_count], extra]),
+        labels=model.labels, likelihood=likelihood, blocks=tuple(blocks),
+        extra_constraints=extra, extra_constraint_rhs=extra_rhs,
+        prediction_design=model.prediction_design, prediction_offset=model.prediction_offset,
+        log_likelihood_normalization=normalization,
+        data_constraint_count=extra.shape[0] - model.extra_constraints.shape[0],
+        row_log_scale=(
+            np.concatenate([np.zeros(rows), np.log(sigma)]) if designs else model.row_log_scale
+        ),
+    )
+
+
 def observation_hyperparameters(observations) -> tuple[Hyperparameter, ...]:
     return tuple(item.sigma for item in observations if isinstance(item.sigma, Hyperparameter))
 
@@ -313,12 +389,28 @@ class _ProjectedGaussianFamily:
         return project_gaussian_model(base, observations, self.constraints)
 
 
+@dataclass(frozen=True)
+class _ProjectedJointFamily(_ProjectedGaussianFamily):
+    """``_ProjectedGaussianFamily`` for a stacked joint: sub-model rows keep their likelihoods."""
+
+    def materialize(self, values):
+        base = self.base.materialize({name: values[name] for name in self.base.parameter_names})
+        observations = tuple(
+            replace_sigma(item, values[item.sigma.name])
+            if isinstance(item.sigma, Hyperparameter) else item
+            for item in self.observations
+        )
+        return project_joint_model(base, observations, self.constraints)
+
+
 def replace_sigma(observation: LinearObservation, sigma: float) -> LinearObservation:
     return LinearObservation(observation.values, observation.operator, sigma)
 
 
-def project_gaussian_family(family, observations, constraints, *, base_model=None):
+def project_gaussian_family(family, observations, constraints, *, base_model=None, family_type=None):
     """Wrap ``family`` (or, when it is ``None``, the fixed ``base_model``)."""
+    if family_type is None:
+        family_type = _ProjectedGaussianFamily
     if family is None:
         family = _ConstantFamily(base_model)
     names = list(family.parameter_names) + [
@@ -327,7 +419,7 @@ def project_gaussian_family(family, observations, constraints, *, base_model=Non
     duplicated = sorted({name for name in names if names.count(name) > 1})
     if duplicated:
         raise ModelValidationError(f"hyperparameter names must be unique: {duplicated}")
-    return _ProjectedGaussianFamily(family, observations, constraints)
+    return family_type(family, observations, constraints)
 
 
 def reorder_linear_inputs(observations, constraints, source_positions):

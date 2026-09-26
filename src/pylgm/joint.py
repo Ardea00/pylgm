@@ -9,13 +9,22 @@ invariants -- ``design == hstack(blocks)`` and ``precision == block_diag(blocks)
 -- are preserved.
 """
 
+import collections.abc
 from dataclasses import dataclass
 from functools import partial
 
+import numpy as np
 from scipy.sparse import csr_matrix, vstack
 
 from pylgm.effects import Copy, Weighted
+from pylgm.exceptions import ModelValidationError, UnsupportedEngineError
 from pylgm.ir.model import LatentBlock
+from pylgm.observations import (
+    LinearConstraint,
+    LinearObservation,
+    _ProjectedJointFamily,
+    _aligned,
+)
 from pylgm.parameters import Hyperparameter
 
 
@@ -137,6 +146,36 @@ class Shared:
         return tuple(float(scale) for _ in range(count))
 
 
+def _linear_inputs(self: "Joint", argument, kind: type, name: str) -> dict:
+    """Validate and normalize an ``observations``/``constraints`` mapping.
+
+    Returns ``{outcome: tuple(items)}`` with only non-empty entries.
+    """
+    if argument is None:
+        return {}
+    if not isinstance(argument, collections.abc.Mapping):
+        raise TypeError(
+            f"{name} must be a mapping from outcome name to a list of {kind.__name__}"
+        )
+    result = {}
+    for key, value in argument.items():
+        if key not in self.outcomes:
+            raise ModelValidationError(
+                f"{name} names unknown outcome {key!r}; the joint's outcomes are {self.outcomes}"
+            )
+        try:
+            items = tuple(value)
+        except TypeError as error:
+            raise TypeError(
+                f"{name} must be a mapping from outcome name to a list of {kind.__name__}"
+            ) from error
+        if any(not isinstance(item, kind) for item in items):
+            raise TypeError(f"{name}[{key!r}] must contain only {kind.__name__} instances")
+        if items:
+            result[key] = items
+    return result
+
+
 @dataclass(frozen=True)
 class Joint:
     """Several `LGM` sub-models fitted as one stacked latent Gaussian model."""
@@ -175,16 +214,45 @@ class Joint:
         return obj
 
     def fit(self, frame, engine: str = "laplace", *, hyperparameters: str = "optimize",
-            latent_strategy: str = "gaussian", mean_correction: bool = False):
-        """Compile and fit this joint model. Only ``engine='laplace'`` is supported."""
+            latent_strategy: str = "gaussian", mean_correction: bool = False,
+            observations=None, constraints=None):
+        """Compile and fit this joint model. Only ``engine='laplace'`` is supported.
+
+        ``observations`` and ``constraints`` are mappings from sub-model
+        response name to a list of :class:`~pylgm.observations.LinearObservation`
+        / :class:`~pylgm.observations.LinearConstraint` respectively. ``None``
+        or ``{}`` behaves exactly like today (bit-identical).
+
+        Operator columns follow the caller's ``frame`` rows in caller order
+        (width == ``len(frame)``), exactly like ``LGM.fit``. Operators act on
+        that outcome's linear predictor ``eta`` (link scale, e.g. log for
+        Poisson), not on the response mean.
+
+        Row rule: sub-model ``k`` keeps the rows where its response is
+        non-null, plus, if ``k`` is named in ``observations``/``constraints``,
+        every row that a nonzero operator entry of ``k`` references -- these
+        become unobserved-but-predicted rows of ``k`` (e.g. the quarters to
+        nowcast). Unreferenced NaN rows are still dropped, as today. If ``k``
+        is named and its response column is absent from ``frame``, it is
+        treated as all-NaN.
+
+        See docs/joint-models.md for the full semantics, including
+        ``LinearObservation`` pseudo-rows, ``LinearConstraint`` conditioning,
+        and estimating a ``LinearObservation`` sigma by empirical Bayes.
+        """
         import pandas as pd
 
         from pylgm.compiler import compile_joint, compile_joint_family, build_joint_prediction_contexts
         from pylgm.config.schema import DataConfig
         from pylgm.data.panel import CanonicalPanel
-        from pylgm.exceptions import DataContractError, UnsupportedEngineError
+        from pylgm.exceptions import DataContractError
         from pylgm.inference.laplace import fit_laplace
         from pylgm.model import _rebuild_result
+        from pylgm.observations import (
+            observation_hyperparameters,
+            project_gaussian_family,
+            project_joint_model,
+        )
 
         if engine != "laplace":
             raise UnsupportedEngineError(
@@ -195,7 +263,17 @@ class Joint:
         if not isinstance(frame, pd.DataFrame):
             raise DataContractError("frame must be a Pandas DataFrame")
 
+        observations = _linear_inputs(self, observations, LinearObservation, "observations")
+        constraints = _linear_inputs(self, constraints, LinearConstraint, "constraints")
+        for mapping in (observations, constraints):
+            for outcome, items in mapping.items():
+                for item in items:
+                    _aligned(
+                        item.operator, len(frame),
+                        f"{type(item).__name__} operator for outcome {outcome!r}",
+                    )
         panels = {}
+        positions = {}
         for model in self.submodels:
             # Each sub-model sees only the rows carrying its own response.
             #
@@ -208,15 +286,101 @@ class Joint:
             # fitted values for observations that do not exist. The cost is that
             # the LGM.fit hold-out idiom does not carry over to a Joint; that is
             # documented in docs/joint-models.md under "Not supported yet".
-            sub = frame[frame[model.response].notna()].reset_index(drop=True)
+            #
+            # An outcome named in observations/constraints is the exception: a
+            # NaN row it references through a nonzero operator entry becomes an
+            # unobserved-but-predicted row of that outcome (e.g. the quarters a
+            # nowcast observation aggregates), rather than being dropped.
+            named = model.response in observations or model.response in constraints
+            if not named:
+                sub = frame[frame[model.response].notna()].reset_index(drop=True)
+                positions[model.response] = np.flatnonzero(
+                    frame[model.response].notna().to_numpy()
+                )
+            else:
+                if model.response in frame.columns:
+                    keep = frame[model.response].notna().to_numpy().copy()
+                else:
+                    keep = np.zeros(len(frame), dtype=bool)
+                for item in (*observations.get(model.response, ()), *constraints.get(model.response, ())):
+                    operator = item.operator.copy()
+                    operator.eliminate_zeros()
+                    keep[np.unique(operator.indices)] = True
+                positions[model.response] = np.flatnonzero(keep)
+                sub = frame.iloc[positions[model.response]].reset_index(drop=True)
+                if model.response not in sub.columns:
+                    sub = sub.assign(**{model.response: np.nan})
             time = model.time or "__pylgm_row__"
             if model.time is None:
                 sub = sub.assign(**{time: range(len(sub))})
             panels[model.response] = CanonicalPanel.from_frame(
-                sub, DataConfig(time=time, response=model.response, panel=model.panel)
+                sub, DataConfig(time=time, response=model.response, panel=model.panel),
+                require_observed=not named,
+            )
+
+        for model in self.submodels:
+            named = model.response in observations or model.response in constraints
+            if (
+                named
+                and hasattr(model.likelihood, "sigma")
+                and isinstance(model.likelihood.sigma, Hyperparameter)
+                and not panels[model.response].observed.any()
+            ):
+                raise ModelValidationError(
+                    f"the Gaussian sigma {model.likelihood.sigma.name!r} cannot be estimated: "
+                    f"outcome {model.response!r} has no row responses, only linear observations "
+                    "or constraints; give it a fixed value, or estimate a LinearObservation "
+                    "sigma instead"
+                )
+
+        linear = bool(observations or constraints)
+        stacked_observations: tuple = ()
+        stacked_constraints: tuple = ()
+        if linear:
+            sizes = [len(panels[outcome].frame) for outcome in self.outcomes]
+            starts, total = [], 0
+            for size in sizes:
+                starts.append(total)
+                total += size
+
+            selections = {}
+            for index, outcome in enumerate(self.outcomes):
+                p_k = positions[outcome]
+                s_k = panels[outcome].source_positions
+                n_k = len(s_k)
+                selections[outcome] = csr_matrix(
+                    (
+                        np.ones(n_k),
+                        (p_k[s_k], starts[index] + np.arange(n_k)),
+                    ),
+                    shape=(len(frame), total),
+                )
+
+            stacked_observations = tuple(
+                LinearObservation(
+                    item.values, item.operator @ selections[outcome], item.sigma
+                )
+                for outcome in self.outcomes
+                for item in observations.get(outcome, ())
+            )
+            stacked_constraints = tuple(
+                LinearConstraint(item.operator @ selections[outcome], item.rhs)
+                for outcome in self.outcomes
+                for item in constraints.get(outcome, ())
             )
 
         family = compile_joint_family(self, panels)
+        if observation_hyperparameters(stacked_observations):
+            family = project_gaussian_family(
+                family, stacked_observations, stacked_constraints,
+                base_model=compile_joint(self, panels) if family is None else None,
+                family_type=_ProjectedJointFamily,
+            )
+        elif family is not None and linear:
+            family = project_gaussian_family(
+                family, stacked_observations, stacked_constraints,
+                family_type=_ProjectedJointFamily,
+            )
         if hyperparameters == "integrate":
             if family is None:
                 raise ValueError(
@@ -226,7 +390,11 @@ class Joint:
             compiled = compile_joint(self, panels)
         elif family is None:
             compiled = compile_joint(self, panels)
-            result = fit_laplace(compiled, mean_correction=mean_correction)
+            fitted = (
+                project_joint_model(compiled, stacked_observations, stacked_constraints)
+                if linear else compiled
+            )
+            result = fit_laplace(fitted, mean_correction=mean_correction)
         else:
             result = self._run_empirical_bayes(family, mean_correction)
             compiled = compile_joint(self, panels)
@@ -251,6 +419,7 @@ class Joint:
             for scale in entry.scales_for(len(self.submodels)):
                 if isinstance(scale, Hyperparameter):
                     declared.append(scale)
+        declared.extend(getattr(family, "hyperparameters", ()))
 
         bounds = (
             dict(family.parameter_bounds)
