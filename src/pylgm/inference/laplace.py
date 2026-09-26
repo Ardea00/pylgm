@@ -5,6 +5,7 @@ from scipy.sparse import csr_matrix
 from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference.gaussian import (
     _block_slices,
+    _condition_on_data_constraints,
     _constraint_null_space,
     _constraint_particular_solution,
     _factor_positive_definite,
@@ -78,7 +79,20 @@ def _fit_laplace_dense(
     )
     lk_obs.validate_response(y_obs)
 
-    basis = _constraint_null_space(model.constraints, latent_size)
+    # A trailing ``data_constraint_count`` rows of ``model.constraints`` are
+    # exact data (a ``LinearConstraint``), not pure conditioning: they enter
+    # ``log p(y, e) = log p(y) + log p(e | y)`` as the density of an exact
+    # observation of ``A x``, scored below by ``_condition_on_data_constraints``
+    # against the *Laplace* posterior -- the same identity ``inference/gaussian.py``
+    # uses against the exact Gaussian posterior. Only the structural rows (the
+    # intrinsic sum-to-zero and any model-level ``constraints=`` label rows)
+    # restrict the Newton fit's search space here.
+    structural_count = model.constraints.shape[0] - model.data_constraint_count
+    structural_constraints = model.constraints[:structural_count]
+    structural_rhs = model.constraint_rhs[:structural_count]
+
+    basis = _constraint_null_space(structural_constraints, latent_size)
+    identity = not structural_constraints.shape[0]
     reduced_dim = basis.shape[1]
     reduced_design = np.asarray(design[observed] @ basis)
     reduced_precision = basis.T @ precision @ basis
@@ -89,7 +103,7 @@ def _fit_laplace_dense(
     # Nonzero-rhs constraint: x = x_p + basis @ z shifts the observed predictor by
     # design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p); the
     # induced prior mean of z is m = -Q_r^-1 b_p (conditioning by kriging).
-    x_p = _constraint_particular_solution(model.constraints, model.constraint_rhs, latent_size)
+    x_p = _constraint_particular_solution(structural_constraints, structural_rhs, latent_size)
     prior_linear = np.zeros(reduced_dim)
     prior_mean = np.zeros(reduced_dim)
     if x_p is not None:
@@ -182,6 +196,8 @@ def _fit_laplace_dense(
         covariance_factor = np.zeros((latent_size, 0))
         logdet_posterior = 0.0
         loglik_mode = lk_obs.log_likelihood(offset_obs, y_obs)
+        factor = prior_factor
+        hessian = reduced_precision
 
     # Only the reported mean moves. `z` stays the mode, because the log marginal
     # likelihood below is a Laplace approximation *at* it and evaluating that
@@ -192,19 +208,69 @@ def _fit_laplace_dense(
             reduced_design, cho_solve(factor, np.eye(reduced_dim)), factor, eta, y_obs, lk_obs
         )
 
-    mean = basis @ z_mean if x_p is None else x_p + basis @ z_mean
-    covariance = covariance_factor @ covariance_factor.T
     centered = z - prior_mean
     log_marginal_likelihood = float(
         loglik_mode
         - 0.5 * float(centered @ reduced_precision @ centered)
         + 0.5 * logdet_prior
         - 0.5 * logdet_posterior
-    )
+    ) + model.log_likelihood_normalization
 
-    predictive_mean = np.asarray(offset + design @ mean).reshape(-1)
-    predictive_variance = quadratic_form_diagonal(design, covariance)
-    fitted_mean = likelihood.response_prediction(predictive_mean, predictive_variance)
+    covariance_basis = basis
+    z_reported = z_mean
+    if model.data_constraint_count:
+        # log p(y, e) = log p(y) + log p(e | y): the Laplace posterior at the
+        # mode (mean=z, precision=hessian) stands in for the exact Gaussian
+        # posterior _condition_on_data_constraints was written against; the
+        # identity itself is purely array-based (mean/logdet/precision plus the
+        # data rows/rhs), so it applies unchanged to a Laplace mode.
+        data_rows = model.constraints[structural_count:]
+        data_rhs = model.constraint_rhs[structural_count:]
+        if x_p is not None:
+            data_rhs = data_rhs - data_rows @ x_p
+        # `factor` is reassigned here to the *conditioned* factor (of
+        # ``null.T @ hessian @ null``, shape ``null.shape[1]``), not the
+        # pre-conditioning Hessian factor computed above -- covariance after
+        # conditioning is ``N (N^T H N)^-1 N^T``, so the sampling factor below
+        # must be built from that smaller factor, exactly as
+        # ``inference/gaussian.py`` reassigns its own ``factor`` at the
+        # matching step.
+        z_reported, null, factor, data_log_density = _condition_on_data_constraints(
+            z_reported, logdet_posterior, hessian,
+            data_rows if identity else data_rows @ basis, data_rhs,
+        )
+        log_marginal_likelihood += data_log_density
+        covariance_basis = null if identity else basis @ null
+
+    # Covariance factor after any data-constraint conditioning: its columns span
+    # the *data*-constrained null space, so sampler draws satisfy every extra
+    # constraint row, structural or data, to numerical precision.
+    covariance_factor = (
+        solve_triangular(factor[0], covariance_basis.T, lower=True).T
+        if reduced_dim and covariance_basis.shape[1]
+        else np.zeros((latent_size, covariance_basis.shape[1]))
+    )
+    mean = basis @ z_reported if x_p is None else x_p + basis @ z_reported
+    covariance = covariance_factor @ covariance_factor.T
+
+    # Report on `prediction_design`/`prediction_offset`, not the fit `design`/
+    # `offset`: for an unmodified model the two are identical (CompiledLGM's
+    # default), but a model augmented with LinearObservation pseudo-rows (Joint)
+    # fits against extra rows appended to `design` that must not leak into the
+    # reported predictions -- exactly the split `inference/gaussian.py` already
+    # makes for the exact Gaussian engine.
+    prediction_design = model.prediction_design
+    prediction_offset = model.prediction_offset
+    predictive_mean = np.asarray(prediction_offset + prediction_design @ mean).reshape(-1)
+    predictive_variance = quadratic_form_diagonal(prediction_design, covariance)
+    # A projected joint model appends its LinearObservation pseudo-rows after
+    # the prediction-grid rows, so the grid's likelihood is that prefix.
+    prediction_likelihood = likelihood
+    if prediction_design.shape[0] != design.shape[0]:
+        prediction_likelihood = likelihood.restrict(
+            np.arange(design.shape[0]) < prediction_design.shape[0]
+        )
+    fitted_mean = prediction_likelihood.response_prediction(predictive_mean, predictive_variance)
 
     _require_finite("posterior mean", mean)
     _require_finite("posterior covariance", covariance)
@@ -235,7 +301,9 @@ def _fit_laplace_dense(
             # the fit, so a rescued mode is auditable in the field.
             "newton_decrement": newton_decrement,
         },
-        sampler=GridSampler(mean, csr_matrix(design), offset, factor=covariance_factor),
+        sampler=GridSampler(
+            mean, csr_matrix(prediction_design), prediction_offset, factor=covariance_factor
+        ),
     )
 
 

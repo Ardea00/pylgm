@@ -105,3 +105,5 @@ They work with fixed fits, empirical-Bayes optimization and INLA integration.
 Exact constraints run on both the dense and the sparse Gaussian paths; on the
 sparse path a `LinearConstraint` row may span several latent blocks (label
 constraints passed to `LGM(constraints=...)` must still touch a single block).
+A `Joint` model accepts them too, per outcome — see
+[Linear observations and constraints](joint-models.md#linear-observations-and-constraints).
