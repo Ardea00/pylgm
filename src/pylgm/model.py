@@ -553,6 +553,7 @@ class LGM:
 
         from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
         from pylgm.observations import (
+            _RelinearizedFamily,
             observation_hyperparameters,
             project_gaussian_family,
             project_gaussian_model,
@@ -576,31 +577,53 @@ class LGM:
                 "give it a fixed value, or estimate a LinearObservation sigma instead"
             )
 
-        family = compile_family(self, panel)
-        if observation_hyperparameters(observations):
+        nonlinear = any(item.scale == "log" for item in (*observations, *constraints))
+        if nonlinear:
+            compiled = compile_lgm(self, panel)
             family = project_gaussian_family(
-                family, observations, constraints,
-                base_model=compile_lgm(self, panel) if family is None else None,
+                compile_family(self, panel), observations, constraints,
+                base_model=compiled,
+                family_type=partial(
+                    _RelinearizedFamily, project=project_gaussian_model,
+                    inner_fit=partial(fit_gaussian, predictive_variances=False),
+                ),
             )
-        elif family is not None and (observations or constraints):
-            family = project_gaussian_family(family, observations, constraints)
-        if hyperparameters == "integrate":
-            if family is None:
-                raise ValueError(
-                    "hyperparameters='integrate' requires a declared Hyperparameter"
-                )
-            result = self._run_inla(family, engine, latent_strategy, mean_correction)
-            compiled = compile_lgm(self, panel)
-        elif family is None:
-            compiled = compile_lgm(self, panel)
-            fitted = (
-                project_gaussian_model(compiled, observations, constraints)
-                if observations or constraints else compiled
-            )
-            result = self._engine(engine, mean_correction)(fitted)
+            if not family.parameter_names:
+                if hyperparameters == "integrate":
+                    raise ValueError(
+                        "hyperparameters='integrate' requires a declared Hyperparameter"
+                    )
+                result = self._engine(engine, mean_correction)(family.materialize({}))
+            elif hyperparameters == "integrate":
+                result = self._run_inla(family, engine, latent_strategy, mean_correction)
+            else:
+                result = self._run_empirical_bayes(family, engine, mean_correction)
         else:
-            result = self._run_empirical_bayes(family, engine, mean_correction)
-            compiled = compile_lgm(self, panel)
+            family = compile_family(self, panel)
+            if observation_hyperparameters(observations):
+                family = project_gaussian_family(
+                    family, observations, constraints,
+                    base_model=compile_lgm(self, panel) if family is None else None,
+                )
+            elif family is not None and (observations or constraints):
+                family = project_gaussian_family(family, observations, constraints)
+            if hyperparameters == "integrate":
+                if family is None:
+                    raise ValueError(
+                        "hyperparameters='integrate' requires a declared Hyperparameter"
+                    )
+                result = self._run_inla(family, engine, latent_strategy, mean_correction)
+                compiled = compile_lgm(self, panel)
+            elif family is None:
+                compiled = compile_lgm(self, panel)
+                fitted = (
+                    project_gaussian_model(compiled, observations, constraints)
+                    if observations or constraints else compiled
+                )
+                result = self._engine(engine, mean_correction)(fitted)
+            else:
+                result = self._run_empirical_bayes(family, engine, mean_correction)
+                compiled = compile_lgm(self, panel)
         context = build_prediction_context(self, panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
         context = _context_with_fitted_weights(context, result)

@@ -306,7 +306,8 @@ approximation `LGM.fit` already uses.
 `sigma` may be a `Hyperparameter`: it is then estimated by empirical Bayes
 alongside every other joint hyperparameter (sub-model likelihood parameters
 and `Shared` scales), from the same flat hyperparameter namespace described
-above.
+above. `scale="log"` items work on a joint too, relinearized around each fit
+(see [Aggregates of exponentiated predictors](linear-observations.md#aggregates-of-exponentiated-predictors)).
 
 `hyperparameters="integrate"` works with observations and constraints: INLA
 integrates over every joint hyperparameter, including a `Hyperparameter`
