@@ -2,11 +2,13 @@
 
 from dataclasses import dataclass, field
 
+from collections.abc import Callable
+
 import numpy as np
 from scipy.linalg import orth, qr
-from scipy.sparse import csr_matrix, issparse, vstack
+from scipy.sparse import csr_matrix, diags, issparse, vstack
 
-from pylgm.exceptions import ModelValidationError, UnsupportedEngineError
+from pylgm.exceptions import InferenceError, ModelValidationError, UnsupportedEngineError
 from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian, CompiledMixture
 from pylgm.parameters import Hyperparameter
@@ -49,20 +51,26 @@ class LinearObservation:
     The operator has one column per predictor-grid row. ``sigma`` is one positive
     standard deviation, a vector aligned with ``values``, or a ``Hyperparameter``:
     one scalar standard deviation for the whole block, estimated by empirical
-    Bayes or integrated by INLA like any effect hyperparameter.
+    Bayes or integrated by INLA like any effect hyperparameter. With
+    ``scale="log"`` the operator acts on ``exp(eta)`` (predictor on the log
+    scale, aggregates on levels), fitted by Gauss-Newton relinearization.
     """
 
     values: np.ndarray = field(repr=False)
     operator: csr_matrix = field(repr=False)
     sigma: np.ndarray | Hyperparameter = field(repr=False)
+    scale: str = field(default="identity")
 
-    def __init__(self, values: object, operator: object, sigma: object) -> None:
+    def __init__(self, values: object, operator: object, sigma: object, scale: str = "identity") -> None:
         values = _vector(values, "LinearObservation values")
         operator = _matrix(operator, "LinearObservation operator")
         if operator.shape[0] != values.size:
             raise ValueError("LinearObservation operator rows must match values")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "operator", operator)
+        if scale not in ("identity", "log"):
+            raise ValueError("LinearObservation scale must be 'identity' or 'log'")
+        object.__setattr__(self, "scale", scale)
         if isinstance(sigma, Hyperparameter):
             if sigma.transform != "log":
                 raise ValueError(
@@ -92,18 +100,26 @@ class LinearObservation:
 
 @dataclass(frozen=True, init=False)
 class LinearConstraint:
-    """An exact equality ``operator @ eta = rhs`` on the predictor grid."""
+    """An exact equality ``operator @ eta = rhs`` on the predictor grid.
+
+    With ``scale="log"`` the operator acts on ``exp(eta)`` (predictor on the
+    log scale, aggregates on levels), fitted by Gauss-Newton relinearization.
+    """
 
     operator: csr_matrix = field(repr=False)
     rhs: np.ndarray = field(repr=False)
+    scale: str = field(default="identity")
 
-    def __init__(self, operator: object, rhs: object) -> None:
+    def __init__(self, operator: object, rhs: object, scale: str = "identity") -> None:
         operator = _matrix(operator, "LinearConstraint operator")
         rhs = _vector(rhs, "LinearConstraint rhs")
         if operator.shape[0] != rhs.size:
             raise ValueError("LinearConstraint operator rows must match rhs")
         object.__setattr__(self, "operator", operator)
         object.__setattr__(self, "rhs", rhs)
+        if scale not in ("identity", "log"):
+            raise ValueError("LinearConstraint scale must be 'identity' or 'log'")
+        object.__setattr__(self, "scale", scale)
 
 
 def _aligned(operator: csr_matrix, rows: int, name: str) -> csr_matrix:
@@ -185,6 +201,10 @@ def project_gaussian_model(
     """Fit in aggregate-observation space while predicting on the original grid."""
     if not isinstance(model.likelihood, CompiledGaussian):
         raise UnsupportedEngineError("LinearObservation requires a Gaussian likelihood")
+    if any(item.scale != "identity" for item in (*observations, *constraints)):
+        raise ModelValidationError(
+            "scale='log' observations and constraints must be linearized before projection"
+        )
 
     designs, values, offsets, sigmas = [], [], [], []
     observed = model.observed
@@ -264,6 +284,10 @@ def project_joint_model(model, observations, constraints):
     likelihoods; only the pseudo-rows are divided by ``sigma``, under a unit
     Gaussian part appended to the mixture after every grid row.
     """
+    if any(item.scale != "identity" for item in (*observations, *constraints)):
+        raise ModelValidationError(
+            "scale='log' observations and constraints must be linearized before projection"
+        )
     rows = model.design.shape[0]
     grid_rows = model.prediction_design.shape[0]
     designs, values, offsets, sigmas = [], [], [], []
@@ -403,8 +427,36 @@ class _ProjectedJointFamily(_ProjectedGaussianFamily):
         return project_joint_model(base, observations, self.constraints)
 
 
+@dataclass(frozen=True)
+class _RelinearizedFamily(_ProjectedGaussianFamily):
+    """A projected family whose ``scale='log'`` items are relinearized at every ``theta``.
+
+    Each ``materialize`` runs the fixed point of :func:`relinearize`, warm-started
+    from the previous solution, so empirical Bayes and INLA see an ordinary
+    linear projected model.
+    """
+
+    project: Callable = field(default=project_gaussian_model, compare=False)
+    inner_fit: Callable | None = field(default=None, compare=False)
+    _start: dict = field(default_factory=dict, compare=False, repr=False)
+
+    def materialize(self, values):
+        base = self.base.materialize({name: values[name] for name in self.base.parameter_names})
+        observations = tuple(
+            replace_sigma(item, values[item.sigma.name])
+            if isinstance(item.sigma, Hyperparameter) else item
+            for item in self.observations
+        )
+        model, eta = relinearize(
+            base, observations, self.constraints,
+            project=self.project, inner_fit=self.inner_fit, start=self._start.get("eta"),
+        )
+        self._start["eta"] = eta
+        return model
+
+
 def replace_sigma(observation: LinearObservation, sigma: float) -> LinearObservation:
-    return LinearObservation(observation.values, observation.operator, sigma)
+    return LinearObservation(observation.values, observation.operator, sigma, scale=observation.scale)
 
 
 def project_gaussian_family(family, observations, constraints, *, base_model=None, family_type=None):
@@ -428,14 +480,112 @@ def reorder_linear_inputs(observations, constraints, source_positions):
     for item in (*observations, *constraints):
         _aligned(item.operator, rows, f"{type(item).__name__} operator")
     observations = tuple(
-        LinearObservation(item.values, item.operator[:, source_positions], item.sigma)
+        LinearObservation(
+            item.values, item.operator[:, source_positions], item.sigma, scale=item.scale
+        )
         for item in observations
     )
     constraints = tuple(
-        LinearConstraint(item.operator[:, source_positions], item.rhs)
+        LinearConstraint(item.operator[:, source_positions], item.rhs, scale=item.scale)
         for item in constraints
     )
     return observations, constraints
+
+
+_RELINEARIZATION_TOLERANCE = 1e-9
+_RELINEARIZATION_MAX_ITERATIONS = 100
+
+
+def linearize(observations, constraints, eta):
+    """Replace every ``scale='log'`` item by its tangent at ``eta``; identity items pass through."""
+    level = np.exp(eta)
+    shift = level * (1.0 - eta)
+
+    def tangent(operator):
+        return (operator @ diags(level)).tocsr(), np.asarray(operator @ shift).reshape(-1)
+
+    linear_observations = []
+    for item in observations:
+        if item.scale == "log":
+            operator, offset = tangent(item.operator)
+            item = LinearObservation(item.values - offset, operator, item.sigma)
+        linear_observations.append(item)
+    linear_constraints = []
+    for item in constraints:
+        if item.scale == "log":
+            operator, offset = tangent(item.operator)
+            item = LinearConstraint(operator, item.rhs - offset)
+        linear_constraints.append(item)
+    return tuple(linear_observations), tuple(linear_constraints)
+
+
+def _log_columns(observations, constraints) -> np.ndarray:
+    """Grid rows referenced by a nonzero entry of some ``scale='log'`` operator (sorted ints)."""
+    columns = set()
+    for item in (*observations, *constraints):
+        if item.scale == "log":
+            operator = item.operator.copy()
+            operator.eliminate_zeros()
+            columns.update(np.unique(operator.indices).tolist())
+    return np.array(sorted(columns), dtype=int)
+
+
+def _initial_log_predictor(model, observations, constraints) -> np.ndarray:
+    """A starting point: the prior offset, with each log-aggregated row set to its flat share."""
+    eta = np.array(model.prediction_offset, dtype=float)
+    proposals: dict[int, list[float]] = {}
+    for item in (*observations, *constraints):
+        if item.scale != "log":
+            continue
+        targets = item.values if isinstance(item, LinearObservation) else item.rhs
+        operator = item.operator.tocsr()
+        for row in range(operator.shape[0]):
+            start, stop = operator.indptr[row], operator.indptr[row + 1]
+            cols = operator.indices[start:stop]
+            weights = operator.data[start:stop]
+            if cols.size == 0:
+                continue
+            target = targets[row]
+            if not np.all(weights > 0) or not target > 0:
+                continue
+            proposal = float(np.log(target / weights.sum()))
+            for column in cols:
+                proposals.setdefault(int(column), []).append(proposal)
+    for column, values in proposals.items():
+        eta[column] = float(np.mean(values))
+    return eta
+
+
+def relinearize(base, observations, constraints, *, project, inner_fit, start=None):
+    """Fixed-point Gauss-Newton relinearization of the ``scale='log'`` items.
+
+    Returns ``(model, eta)``: ``base`` projected with the items linearized at ``eta``,
+    where the fitted grid predictor reproduces ``eta`` on every log-referenced row.
+    """
+    columns = _log_columns(observations, constraints)
+    eta = (
+        _initial_log_predictor(base, observations, constraints)
+        if start is None else np.array(start, dtype=float)
+    )
+    previous, damping, change = np.inf, 1.0, np.inf
+    for _ in range(_RELINEARIZATION_MAX_ITERATIONS):
+        model = project(base, *linearize(observations, constraints, eta))
+        fit = inner_fit(model)
+        target = model.prediction_offset + np.asarray(model.prediction_design @ fit.mean).reshape(-1)
+        if not columns.size:
+            return model, target
+        change = float(np.max(np.abs(target[columns] - eta[columns])))
+        if change <= _RELINEARIZATION_TOLERANCE * max(1.0, float(np.max(np.abs(eta[columns])))):
+            return model, eta
+        # Damping only tames oscillation; it does not move the fixed point.
+        if change > previous:
+            damping = max(damping / 2.0, 1.0 / 16.0)
+        previous = change
+        eta = eta + damping * (target - eta)
+    raise InferenceError(
+        f"scale='log' relinearization did not converge in {_RELINEARIZATION_MAX_ITERATIONS} "
+        f"iterations (last change {change:.3e})"
+    )
 
 
 __all__ = ["LinearConstraint", "LinearObservation"]

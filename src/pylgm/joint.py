@@ -23,6 +23,7 @@ from pylgm.observations import (
     LinearConstraint,
     LinearObservation,
     _ProjectedJointFamily,
+    _RelinearizedFamily,
     _aligned,
 )
 from pylgm.parameters import Hyperparameter
@@ -358,46 +359,67 @@ class Joint:
 
             stacked_observations = tuple(
                 LinearObservation(
-                    item.values, item.operator @ selections[outcome], item.sigma
+                    item.values, item.operator @ selections[outcome], item.sigma, scale=item.scale
                 )
                 for outcome in self.outcomes
                 for item in observations.get(outcome, ())
             )
             stacked_constraints = tuple(
-                LinearConstraint(item.operator @ selections[outcome], item.rhs)
+                LinearConstraint(item.operator @ selections[outcome], item.rhs, scale=item.scale)
                 for outcome in self.outcomes
                 for item in constraints.get(outcome, ())
             )
 
-        family = compile_joint_family(self, panels)
-        if observation_hyperparameters(stacked_observations):
-            family = project_gaussian_family(
-                family, stacked_observations, stacked_constraints,
-                base_model=compile_joint(self, panels) if family is None else None,
-                family_type=_ProjectedJointFamily,
-            )
-        elif family is not None and linear:
-            family = project_gaussian_family(
-                family, stacked_observations, stacked_constraints,
-                family_type=_ProjectedJointFamily,
-            )
-        if hyperparameters == "integrate":
-            if family is None:
-                raise ValueError(
-                    "hyperparameters='integrate' requires a declared Hyperparameter"
-                )
-            result = self._run_inla(family, latent_strategy, mean_correction)
+        nonlinear = any(item.scale == "log" for item in (*stacked_observations, *stacked_constraints))
+        if nonlinear:
             compiled = compile_joint(self, panels)
-        elif family is None:
-            compiled = compile_joint(self, panels)
-            fitted = (
-                project_joint_model(compiled, stacked_observations, stacked_constraints)
-                if linear else compiled
+            family = project_gaussian_family(
+                compile_joint_family(self, panels), stacked_observations, stacked_constraints,
+                base_model=compiled,
+                family_type=partial(
+                    _RelinearizedFamily, project=project_joint_model, inner_fit=fit_laplace,
+                ),
             )
-            result = fit_laplace(fitted, mean_correction=mean_correction)
+            if not family.parameter_names:
+                if hyperparameters == "integrate":
+                    raise ValueError(
+                        "hyperparameters='integrate' requires a declared Hyperparameter"
+                    )
+                result = fit_laplace(family.materialize({}), mean_correction=mean_correction)
+            elif hyperparameters == "integrate":
+                result = self._run_inla(family, latent_strategy, mean_correction)
+            else:
+                result = self._run_empirical_bayes(family, mean_correction)
         else:
-            result = self._run_empirical_bayes(family, mean_correction)
-            compiled = compile_joint(self, panels)
+            family = compile_joint_family(self, panels)
+            if observation_hyperparameters(stacked_observations):
+                family = project_gaussian_family(
+                    family, stacked_observations, stacked_constraints,
+                    base_model=compile_joint(self, panels) if family is None else None,
+                    family_type=_ProjectedJointFamily,
+                )
+            elif family is not None and linear:
+                family = project_gaussian_family(
+                    family, stacked_observations, stacked_constraints,
+                    family_type=_ProjectedJointFamily,
+                )
+            if hyperparameters == "integrate":
+                if family is None:
+                    raise ValueError(
+                        "hyperparameters='integrate' requires a declared Hyperparameter"
+                    )
+                result = self._run_inla(family, latent_strategy, mean_correction)
+                compiled = compile_joint(self, panels)
+            elif family is None:
+                compiled = compile_joint(self, panels)
+                fitted = (
+                    project_joint_model(compiled, stacked_observations, stacked_constraints)
+                    if linear else compiled
+                )
+                result = fit_laplace(fitted, mean_correction=mean_correction)
+            else:
+                result = self._run_empirical_bayes(family, mean_correction)
+                compiled = compile_joint(self, panels)
 
         contexts = build_joint_prediction_contexts(self, panels, compiled, result)
         return _rebuild_result(result, prediction_context=contexts)

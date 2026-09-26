@@ -44,6 +44,12 @@ from pylgm.likelihoods import (
 from pylgm.survival import CoxExpansion, expand_cox, log_likelihood_offset
 from pylgm.model import LGM
 from pylgm.observations import LinearConstraint, LinearObservation
+from pylgm.operators import (
+    aggregation_operator,
+    compose,
+    cumulation_operator,
+    difference_operator,
+)
 from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
 from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision
@@ -53,6 +59,7 @@ __version__ = "0.7.0rc2"
 __all__ = [
     "AR1",
     "AR1Structure",
+    "aggregation_operator",
     "Bernoulli",
     "Besag",
     "BesagStructure",
@@ -61,7 +68,10 @@ __all__ = [
     "BYM2",
     "CandidateFailure",
     "ComparisonResult",
+    "compose",
     "Copy",
+    "cumulation_operator",
+    "difference_operator",
     "DynamicSpatialPanel",
     "Experiment",
     "ExponentialSurv",
