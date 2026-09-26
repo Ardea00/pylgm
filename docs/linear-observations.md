@@ -139,6 +139,7 @@ depends on which scale the predictor lives on:
 | Predictor on differences, aggregates on levels      | Yes — `compose(aggregation_operator(...), cumulation_operator(...))`, with the starting level of each unit supplied by an intercept or offset. |
 | Predictor on log levels, observed growth rates      | Yes — `difference_operator` on the log scale, since `log x_t - log x_{t-lag}` is linear. |
 | Predictor on log levels, aggregates on levels        | Yes, with `scale="log"` (below).                                                    |
+| Chain-linked volumes, aggregates across groups | Not additive; linear after weighting by annual-overlap factors (below). |
 
 ## Aggregates of exponentiated predictors
 
@@ -177,6 +178,78 @@ evaluated on the linearized model at the fixed point, not on the original
 nonlinear one. `latent_strategy="laplace"` still rejects constraints, as
 without `scale="log"`. Non-convergence of the relinearization raises
 `InferenceError`.
+
+## Chain-linked volumes
+
+Under annual overlap, each sub-period of period `p` is valued at the prices
+of period `p-1` and linked to the chain by one factor per group and period.
+Conversely, a chain-linked volume `CL` becomes a value at previous-period
+prices when multiplied by `k[p] = current_total[p-1] / volume_total[p-1]`,
+built from the previous period's totals. Values at previous-period prices
+add up across groups; chain-linked volumes do not, since each group carries
+its own chain of factors. A temporal sum does stay linear: within one
+period every sub-period of a group shares the same factor, so the group's
+chain-linked sub-periods sum to its chain-linked period total.
+
+`pylgm.index_numbers` builds the rescaling factors from published totals and
+applies them:
+
+```python
+from pylgm.index_numbers import align_factors, chain, overlap_factors, unchain
+
+factors = overlap_factors(
+    annual_totals, volume="volume", current="current", period="year", group="group",
+)
+previous_period_prices = unchain(quarterly, "volume", factors, period="year", group="group")
+volumes_again = chain(quarterly, previous_period_prices, factors, period="year", group="group")
+```
+
+`overlap_factors` reads one row per `(group, period)` of `annual_totals` and
+emits, for every period whose totals are both finite and positive, the
+factor for the *next* period. `align_factors` looks up the matching factor
+for each row of a finer frame; `unchain`/`chain` multiply or divide a column
+(or an array whose last axis matches the frame) by that factor, so posterior
+draws of shape `(n_draws, n_rows)` work directly.
+
+Because rescaled values are additive but chain-linked ones are not, an
+accounting identity across groups only holds after weighting each group's
+chain-linked volume by its own factor:
+
+\[
+\sum_g k[g, p]\, CL[g, t] = k[\text{agg}, p]\, CL[\text{agg}, t],
+\]
+
+for a sub-period `t` of period `p`. This is an `aggregation_operator` with
+`weights = k_g / k_agg`, and `scale="log"` when the predictor lives on log
+chain-linked levels:
+
+```python
+weight = align_factors(frame, factors, period="year", group="group")
+weight_aggregate = align_factors(aggregate_frame, factors, period="year", group="group")
+operator, keys = aggregation_operator(frame, "quarter", weights=weight / weight_aggregate)
+constraint = LinearConstraint(operator, aggregate_chain_linked_values, scale="log")
+```
+
+**Publication lags.** The factor for period `p` only needs the totals of
+`p-1`. If group totals are published with a lag of `L` periods, the temporal
+constraint (the sum of a group's own sub-periods to its own period total)
+applies only to periods whose totals are published, the cross-group
+constraint above is exact — its weights are known — up to the first
+unpublished period plus one, and beyond that the weights are unknown.
+`overlap_factors(..., through=...)` carries the last known factor forward
+(flagged `carried=True`) for those periods; rows using a carried factor
+should enter as a soft `LinearObservation` with an estimated `sigma` (a
+`Hyperparameter`) absorbing the error of the carried weight, not as a hard
+`LinearConstraint`.
+
+For example, with a publication lag of 2, and the current period called `T`:
+periods `<= T-2` get both constraints exactly (their factors use fully
+published totals); period `T-1` keeps the exact cross-group constraint,
+since its factor only needs the totals of `T-2`; period `T` has no group
+totals to build its own factor from, so `through=T` carries the `T-1` factor
+forward with `carried=True`, and the cross-group identity for period `T`
+should be declared as a `LinearObservation` rather than a
+`LinearConstraint`.
 
 ## Scope
 
