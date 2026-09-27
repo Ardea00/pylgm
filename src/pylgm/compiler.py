@@ -2177,6 +2177,7 @@ def build_prediction_context(
         trials=(_base_likelihood(model.likelihood).trials
                 if isinstance(_base_likelihood(model.likelihood), Binomial) else None),
         width=compiled.design.shape[1],
+        response=model.response,
     )
 
 

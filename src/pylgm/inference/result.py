@@ -953,6 +953,21 @@ class GaussianResult(_BaseResult):
     def _sampling_components(self) -> tuple:
         return () if self._sampler is None else ((1.0, self._sampler),)
 
+    def update(self, new_data) -> "GaussianResult":
+        """Condition this posterior on ``new_data``'s rows, hyperparameters held fixed.
+
+        Exact Gaussian conditioning with no refactorisation: the result equals a
+        refit on all rows seen so far at the same hyperparameters, and
+        ``log_marginal_likelihood`` gains ``log p(y_new | y_old)``. Rows with a
+        NaN response are skipped. Every latent level ``new_data`` touches must
+        already be in the fit -- put future periods on the grid at fit time with
+        a NaN response. Hyperparameters are not re-estimated; refit when they
+        should move.
+        """
+        from pylgm.inference.update import condition_on_rows
+
+        return condition_on_rows(self, new_data)
+
 
 @dataclass(frozen=True, init=False)
 class ModelCriteria:
