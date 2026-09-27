@@ -52,25 +52,22 @@ def test_grouped_rejects_wrapping_a_grouped():
 
 
 def test_grouped_rejects_wrapping_a_replicated():
-    """R-INLA permits group and replicate together; pyLGM does not.
-
-    The labels would become r@g@level, and both _prediction_entry's
-    split("@", 1) and the single-inner-index assumption would have to be
-    generalised. Recorded as an f() parity gap, not half-implemented.
-    """
-    with pytest.raises(TypeError, match="Use one or the other"):
+    """R-INLA's group + replicate is I_R (x) Q_S (x) Q_E, replication outermost,
+    so the one supported nesting is Replicated(Grouped(...)); the reverse is
+    refused with a pointer to it."""
+    with pytest.raises(TypeError, match=r"Replicated\(Grouped"):
         Grouped(
             Replicated(IID("u", index="t"), over="firm"),
             over="year", structure=IIDStructure(),
         )
 
 
-def test_replicated_rejects_wrapping_a_grouped():
-    with pytest.raises(TypeError, match="Use one or the other"):
-        Replicated(
-            Grouped(IID("u", index="t"), over="r", structure=IIDStructure()),
-            over="firm",
-        )
+def test_replicated_wraps_a_grouped():
+    """The f(idx, group=, replicate=) parity gap, closed (see test_replicated_grouped.py)."""
+    effect = Replicated(
+        Grouped(IID("u", index="t"), over="r", structure=IIDStructure()), over="firm"
+    )
+    assert effect.name == "u"
 
 
 def test_grouped_rejects_an_ar1_that_already_replicates_itself():

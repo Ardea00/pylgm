@@ -25,33 +25,46 @@ def replicate_levels(frame: pd.DataFrame, name: str, over: str) -> tuple[str, ..
     return tuple(sorted({str(value) for value in frame[over]}))
 
 
+def one_hot_columns(design) -> np.ndarray:
+    """The column of each row's single nonzero, for an incidence design."""
+    design = design.tocsr()
+    if not np.all(np.diff(design.indptr) == 1):
+        raise ValueError("expected exactly one nonzero per design row")
+    return design.indices.copy()
+
+
 def replicated_block(
     inner: LatentBlock,
     frame: pd.DataFrame,
-    index: str,
+    index: str | None,
     over: str,
     replicates: tuple[str, ...],
+    level_positions: np.ndarray | None = None,
 ) -> LatentBlock:
     """Compose ``inner`` -- built over the level set alone -- into ``R`` copies.
 
     ``inner.constraints`` is replicated per copy rather than shared: one
     constraint over ``R`` replicates would leave ``R-1`` directions
     unidentified, and the fit would still converge on plausible numbers.
+
+    ``level_positions`` (each row's column in ``inner``) replaces the lookup of
+    ``frame[index]`` when the inner cell is not one column -- a ``Grouped``
+    inner, whose cells are (group, level) pairs.
     """
     levels = inner.labels
     n_replicates = len(replicates)
-    level_position = {level: column for column, level in enumerate(levels)}
     replicate_position = {label: row for row, label in enumerate(replicates)}
-
-    keys = frame[index].map(str)
-    unknown = sorted({value for value in keys if value not in level_position})
-    if unknown:
-        raise ValueError(
-            f"{inner.name} index {index!r} has level(s) {unknown!r} absent from the "
-            "replicated block's own level set"
-        )
+    if level_positions is None:
+        level_position = {level: column for column, level in enumerate(levels)}
+        keys = frame[index].map(str)
+        unknown = sorted({value for value in keys if value not in level_position})
+        if unknown:
+            raise ValueError(
+                f"{inner.name} index {index!r} has level(s) {unknown!r} absent from the "
+                "replicated block's own level set"
+            )
+        level_positions = np.array([level_position[t] for t in keys])
     replicate_positions = np.array([replicate_position[str(r)] for r in frame[over]])
-    level_positions = np.array([level_position[t] for t in keys])
     return kron_block(
         inner.name,
         replicates, identity(n_replicates, format="csr"), np.zeros((n_replicates, 0)),

@@ -10,7 +10,8 @@ import pytest
 
 import pylgm.inference.gaussian as gaussian_engine
 from pylgm import (
-    AR1, IID, LGM, RW1, Besag, Binomial, Fixed, Gaussian, NegativeBinomial, Poisson, WeibullSurv,
+    AR1, IID, LGM, RW1, RW2, Besag, Binomial, Fixed, Gaussian, NegativeBinomial, Poisson, SpaceTime,
+    WeibullSurv,
 )
 from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
@@ -112,19 +113,45 @@ def test_sparse_laplace_on_a_gaussian_likelihood_is_exact(monkeypatch):
     np.testing.assert_allclose(laplace.predictive_variance, exact.predictive_variance, atol=1e-10)
 
 
-@pytest.mark.parametrize("likelihood,response", [(Gaussian(0.7), "x"), (Poisson(), "count")])
-def test_confounded_intrinsic_effects_raise_on_the_sparse_path(likelihood, response, monkeypatch):
-    """Besag + RW1: A_ss is singular before the constraints. The sparse path
-    used to return a mean violating both sum-to-zero rows; it must refuse."""
-    from pylgm.exceptions import UnsupportedEngineError
+CONFOUNDED = {
+    # Besag + RW1: A_ss is singular along (1_s, -1_t) before the constraints.
+    "gaussian_besag_rw1": (Gaussian(0.7), "x", Fixed("1") + Besag("s", index="region", graph=RING)
+                           + RW1("trend", index="t")),
+    "poisson_besag_rw1": (Poisson(), "count", Fixed("1 + x") + Besag("s", index="region", graph=RING)
+                          + RW1("trend", index="t", precision=4.0)),
+    # RW2 + RW1 on one index: the shared constant.
+    "binomial_rw2_rw1": (Binomial(trials="n"), "k", Fixed("1") + RW2("r2", index="t", precision=20.0)
+                         + RW1("r1", index="t", precision=5.0)),
+    # Knorr-Held type IV: main effects plus an interaction whose null space overlaps both.
+    "poisson_knorr_held": (Poisson(), "count", Fixed("1") + Besag("s", index="region", graph=RING)
+                           + RW1("trend", index="t", precision=4.0)
+                           + SpaceTime("st", space="region", time="t", graph=RING, interaction="IV")),
+}
 
-    model = LGM(response, likelihood, Fixed("1") + Besag("s", index="region", graph=RING)
-                + RW1("trend", index="t"), panel=("region",), time="t")
+
+@pytest.mark.parametrize("name", sorted(CONFOUNDED))
+def test_confounded_intrinsic_effects_match_dense(name, monkeypatch):
+    """E-sparse-D2: the sparse path regularises with the confounded blocks' own
+    constraint rows (exact on the constraint set) and SMW-updates a grounded
+    factor. It used to refuse these models -- and before that, silently return
+    a mean violating the sum-to-zero rows."""
+    likelihood, response, predictor = CONFOUNDED[name]
+    model = LGM(response, likelihood, predictor, offset="logE" if response == "count" else None,
+                panel=("region",), time="t")
+    engine = "exact_gaussian" if response == "x" else "laplace"
     frame = _frame()
-    model.fit(frame, engine="laplace" if response == "count" else "exact_gaussian")  # dense: fine
+    dense = model.fit(frame, engine=engine)
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
-    with pytest.raises(UnsupportedEngineError, match="confounded"):
-        model.fit(frame, engine="laplace" if response == "count" else "exact_gaussian")
+    sparse = model.fit(frame, engine=engine)
+    assert sparse._covariance is None
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
+    for block in dense.block_slices:
+        np.testing.assert_allclose(sparse.latent_marginals(block).std, dense.latent_marginals(block).std,
+                                   rtol=1e-6)
+    draws = sparse.sample(20_000, rng=1)
+    np.testing.assert_allclose(draws.std(axis=0), np.sqrt(dense.predictive_variance), rtol=0.05)
 
 
 @pytest.mark.parametrize("hyperparameters", ["optimize", "integrate"])
@@ -223,8 +250,9 @@ def test_joint_with_a_shared_field_and_a_data_constraint(monkeypatch):
     np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
 
 
-def test_mean_correction_with_data_constraints_is_refused_on_the_sparse_path(monkeypatch):
-    from pylgm.exceptions import UnsupportedEngineError
+def test_mean_correction_with_data_constraints_matches_dense(monkeypatch):
+    """The shift uses the eta variances *before* conditioning on the data rows
+    (the dense engine shifts, then conditions); used to be refused above the guard."""
     from pylgm.joint import Joint
     from pylgm.observations import LinearConstraint
 
@@ -232,13 +260,18 @@ def test_mean_correction_with_data_constraints_is_refused_on_the_sparse_path(mon
     frame["level"] = np.log1p(frame["count"].fillna(2.0))
     joint = Joint([
         LGM(response="level", likelihood=Gaussian(0.5), predictor=FIELD, panel=("region",), time="t"),
-        LGM(response="count", likelihood=Poisson(), offset="logE", predictor=Fixed("1"),
+        LGM(response="count", likelihood=Poisson(), offset="logE", predictor=Fixed("1 + x"),
             panel=("region",), time="t"),
     ])
-    constraint = LinearConstraint(np.eye(1, len(frame)), [1.0])
-    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
-    with pytest.raises(UnsupportedEngineError, match="mean_correction"):
-        joint.fit(frame, constraints={"level": [constraint]}, mean_correction=True)
+    operator = np.zeros((1, len(frame)))
+    operator[0, :REGIONS] = 1.0 / REGIONS
+    constraint = LinearConstraint(operator, [1.0])
+    sparse, dense = _dense_and_sparse(
+        lambda: joint.fit(frame, constraints={"level": [constraint]}, mean_correction=True),
+        monkeypatch,
+    )
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_mean, dense.predictive_mean, atol=1e-7)
 
 
 @pytest.mark.parametrize("sparse", [False, True])
@@ -273,3 +306,86 @@ def test_warm_start_changes_iterations_not_the_answer(sparse, monkeypatch):
         return (f[0] - 2 * f[1] + f[2]) / h**2
 
     assert hessian(initial_mode=start) == pytest.approx(hessian(), rel=1e-5)
+
+
+def test_augmented_bym2_confounded_with_rw1_matches_dense(monkeypatch):
+    """BYM2's augmented block pins its null vector g = (sqrt(phi) 1, 1) through a
+    row on the u* half only, so its constraint row is not a null vector; the
+    detector must still see g confounded with the RW1 constant."""
+    from pylgm import BYM2
+
+    import pylgm.effects.bym2 as bym2
+
+    monkeypatch.setattr(bym2, "_BYM2_AUGMENT_NODES", 1)  # augmented on a small graph
+    model = LGM(likelihood=Poisson(), predictor=Fixed("1 + x")
+                + BYM2("b", index="region", graph=RING, precision=2.0, phi=0.5)
+                + RW1("trend", index="t", precision=4.0), **BASE)
+    frame = _frame()
+    dense = model.fit(frame, engine="laplace")
+    assert any(label.endswith("__u") for label in dense.labels)  # really augmented
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = model.fit(frame, engine="laplace")
+    assert sparse._covariance is None
+    _assert_same(sparse, dense)
+
+
+def test_simplified_laplace_marginals_above_the_guard_match_dense(monkeypatch):
+    """SLA needs cov(x_i, eta_j) = (Sigma A^T)_ij; above the guard it is
+    accumulated in column batches from the sparse posterior instead of the
+    dense covariance. Used to raise UnsupportedEngineError."""
+    from pylgm import Hyperparameter
+
+    model = LGM(likelihood=Poisson(), predictor=Fixed("1 + x") + Besag(
+        "s", index="region", graph=RING, precision=Hyperparameter("tau", initial=1.0)), **BASE)
+    frame = _frame()
+
+    def fit():
+        return model.fit(frame, engine="laplace", hyperparameters="integrate",
+                         latent_strategy="simplified_laplace")
+
+    dense = fit()
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = fit()
+    assert sparse._covariance is None
+    for block in ("fixed", "s"):
+        d, s = dense.latent_marginals(block), sparse.latent_marginals(block)
+        np.testing.assert_allclose(s.mean, d.mean, atol=1e-6)
+        np.testing.assert_allclose(s.std, d.std, rtol=1e-5)
+        np.testing.assert_allclose(s.quantile(0.975), d.quantile(0.975), atol=1e-6)
+
+
+@pytest.mark.parametrize("likelihood,response", [(Gaussian(0.7), "x"), (Poisson(), "count")])
+def test_cross_block_constraint_matches_dense(likelihood, response, monkeypatch):
+    """A label constraint coupling two blocks: the prior logdet is no longer
+    block-separable. Used to raise NotImplementedError on the sparse path."""
+    model = LGM(response, likelihood, FIELD, offset="logE" if response == "count" else None,
+                panel=("region",), time="t",
+                constraints=[({"s:r0": 1.0, "v:3": -1.0}, 0.25)])
+    engine = "laplace" if response == "count" else "exact_gaussian"
+    frame = _frame()
+    dense = model.fit(frame, engine=engine)
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = model.fit(frame, engine=engine)
+    assert sparse._covariance is None
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
+    labels = list(sparse.labels)
+    assert sparse.mean[labels.index("s:r0")] - sparse.mean[labels.index("v:3")] == pytest.approx(0.25)
+
+
+def test_coupled_prior_logdet_equals_the_block_separable_one():
+    """Where both apply (every row inside one block), the general grounded
+    formula must reproduce the block-separable matrix-tree/cofactor one."""
+    from pylgm.inference.sparse import (
+        _block_column_confinement, _coupled_prior_logdet, _prior_logdet,
+    )
+
+    model = LGM("x", Gaussian(0.7), Fixed("1") + Besag("s", index="region", graph=RING)
+                + RW2("r2", index="t", precision=3.0) + IID("u", index="region"),
+                panel=("region",), time="t")
+    compiled = compile_lgm(model, CanonicalPanel.from_frame(
+        _frame(), DataConfig(time="t", response="x", panel=("region",))))
+    rows = compiled.constraints
+    separable = _prior_logdet(compiled, rows, _block_column_confinement(compiled, rows))
+    assert _coupled_prior_logdet(compiled, rows) == pytest.approx(separable, abs=1e-8)

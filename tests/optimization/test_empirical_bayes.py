@@ -14,9 +14,7 @@ from pylgm.inference import GaussianResult, fit_gaussian
 from pylgm.inference.laplace import fit_laplace
 from pylgm.ir import (
     CompiledFamily,
-    CompiledGaussianFamily,
     CompiledLGM,
-    Hyperparameters,
     LatentBlock,
     ScalableBlock,
 )
@@ -29,18 +27,27 @@ from pylgm.optimization import empirical_bayes
 from pylgm.optimization.transforms import LogitTransform, LogTransform
 
 
-def zero_latent_family(y: np.ndarray) -> CompiledGaussianFamily:
-    return CompiledGaussianFamily(
+def gaussian_family(*, sigma=1.0, **fields):
+    """A Gaussian CompiledFamily: ``sigma`` is the likelihood's value unless optimised."""
+    return CompiledFamily(
+        likelihood_factory=lambda values: CompiledGaussian(values.get("sigma", sigma)),
+        **fields,
+    )
+
+
+
+def zero_latent_family(y: np.ndarray) -> CompiledFamily:
+    return gaussian_family(
         y=y,
         observed=np.ones(y.size, dtype=bool),
         offset=np.zeros(y.size),
         blocks=(),
         parameter_names=("sigma",),
-        initial=Hyperparameters(sigma=1.0, precisions={}),
+        sigma=1.0,
     )
 
 
-def scalar_conjugate_family(y: float) -> CompiledGaussianFamily:
+def scalar_conjugate_family(y: float) -> CompiledFamily:
     block = LatentBlock(
         "latent",
         ("x",),
@@ -48,17 +55,17 @@ def scalar_conjugate_family(y: float) -> CompiledGaussianFamily:
         csr_matrix([[1.0]]),
         np.empty((0, 1)),
     )
-    return CompiledGaussianFamily(
+    return gaussian_family(
         y=np.array([y]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(ScalableBlock(block, "latent.precision", 1.0),),
         parameter_names=("latent.precision",),
-        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+        sigma=1.0,
     )
 
 
-def scalable_precision_family(base_precision: float = 1.0) -> CompiledGaussianFamily:
+def scalable_precision_family(base_precision: float = 1.0) -> CompiledFamily:
     block = LatentBlock(
         "latent",
         ("x",),
@@ -66,13 +73,13 @@ def scalable_precision_family(base_precision: float = 1.0) -> CompiledGaussianFa
         csr_matrix([[base_precision]]),
         np.empty((0, 1)),
     )
-    return CompiledGaussianFamily(
+    return gaussian_family(
         y=np.array([1.0]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(ScalableBlock(block, "latent.precision", 1.0),),
         parameter_names=("latent.precision",),
-        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+        sigma=1.0,
     )
 
 
@@ -791,13 +798,13 @@ def test_bounds_require_a_nonempty_ordered_interval_containing_initial(
 
 
 def test_empty_direct_optimization_problem_raises_typed_error() -> None:
-    family = CompiledGaussianFamily(
+    family = gaussian_family(
         y=np.array([1.0]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(),
         parameter_names=(),
-        initial=Hyperparameters(sigma=1.0, precisions={}),
+        sigma=1.0,
     )
 
     with pytest.raises(OptimizationError, match="at least one parameter"):

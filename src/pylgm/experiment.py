@@ -195,7 +195,7 @@ def _prediction_rows(
     parameters: Mapping[str, float],
 ) -> pd.DataFrame:
     panel = CanonicalPanel.from_frame(fold.model_frame, config.data)
-    family = compile_gaussian_family(config.data, candidate.model, panel, tuple(candidate.optimize))
+    family = compile_gaussian_family(config.data, candidate.model, panel, candidate.optimize)
     fit = fit_gaussian(
         family.materialize(parameters),
         allow_large_dense=config.inference.allow_large_dense,
@@ -272,7 +272,7 @@ def _preflight_family(
         config.data,
         candidate.model,
         panel,
-        tuple(candidate.optimize),
+        candidate.optimize,
     )
     preflight_dense_reference(
         family.materialize(_initial_parameters(candidate)),
@@ -346,7 +346,7 @@ def _run_candidates(
                     config.data,
                     candidate.model,
                     training_panel,
-                    tuple(candidate.optimize),
+                    candidate.optimize,
                 )
                 bounds = _bounds(candidate)
             except PyLGMError as error:

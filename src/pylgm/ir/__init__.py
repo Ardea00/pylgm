@@ -7,8 +7,6 @@ of the top-level compatibility contract. Prefer :class:`pylgm.LGM` or
 
 from pylgm.ir.family import (
     CompiledFamily,
-    CompiledGaussianFamily,
-    Hyperparameters,
     ParametricBlock,
     ParametricDesignBlock,
     ScalableBlock,
@@ -17,9 +15,7 @@ from pylgm.ir.model import CompiledLGM, LatentBlock
 
 __all__ = [
     "CompiledFamily",
-    "CompiledGaussianFamily",
     "CompiledLGM",
-    "Hyperparameters",
     "LatentBlock",
     "ParametricBlock",
     "ParametricDesignBlock",

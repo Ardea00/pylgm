@@ -81,6 +81,10 @@ def _fit_skew_normal(gamma1, gamma3):
     return xi, omega, a, clamped
 
 
+# Observation columns of cov(x, eta) per batch above the dense guard (p x batch floats).
+_SLA_BATCH = 256
+
+
 def _simplified_laplace_marginals(design, offset, y, grid):
     """RMC (2009) simplified-Laplace skew-normal latent marginals.
 
@@ -92,7 +96,7 @@ def _simplified_laplace_marginals(design, offset, y, grid):
     Returns (location, scale, shape, weights, clamped_count), each of the first
     four arrays shape (p, n_grid).
     """
-    dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
+    dense = csr_matrix(design, dtype=float)
     offset = np.asarray(offset, float)
     y = np.asarray(y, float)
     points = list(grid)
@@ -105,21 +109,44 @@ def _simplified_laplace_marginals(design, offset, y, grid):
     clamped_count = 0
     for k, (w, fit, likelihood) in enumerate(points):
         m = np.asarray(fit.mean, float)
-        cov = np.asarray(fit.covariance, float)
-        sigma = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        sparse = (
+            getattr(fit, "_sparse_posterior", None)
+            if getattr(fit, "_covariance", None) is None else None
+        )
+        if sparse is None:
+            cov = np.asarray(fit.covariance, float)
+            sigma = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+            eta_var = np.clip(quadratic_form_diagonal(dense, cov), 0.0, None)  # (n,)
+            batches = [(slice(None), cov @ dense.T)]                           # cov(x_i, eta_j)
+        else:
+            # Above the dense guard: cov(x_i, eta_j) = (Sigma A^T)_ij in column
+            # batches from the (constrained) sparse posterior -- n solves, never
+            # p x n at once. ponytail: n solves per grid point is the ceiling;
+            # a selected-inverse formulation would need Sigma off its fill pattern.
+            sigma = np.sqrt(np.clip(sparse.marginal_variances(), 0.0, None))
+            eta_var = np.clip(sparse.predictive_variances(dense), 0.0, None)
+            batches = (
+                (slice(start, start + _SLA_BATCH),
+                 sparse.covariance_apply(dense[start:start + _SLA_BATCH].toarray().T))
+                for start in range(0, dense.shape[0], _SLA_BATCH)
+            )
         eta_mean = offset + dense @ m
         d3 = np.asarray(likelihood.third_derivative(eta_mean, y), float)   # (n,)
-        cx_eta = cov @ dense.T                                             # (p, n) cov(x_i, eta_j)
-        eta_var = np.clip(quadratic_form_diagonal(dense, cov), 0.0, None)  # (n,)
         sigma_eta = np.sqrt(eta_var)
         safe_si = np.where(sigma > 0, sigma, 1.0)
-        # gamma3_i = (1/sigma_i^3) sum_j d3_j cov(x_i,eta_j)^3
-        gamma3 = (cx_eta ** 3 @ d3) / safe_si ** 3
-        # a_ij = cov / (sigma_i sigma_eta_j); gamma1_i = (1/(2 sigma_i)) sum_j sigma_eta_j^2 (1-a_ij^2) d3_j cov
         safe_se = np.where(sigma_eta > 0, sigma_eta, 1.0)
-        a_ij = cx_eta / (safe_si[:, None] * safe_se[None, :])
-        term = (sigma_eta ** 2)[None, :] * (1.0 - a_ij ** 2) * d3[None, :] * cx_eta
-        gamma1 = term.sum(axis=1) / (2.0 * safe_si)
+        # gamma3_i = (1/sigma_i^3) sum_j d3_j cov(x_i,eta_j)^3
+        # a_ij = cov / (sigma_i sigma_eta_j); gamma1_i = (1/(2 sigma_i)) sum_j sigma_eta_j^2 (1-a_ij^2) d3_j cov
+        # Both are sums over observations j, so they accumulate batch by batch.
+        cubic = np.zeros(p)
+        linear = np.zeros(p)
+        for columns, cx_eta in batches:
+            a_ij = cx_eta / (safe_si[:, None] * safe_se[None, columns])
+            cubic += cx_eta ** 3 @ d3[columns]
+            linear += ((sigma_eta[columns] ** 2)[None, :] * (1.0 - a_ij ** 2)
+                       * d3[None, columns] * cx_eta).sum(axis=1)
+        gamma3 = cubic / safe_si ** 3
+        gamma1 = linear / (2.0 * safe_si)
         # degenerate sigma_i -> no correction
         gamma1 = np.where(sigma > 0, gamma1, 0.0)
         gamma3 = np.where(sigma > 0, gamma3, 0.0)
@@ -593,6 +620,21 @@ def _korobov_design(d: int, count: int = 128, seed: int = 0):
     return points, weights
 
 
+def require_single_mean_shift(latent_strategy: str, mean_correction: bool) -> None:
+    """``mean_correction`` and a skewed latent strategy are alternatives, not layers.
+
+    Both move the reported latent mean off the conditional mode by the same
+    likelihood-skewness term (the variational shift, or the skew-normal /
+    tabulated marginal's own mean); applying both counts it twice. R-INLA's
+    default is the variational correction (``control.inla$control.vb``).
+    """
+    if mean_correction and latent_strategy != "gaussian":
+        raise ValueError(
+            f"mean_correction=True and latent_strategy={latent_strategy!r} both correct "
+            "the mode-to-mean gap; use one of them"
+        )
+
+
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=12.0,
@@ -902,15 +944,6 @@ def _integrate_inla(
 
     latent_marginal_table = None
     if latent_strategy == "simplified_laplace":
-        # ponytail: simplified-Laplace needs the off-diagonal cov(x_i, eta_j) =
-        # Sigma @ design^T, which the diagonal sparse posterior cannot supply.
-        # Guard rather than densify. Upgrade path: column-wise Sigma @ design^T
-        # via the posterior factor if this strategy is needed above the guard.
-        if sparse_conditionals:
-            raise UnsupportedEngineError(
-                "simplified-Laplace latent marginals are not available above the "
-                "sparse guard; use latent_strategy='gaussian'"
-            )
         location, scale, shape, sla_weights, clamped_count = _simplified_laplace_marginals(
             design_obs, offset_obs, y_obs, theta_grid,
         )

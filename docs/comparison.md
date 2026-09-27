@@ -203,10 +203,15 @@ data in both, with `hyperparameters="integrate"`; median of 3 runs, pyINLA
 | | 4 900 areas | 9.13 s | 0.70 s |
 
 **Accuracy is at parity**: hyperparameter posterior means agree to 4-5
-significant figures (24.3396 vs 24.3404 at 2 500 areas), fixed-effect posterior
-sds within 1%. Fixed-effect *means* differ by 0.006-0.02 on the Poisson model at
-every size -- not a scaling artefact; under investigation (INLA's default
-simplified-Laplace latent marginals are the first suspect).
+significant figures (24.3396 vs 24.3404 at 2 500 areas) and latent means and
+sds to within 2e-4 and 0.1%, *provided both apply the same mean correction*.
+INLA's reported latent means include a variational (VB) correction from the
+conditional mode toward the mean by default; pyLGM's equivalent is
+`fit(..., mean_correction=True)`, which is off by default. Left off, pyLGM
+reports the mode-centred mean and differs from INLA by exactly that shift
+(0.02 on the intercept of the 100-area Poisson model; with INLA's VB turned off
+the two agree to 1e-4). `mean_correction` and a skewed `latent_strategy` correct
+the same gap, so they cannot be combined.
 
 **Speed**: pyINLA is faster on one-off fits of large non-Gaussian models, by a
 constant factor that now comes from re-analysing the sparse factorisation at

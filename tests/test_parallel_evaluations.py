@@ -14,8 +14,9 @@ import pytest
 from pylgm import Fixed, Gaussian, Hyperparameter, IID, LGM, LinearObservation, Poisson, RW2
 from pylgm.exceptions import NumericalError
 from pylgm.inference import GaussianResult
-from pylgm.ir import CompiledGaussianFamily, Hyperparameters, LatentBlock, ScalableBlock
+from pylgm.ir import CompiledFamily, LatentBlock, ScalableBlock
 from pylgm.joint import Joint, Shared
+from pylgm.likelihoods import CompiledGaussian
 from pylgm.optimization import OptimizationBounds, optimize_empirical_bayes
 from pylgm.optimization import empirical_bayes
 from pylgm.parallel import blas_limit, validate_blas_threads, validate_workers
@@ -232,17 +233,17 @@ def test_blas_limit_pins_every_blas_entry_to_one_thread_and_restores_after():
     assert after == before
 
 
-def _scalar_family(y: float) -> CompiledGaussianFamily:
+def _scalar_family(y: float) -> CompiledFamily:
     block = LatentBlock(
         "latent", ("x",), csr_matrix([[1.0]]), csr_matrix([[1.0]]), np.empty((0, 1)),
     )
-    return CompiledGaussianFamily(
+    return CompiledFamily(
+        likelihood_factory=lambda values: CompiledGaussian(1.0),
         y=np.array([y]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(ScalableBlock(block, "latent.precision", 1.0),),
         parameter_names=("latent.precision",),
-        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
     )
 
 

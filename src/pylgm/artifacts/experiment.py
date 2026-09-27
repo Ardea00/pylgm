@@ -32,7 +32,6 @@ _DIRECT_DEPENDENCIES = (
     "pydantic",
     "PyYAML",
     "scipy",
-    "typer",
     "pyarrow",
 )
 

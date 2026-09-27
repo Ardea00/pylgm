@@ -4,18 +4,13 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 import math
+from pylgm._checks import positive_real as _positive_real
 
 
 class Prior(Protocol):
     """A prior density evaluated on its native parameter scale."""
 
     def logpdf(self, value: float) -> float: ...
-
-
-def _positive_real(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite positive real value")
-    return float(value)
 
 
 @dataclass(frozen=True)

@@ -43,7 +43,7 @@ def test_pipeline_persists_resolved_run(tmp_path: Path) -> None:
     assert resolved["model"]["fixed_prior_precision"] == 1e-6
     assert (output / "posterior.npz").exists()
     environment = json.loads((output / "environment.json").read_text())
-    assert {"PyYAML", "typer"}.issubset(environment["dependencies"])
+    assert {"PyYAML"}.issubset(environment["dependencies"])
 
 
 def test_pipeline_rejects_existing_output_directory(tmp_path: Path) -> None:

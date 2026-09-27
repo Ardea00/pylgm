@@ -16,7 +16,7 @@ from pylgm.exceptions import DataContractError, ModelValidationError, Unsupporte
 from pylgm.inference import GaussianResult, INLAResult, LaplaceResult, fit_gaussian, fit_laplace
 from pylgm.likelihoods import Gaussian
 from pylgm.optimization.empirical_bayes import OptimizationBounds, optimize_empirical_bayes
-from pylgm.optimization.inla import integrate_inla
+from pylgm.optimization.inla import integrate_inla, require_single_mean_shift
 from pylgm.observations import LinearConstraint, LinearObservation
 from pylgm.parallel import blas_limit, validate_blas_threads, validate_workers
 from pylgm.parameters import Hyperparameter
@@ -437,6 +437,7 @@ class LGM:
             raise ValueError(
                 f"latent_strategy={latent_strategy!r} requires hyperparameters='integrate'"
             )
+        require_single_mean_shift(latent_strategy, mean_correction)
         if isinstance(frame, pd.DataFrame):
             return self._fit_pandas(
                 frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy,

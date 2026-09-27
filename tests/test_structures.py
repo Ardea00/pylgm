@@ -78,11 +78,15 @@ def test_rw_structure_matches_the_sorbye_rue_scaled_builder():
     mutation to fail here (and only here) before this test existed.
     """
     from pylgm.effects.random_walk import rw_structure
-    for structure, order in ((RW1Structure(), 1), (RW2Structure(), 2)):
-        assert np.allclose(
-            structure.precision(LEVELS).toarray(),
-            rw_structure(len(LEVELS), order, scale=True),
-        )
+    # Default unscaled, like RW1/RW2 themselves; scale=True is Sørbye-Rue scaled.
+    for cls, order in ((RW1Structure, 1), (RW2Structure, 2)):
+        for scale in (False, True):
+            assert np.allclose(
+                cls(scale=scale).precision(LEVELS).toarray(),
+                rw_structure(len(LEVELS), order, scale=scale),
+            )
+        assert not np.allclose(cls().precision(LEVELS).toarray(),
+                               cls(scale=True).precision(LEVELS).toarray())
 
 
 def test_rw_structure_order_is_not_a_constructor_argument():
@@ -92,6 +96,8 @@ def test_rw_structure_order_is_not_a_constructor_argument():
         RW1Structure(2)
     with pytest.raises(TypeError):
         RW2Structure(1)
+    with pytest.raises(TypeError):
+        RW1Structure(scale=1)  # scale is a boolean, not a truthy stand-in
 
 
 def test_rw2_null_is_the_constant_and_the_centred_ramp():
