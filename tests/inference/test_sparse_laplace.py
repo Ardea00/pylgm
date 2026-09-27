@@ -329,3 +329,28 @@ def test_augmented_bym2_confounded_with_rw1_matches_dense(monkeypatch):
     sparse = model.fit(frame, engine="laplace")
     assert sparse._covariance is None
     _assert_same(sparse, dense)
+
+
+def test_simplified_laplace_marginals_above_the_guard_match_dense(monkeypatch):
+    """SLA needs cov(x_i, eta_j) = (Sigma A^T)_ij; above the guard it is
+    accumulated in column batches from the sparse posterior instead of the
+    dense covariance. Used to raise UnsupportedEngineError."""
+    from pylgm import Hyperparameter
+
+    model = LGM(likelihood=Poisson(), predictor=Fixed("1 + x") + Besag(
+        "s", index="region", graph=RING, precision=Hyperparameter("tau", initial=1.0)), **BASE)
+    frame = _frame()
+
+    def fit():
+        return model.fit(frame, engine="laplace", hyperparameters="integrate",
+                         latent_strategy="simplified_laplace")
+
+    dense = fit()
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = fit()
+    assert sparse._covariance is None
+    for block in ("fixed", "s"):
+        d, s = dense.latent_marginals(block), sparse.latent_marginals(block)
+        np.testing.assert_allclose(s.mean, d.mean, atol=1e-6)
+        np.testing.assert_allclose(s.std, d.std, rtol=1e-5)
+        np.testing.assert_allclose(s.quantile(0.975), d.quantile(0.975), atol=1e-6)
