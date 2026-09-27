@@ -14,7 +14,8 @@ Two cases, each at increasing size:
 
 Both packages use PC(1, 0.01) priors on every precision, a scaled Besag, and
 fixed-effect prior precision 1e-3; pyLGM integrates the hyperparameters
-(``hyperparameters="integrate"``). Reported: wall time (median of ``--repeat``
+(``hyperparameters="integrate"``) and, for the Poisson case, applies the
+variational mean correction INLA applies by default. Reported: wall time (median of ``--repeat``
 runs, first pyINLA call excluded as binary warm-up), fixed-effect posterior
 means/sds, and the hyperparameter posterior mean.
 """
@@ -81,7 +82,9 @@ def fit_pylgm(case, frame, graph=None):
             + Besag("s", index="area", graph=graph,
                     precision=Hyperparameter("s_prec", initial=1.0, prior=PCPrecision(**PC))),
         )
-        result = model.fit(f, engine="laplace", hyperparameters="integrate")
+        # INLA's default latent mean carries its variational (VB) correction;
+        # pyLGM's equivalent is mean_correction=True (off by default).
+        result = model.fit(f, engine="laplace", hyperparameters="integrate", mean_correction=True)
     fixed = result.latent_marginals("fixed")
     hyper = {k: float(v.mean[0]) for k, v in result.hyperparameter_marginals().items()}
     return {"fixed_mean": list(map(float, fixed.mean)), "fixed_sd": list(map(float, fixed.std)), "hyper_mean": hyper}

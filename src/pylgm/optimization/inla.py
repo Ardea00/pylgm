@@ -530,6 +530,21 @@ def _korobov_design(d: int, count: int = 128, seed: int = 0):
     return points, weights
 
 
+def require_single_mean_shift(latent_strategy: str, mean_correction: bool) -> None:
+    """``mean_correction`` and a skewed latent strategy are alternatives, not layers.
+
+    Both move the reported latent mean off the conditional mode by the same
+    likelihood-skewness term (the variational shift, or the skew-normal /
+    tabulated marginal's own mean); applying both counts it twice. R-INLA's
+    default is the variational correction (``control.inla$control.vb``).
+    """
+    if mean_correction and latent_strategy != "gaussian":
+        raise ValueError(
+            f"mean_correction=True and latent_strategy={latent_strategy!r} both correct "
+            "the mode-to-mean gap; use one of them"
+        )
+
+
 def integrate_inla(
     family, bounds, *, initial=None, fit=None, penalty=None, allow_large_dense=False,
     grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=12.0,
