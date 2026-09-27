@@ -137,3 +137,35 @@ drop the term or accept it, not to loosen the interval.
 
 Under `hyperparameters="integrate"` the bounds define the grid rather than a
 search region, so this diagnostic is reported for the empirical-Bayes path only.
+
+## Parallel evaluations
+
+`LGM.fit(..., num_workers=N)` (and `Joint.fit`) runs a hyperparameter
+search's independent conditional fits — a finite-difference gradient's
+evaluation points, or an INLA grid (see docs/inla.md) — concurrently on a
+thread pool instead of one at a time. While the workers run, BLAS is limited
+to `blas_threads` threads (default `1`) so the workers do not oversubscribe
+the machine's cores.
+
+The fits are independent computations recombined in the serial order, so a
+run with `num_workers=N` is **bit-identical** to `num_workers=1,
+blas_threads=1`. It is not bit-identical to the default `num_workers=1,
+blas_threads=None`, which leaves BLAS threading untouched: a different BLAS
+thread count changes the summation order, giving differences of the order
+of 1e-9 relative.
+
+`blas_threads` also works on its own, with `num_workers=1`. On models with
+many small dense blocks, letting BLAS spawn a thread per core often makes a
+single fit slower rather than faster, and `blas_threads=1` can be several
+times quicker. Measure it on your own model.
+
+More workers cost memory: a gradient batch keeps up to twice as many
+compiled models as there are hyperparameters, plus `num_workers` fits, alive
+at once. Choose `num_workers` from the machine's physical cores and the
+model's size, and measure rather than assume that more is better.
+
+BLAS threads are limited through `threadpoolctl`, which controls OpenBLAS,
+MKL and BLIS. It cannot control Apple Accelerate, which the macOS NumPy and
+SciPy wheels typically use. There `blas_threads` has no effect, and
+`VECLIB_MAXIMUM_THREADS`, set before Python starts, is the only control.
+The fits still run in parallel; only the BLAS thread cap is missing.

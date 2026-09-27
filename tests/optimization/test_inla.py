@@ -32,6 +32,21 @@ def test_finite_difference_hessian_recovers_quadratic():
     np.testing.assert_allclose(H, -A, atol=1e-4)
 
 
+def test_finite_difference_hessian_many_matches_the_plain_call_bit_for_bit():
+    A = np.array([[2.0, 0.3], [0.3, 1.5]])
+    center = np.array([0.4, -0.2])
+
+    def s(u):
+        d = u - center
+        return -0.5 * d @ A @ d
+
+    plain = _finite_difference_hessian(s, center, step=1e-3)
+    batched = _finite_difference_hessian(
+        s, center, step=1e-3, many=lambda us: [s(u) for u in us],
+    )
+    np.testing.assert_array_equal(batched, plain)
+
+
 def _stub_evaluate(log_density):
     """An `evaluate` returning only a log density; the rest is unused by exploration."""
     return lambda u: (float(log_density(u)), None, None, None)

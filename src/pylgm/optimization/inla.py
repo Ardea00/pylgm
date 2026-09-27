@@ -26,6 +26,7 @@ from pylgm.inference.result import (
 )
 from pylgm.inference.sampling import RefitSampler
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
+from pylgm.parallel import blas_limit, map_ordered, validate_blas_threads, validate_workers
 
 _SN_C = (4.0 - math.pi) * math.sqrt(2.0) / math.pi ** 1.5
 _SN_R_MAX = 5.0  # cap on |a/omega| for robustness (|skew| ~ 0.937 at r=5, shy of the ~0.995 supremum)
@@ -241,27 +242,64 @@ def _full_laplace_marginals(design, offset, y, grid, *,
 
 
 def _finite_difference_hessian(
-    func: Callable[[np.ndarray], float], center: np.ndarray, step: float = 1e-3
+    func: Callable[[np.ndarray], float], center: np.ndarray, step: float = 1e-3,
+    *, many: Callable[[list[np.ndarray]], list[float]] | None = None,
 ) -> np.ndarray:
     center = np.asarray(center, dtype=float)
     d = center.size
     hessian = np.zeros((d, d))
-    f0 = func(center)
+    if many is None:
+        f0 = func(center)
+        for i in range(d):
+            ei = np.zeros(d)
+            ei[i] = step
+            f_plus = func(center + ei)
+            f_minus = func(center - ei)
+            hessian[i, i] = (f_plus - 2.0 * f0 + f_minus) / (step * step)
+            for j in range(i + 1, d):
+                ej = np.zeros(d)
+                ej[j] = step
+                f_pp = func(center + ei + ej)
+                f_pm = func(center + ei - ej)
+                f_mp = func(center - ei + ej)
+                f_mm = func(center - ei - ej)
+                value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * step * step)
+                hessian[i, j] = hessian[j, i] = value
+        return hessian
+
+    # Batched: build the full list of points in today's order (center, then per
+    # i: +ei, -ei, then per j>i the 4 cross points), evaluate once with `many`,
+    # then assemble exactly today's arithmetic.
+    points = [center]
+    diagonal_slots: list[tuple[int, int, int]] = []  # (i, plus_index, minus_index)
+    cross_slots: list[tuple[int, int, int, int, int, int]] = []  # (i, j, pp, pm, mp, mm)
     for i in range(d):
         ei = np.zeros(d)
         ei[i] = step
-        f_plus = func(center + ei)
-        f_minus = func(center - ei)
-        hessian[i, i] = (f_plus - 2.0 * f0 + f_minus) / (step * step)
+        plus_index = len(points)
+        points.append(center + ei)
+        minus_index = len(points)
+        points.append(center - ei)
+        diagonal_slots.append((i, plus_index, minus_index))
         for j in range(i + 1, d):
             ej = np.zeros(d)
             ej[j] = step
-            f_pp = func(center + ei + ej)
-            f_pm = func(center + ei - ej)
-            f_mp = func(center - ei + ej)
-            f_mm = func(center - ei - ej)
-            value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * step * step)
-            hessian[i, j] = hessian[j, i] = value
+            pp = len(points)
+            points.append(center + ei + ej)
+            pm = len(points)
+            points.append(center + ei - ej)
+            mp = len(points)
+            points.append(center - ei + ej)
+            mm = len(points)
+            points.append(center - ei - ej)
+            cross_slots.append((i, j, pp, pm, mp, mm))
+    values = many(points)
+    f0 = values[0]
+    for i, plus_index, minus_index in diagonal_slots:
+        hessian[i, i] = (values[plus_index] - 2.0 * f0 + values[minus_index]) / (step * step)
+    for i, j, pp, pm, mp, mm in cross_slots:
+        value = (values[pp] - values[pm] - values[mp] + values[mm]) / (4.0 * step * step)
+        hessian[i, j] = hessian[j, i] = value
     return hessian
 
 
@@ -276,7 +314,7 @@ def _explore_grid(
     center: np.ndarray, hessian: np.ndarray, evaluate, *,
     internal_lower: np.ndarray, internal_upper: np.ndarray,
     grid_step: float = 1.0, max_radius: int = 10, explore_drop: float = 10.0,
-    prune_drop: float | None = None, max_grid_points: int = 4096,
+    prune_drop: float | None = None, max_grid_points: int = 4096, many=None,
 ):
     """Explore outward from the mode until the log density drops, and return
     ``(grid, payloads)`` for every point evaluated inside the declared domain.
@@ -358,6 +396,31 @@ def _explore_grid(
             f"INLA grid would need {total} points for {d} hyperparameters; "
             f"exceeds max_grid_points={max_grid_points}"
         )
+
+    if many is not None:
+        # Collect the not-yet-cached in-domain lattice points, in product order,
+        # and evaluate them in one batch instead of one `at(z)` call at a time.
+        pending_z: list[tuple[int, ...]] = []
+        pending_u: list[np.ndarray] = []
+        for z in product(*(range(-extents[a, 0], extents[a, 1] + 1) for a in range(d))):
+            if z in cache:
+                continue
+            if prune_drop is not None:
+                predicted = 0.5 * grid_step ** 2 * float(np.dot(z, z))
+                if predicted > prune_drop:
+                    continue
+            offset = grid_step * directions @ np.asarray(z, dtype=float)
+            u = center + offset
+            inside = bool(np.all(u >= internal_lower) and np.all(u <= internal_upper))
+            if not inside:
+                cache[z] = None
+                continue
+            pending_z.append(z)
+            pending_u.append(u)
+        if pending_u:
+            results = many(pending_u)
+            for z, u, result in zip(pending_z, pending_u, results, strict=True):
+                cache[z] = (u, result)
 
     grid, payloads = [], []
     for z in product(*(range(-extents[a, 0], extents[a, 1] + 1) for a in range(d))):
@@ -493,22 +556,22 @@ def _predicted_grid_points(d, *, depth, prune_drop, grid_step, max_radius, cap=2
 
 
 def _designed_grid(center, hessian, evaluate, design, weights, *,
-                   internal_lower, internal_upper):
+                   internal_lower, internal_upper, many=None):
     """Evaluate a fixed design, returning ``(grid, payloads, z_sq, weights)``."""
     center = np.asarray(center, dtype=float)
     directions = _whitening_directions(hessian)
-    grid, payloads, z_sq, kept = [], [], [], []
+    grid, z_sq, kept = [], [], []
     for z, weight in zip(design, weights, strict=True):
         u = center + directions @ z
         if not (np.all(u >= internal_lower) and np.all(u <= internal_upper)):
             # Outside the declared domain the transform is not invertible.
             continue
         grid.append(u)
-        payloads.append(evaluate(u))
         z_sq.append(float(z @ z))
         kept.append(weight)
     if not grid:
         raise OptimizationError("the integration design lies entirely outside the bounds")
+    payloads = many(grid) if many is not None else [evaluate(u) for u in grid]
     return np.asarray(grid), payloads, np.asarray(z_sq), np.asarray(kept)
 
 
@@ -577,6 +640,26 @@ def integrate_inla(
     grid_step=1.0, max_radius=10, explore_drop=10.0, log_density_drop=12.0,
     prune_slack=4.0, int_strategy="auto", ccd_f0=1.1, korobov_points=128,
     max_grid_points=4096, latent_strategy="gaussian",
+    num_workers: int = 1, blas_threads: int | None = None,
+) -> INLAResult:
+    num_workers = validate_workers(num_workers, "num_workers")
+    blas_threads = validate_blas_threads(blas_threads)
+    with blas_limit(num_workers, blas_threads):
+        return _integrate_inla(
+            family, bounds, initial=initial, fit=fit, penalty=penalty,
+            allow_large_dense=allow_large_dense, grid_step=grid_step, max_radius=max_radius,
+            explore_drop=explore_drop, log_density_drop=log_density_drop,
+            prune_slack=prune_slack, int_strategy=int_strategy, ccd_f0=ccd_f0,
+            korobov_points=korobov_points, max_grid_points=max_grid_points,
+            latent_strategy=latent_strategy, num_workers=num_workers, blas_threads=blas_threads,
+        )
+
+
+def _integrate_inla(
+    family, bounds, *, initial, fit, penalty, allow_large_dense,
+    grid_step, max_radius, explore_drop, log_density_drop,
+    prune_slack, int_strategy, ccd_f0, korobov_points,
+    max_grid_points, latent_strategy, num_workers, blas_threads,
 ) -> INLAResult:
     names = tuple(family.parameter_names)
     conditional_fit = fit if fit is not None else fit_gaussian
@@ -608,15 +691,48 @@ def integrate_inla(
             s_value += float(penalty(theta))
         return s_value, conditional, theta, compiled
 
+    def evaluate_many(us):
+        """``[evaluate(u) for u in us]``, with the independent fits fanned out.
+
+        Materialize stays serial and in today's order (a `_RelinearizedFamily`
+        mutates a warm start on each call); only the fits go through
+        `map_ordered`, and the penalty/packing is then applied serially.
+        """
+        prepared = []
+        for u in us:
+            theta = {
+                name: float(np.clip(transforms[i].from_internal(value), lower[i], upper[i]))
+                for i, (name, value) in enumerate(zip(names, u, strict=True))
+            }
+            prepared.append((theta, family.materialize(theta)))
+        kwargs = {"allow_large_dense": True} if allow_large_dense else {}
+        if warm_start and start_mode is not None:
+            kwargs["initial_mode"] = start_mode
+        conditionals = map_ordered(
+            lambda item: conditional_fit(item[1], **kwargs), prepared, num_workers,
+        )
+        results = []
+        for (theta, compiled), conditional in zip(prepared, conditionals, strict=True):
+            s_value = float(conditional.log_marginal_likelihood)
+            if penalty is not None:
+                s_value += float(penalty(theta))
+            results.append((s_value, conditional, theta, compiled))
+        return results
+
+    many = evaluate_many if num_workers > 1 else None
+
     eb = optimize_empirical_bayes(
         family, bounds, initial=initial, fit=conditional_fit, penalty=penalty,
-        allow_large_dense=allow_large_dense,
+        allow_large_dense=allow_large_dense, num_workers=num_workers, blas_threads=blas_threads,
     )
     u_star = np.array(
         [transforms[i].to_internal(eb.parameters[name]) for i, name in enumerate(names)]
     )
     start_mode = np.asarray(eb.fit.mean)
-    hessian = _finite_difference_hessian(lambda u: evaluate(u)[0], u_star)
+    hessian = _finite_difference_hessian(
+        lambda u: evaluate(u)[0], u_star,
+        many=(lambda us: [s for s, _, _, _ in many(us)]) if many is not None else None,
+    )
     internal_lower = np.array([transforms[i].to_internal(lower[i]) for i in range(len(names))])
     internal_upper = np.array([transforms[i].to_internal(upper[i]) for i in range(len(names))])
     # Explore only as deep as something consumes. The integration weights drop
@@ -667,7 +783,7 @@ def integrate_inla(
             design, design_weights = _korobov_design(len(names), korobov_points)
         grid, points, z_sq, design_weights = _designed_grid(
             design_center, hessian, evaluate, design, design_weights,
-            internal_lower=internal_lower, internal_upper=internal_upper,
+            internal_lower=internal_lower, internal_upper=internal_upper, many=many,
         )
         # Every design point is kept: dropping any would break the balance that
         # gives the design its weights, and the density enters through the
@@ -695,7 +811,7 @@ def integrate_inla(
             u_star, hessian, evaluate,
             internal_lower=internal_lower, internal_upper=internal_upper,
             grid_step=grid_step, max_radius=max_radius, explore_drop=depth,
-            prune_drop=prune_drop, max_grid_points=max_grid_points,
+            prune_drop=prune_drop, max_grid_points=max_grid_points, many=many,
         )
         if not len(grid):
             grid, points = u_star.reshape(1, -1), [evaluate(u_star)]

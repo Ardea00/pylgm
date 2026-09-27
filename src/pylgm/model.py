@@ -18,6 +18,7 @@ from pylgm.likelihoods import Gaussian
 from pylgm.optimization.empirical_bayes import OptimizationBounds, optimize_empirical_bayes
 from pylgm.optimization.inla import integrate_inla, require_single_mean_shift
 from pylgm.observations import LinearConstraint, LinearObservation
+from pylgm.parallel import blas_limit, validate_blas_threads, validate_workers
 from pylgm.parameters import Hyperparameter
 
 
@@ -373,6 +374,8 @@ class LGM:
         mean_correction: bool = False,
         observations: object = (),
         constraints: object = (),
+        num_workers: int = 1,
+        blas_threads: int | None = None,
     ):
         """Compile and fit this model with an explicitly selected engine.
 
@@ -398,12 +401,21 @@ class LGM:
         may contain exact ``LinearConstraint`` equalities on that same grid. Operator
         columns follow the caller's frame order. When either is supplied, the response
         column may be absent entirely.
+
+        ``num_workers`` runs a hyperparameter search's independent conditional
+        fits (a finite-difference gradient's points, an INLA grid) concurrently
+        on a thread pool, with BLAS limited to ``blas_threads`` (default 1) per
+        worker; results are bit-identical to ``num_workers=1, blas_threads=1``.
+        ``blas_threads`` alone caps BLAS threads for the whole fit. See
+        docs/empirical-bayes.md.
         """
         try:
             observations = tuple(observations)
             constraints = tuple(constraints)
         except TypeError as error:
             raise TypeError("observations and constraints must be iterable") from error
+        num_workers = validate_workers(num_workers, "num_workers")
+        blas_threads = validate_blas_threads(blas_threads)
         if any(not isinstance(item, LinearObservation) for item in observations):
             raise TypeError("observations must contain only LinearObservation instances")
         if any(not isinstance(item, LinearConstraint) for item in constraints):
@@ -431,6 +443,7 @@ class LGM:
                 frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy,
                 mean_correction=mean_correction,
                 observations=observations, constraints=constraints,
+                num_workers=num_workers, blas_threads=blas_threads,
             )
 
         from pylgm.data.spark import is_spark_dataframe
@@ -444,6 +457,7 @@ class LGM:
                 frame, engine, max_driver_rows=max_driver_rows,
                 hyperparameters=hyperparameters, latent_strategy=latent_strategy,
                 mean_correction=mean_correction,
+                num_workers=num_workers, blas_threads=blas_threads,
             )
         raise DataContractError("frame must be a Pandas DataFrame")
 
@@ -497,11 +511,15 @@ class LGM:
         return bounds, initial, penalty
 
     def _run_empirical_bayes(
-        self, family, engine: str, mean_correction: bool = False
+        self, family, engine: str, mean_correction: bool = False,
+        num_workers: int = 1, blas_threads: int | None = None,
     ) -> GaussianResult | LaplaceResult:
         fit = self._engine(engine, mean_correction)
         bounds, initial, penalty = self._family_optimization_inputs(family)
-        eb = optimize_empirical_bayes(family, bounds, initial=initial, fit=fit, penalty=penalty)
+        eb = optimize_empirical_bayes(
+            family, bounds, initial=initial, fit=fit, penalty=penalty,
+            num_workers=num_workers, blas_threads=blas_threads,
+        )
         diagnostics = dict(eb.fit.diagnostics)
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
         diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
@@ -523,12 +541,14 @@ class LGM:
     def _run_inla(
         self, family, engine: str, latent_strategy: str = "gaussian",
         mean_correction: bool = False,
+        num_workers: int = 1, blas_threads: int | None = None,
     ) -> INLAResult:
         fit = self._engine(engine, mean_correction)
         bounds, initial, penalty = self._family_optimization_inputs(family)
         return integrate_inla(
             family, bounds, initial=initial, fit=fit, penalty=penalty,
             latent_strategy=latent_strategy,
+            num_workers=num_workers, blas_threads=blas_threads,
         )
 
     def _fit_pandas(
@@ -537,6 +557,7 @@ class LGM:
         mean_correction: bool = False,
         observations: tuple[LinearObservation, ...] = (),
         constraints: tuple[LinearConstraint, ...] = (),
+        num_workers: int = 1, blas_threads: int | None = None,
     ) -> GaussianResult | LaplaceResult | INLAResult:
         prepared = frame.copy(deep=True)
         if (observations or constraints) and self.response not in prepared.columns:
@@ -595,11 +616,17 @@ class LGM:
                     raise ValueError(
                         "hyperparameters='integrate' requires a declared Hyperparameter"
                     )
-                result = self._engine(engine, mean_correction)(family.materialize({}))
+                with blas_limit(1, blas_threads):
+                    result = self._engine(engine, mean_correction)(family.materialize({}))
             elif hyperparameters == "integrate":
-                result = self._run_inla(family, engine, latent_strategy, mean_correction)
+                result = self._run_inla(
+                    family, engine, latent_strategy, mean_correction,
+                    num_workers, blas_threads,
+                )
             else:
-                result = self._run_empirical_bayes(family, engine, mean_correction)
+                result = self._run_empirical_bayes(
+                    family, engine, mean_correction, num_workers, blas_threads,
+                )
         else:
             family = compile_family(self, panel)
             if observation_hyperparameters(observations):
@@ -614,7 +641,10 @@ class LGM:
                     raise ValueError(
                         "hyperparameters='integrate' requires a declared Hyperparameter"
                     )
-                result = self._run_inla(family, engine, latent_strategy, mean_correction)
+                result = self._run_inla(
+                    family, engine, latent_strategy, mean_correction,
+                    num_workers, blas_threads,
+                )
                 compiled = compile_lgm(self, panel)
             elif family is None:
                 compiled = compile_lgm(self, panel)
@@ -622,9 +652,12 @@ class LGM:
                     project_gaussian_model(compiled, observations, constraints)
                     if observations or constraints else compiled
                 )
-                result = self._engine(engine, mean_correction)(fitted)
+                with blas_limit(1, blas_threads):
+                    result = self._engine(engine, mean_correction)(fitted)
             else:
-                result = self._run_empirical_bayes(family, engine, mean_correction)
+                result = self._run_empirical_bayes(
+                    family, engine, mean_correction, num_workers, blas_threads,
+                )
                 compiled = compile_lgm(self, panel)
         context = build_prediction_context(self, panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)
@@ -645,6 +678,7 @@ class LGM:
         hyperparameters: str = "optimize",
         latent_strategy: str = "gaussian",
         mean_correction: bool = False,
+        num_workers: int = 1, blas_threads: int | None = None,
     ) -> GaussianResult | LaplaceResult | INLAResult:
         from pylgm.data.spark import canonicalize_spark_frame
 
@@ -658,13 +692,19 @@ class LGM:
                 raise ValueError(
                     "hyperparameters='integrate' requires a declared Hyperparameter"
                 )
-            result = self._run_inla(family, engine, latent_strategy, mean_correction)
+            result = self._run_inla(
+                family, engine, latent_strategy, mean_correction,
+                num_workers, blas_threads,
+            )
             compiled = compile_lgm(self, canonical.panel)
         elif family is None:
             compiled = compile_lgm(self, canonical.panel)
-            result = self._engine(engine, mean_correction)(compiled)
+            with blas_limit(1, blas_threads):
+                result = self._engine(engine, mean_correction)(compiled)
         else:
-            result = self._run_empirical_bayes(family, engine, mean_correction)
+            result = self._run_empirical_bayes(
+                family, engine, mean_correction, num_workers, blas_threads,
+            )
             compiled = compile_lgm(self, canonical.panel)
         context = build_prediction_context(self, canonical.panel, compiled, result)
         context = _context_with_fitted_likelihood(context, result, self)

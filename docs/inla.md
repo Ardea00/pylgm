@@ -20,6 +20,11 @@ result.log_marginal_likelihood  # integrated marginal likelihood
 result.diagnostics["inla_grid_points"]  # how many grid points were kept
 ```
 
+Like `hyperparameters="optimize"`, this grid's conditional fits can be run
+concurrently via `num_workers`/`blas_threads` — see
+["Parallel evaluations"](empirical-bayes.md#parallel-evaluations) in
+docs/empirical-bayes.md.
+
 Compared to `hyperparameters="optimize"`, this gives:
 
 - a populated `result.hyperparameter_marginals()` (mean/sd per declared

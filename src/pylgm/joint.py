@@ -216,7 +216,8 @@ class Joint:
 
     def fit(self, frame, engine: str = "laplace", *, hyperparameters: str = "optimize",
             latent_strategy: str = "gaussian", mean_correction: bool = False,
-            observations=None, constraints=None):
+            observations=None, constraints=None,
+            num_workers: int = 1, blas_threads: int | None = None):
         """Compile and fit this joint model. Only ``engine='laplace'`` is supported.
 
         ``observations`` and ``constraints`` are mappings from sub-model
@@ -240,6 +241,10 @@ class Joint:
         See docs/joint-models.md for the full semantics, including
         ``LinearObservation`` pseudo-rows, ``LinearConstraint`` conditioning,
         and estimating a ``LinearObservation`` sigma by empirical Bayes.
+
+        ``num_workers`` runs a hyperparameter search's independent conditional
+        fits concurrently on a thread pool; results are bit-identical to
+        ``num_workers=1, blas_threads=1``. See ``LGM.fit`` / docs/empirical-bayes.md.
         """
         import pandas as pd
 
@@ -257,6 +262,10 @@ class Joint:
             project_gaussian_family,
             project_joint_model,
         )
+        from pylgm.parallel import blas_limit, validate_blas_threads, validate_workers
+
+        num_workers = validate_workers(num_workers, "num_workers")
+        blas_threads = validate_blas_threads(blas_threads)
 
         if engine != "laplace":
             raise UnsupportedEngineError(
@@ -388,11 +397,16 @@ class Joint:
                     raise ValueError(
                         "hyperparameters='integrate' requires a declared Hyperparameter"
                     )
-                result = fit_laplace(family.materialize({}), mean_correction=mean_correction)
+                with blas_limit(1, blas_threads):
+                    result = fit_laplace(family.materialize({}), mean_correction=mean_correction)
             elif hyperparameters == "integrate":
-                result = self._run_inla(family, latent_strategy, mean_correction)
+                result = self._run_inla(
+                    family, latent_strategy, mean_correction, num_workers, blas_threads,
+                )
             else:
-                result = self._run_empirical_bayes(family, mean_correction)
+                result = self._run_empirical_bayes(
+                    family, mean_correction, num_workers, blas_threads,
+                )
         else:
             family = compile_joint_family(self, panels)
             if observation_hyperparameters(stacked_observations):
@@ -411,7 +425,9 @@ class Joint:
                     raise ValueError(
                         "hyperparameters='integrate' requires a declared Hyperparameter"
                     )
-                result = self._run_inla(family, latent_strategy, mean_correction)
+                result = self._run_inla(
+                    family, latent_strategy, mean_correction, num_workers, blas_threads,
+                )
                 compiled = compile_joint(self, panels)
             elif family is None:
                 compiled = compile_joint(self, panels)
@@ -419,9 +435,12 @@ class Joint:
                     project_joint_model(compiled, stacked_observations, stacked_constraints)
                     if linear else compiled
                 )
-                result = fit_laplace(fitted, mean_correction=mean_correction)
+                with blas_limit(1, blas_threads):
+                    result = fit_laplace(fitted, mean_correction=mean_correction)
             else:
-                result = self._run_empirical_bayes(family, mean_correction)
+                result = self._run_empirical_bayes(
+                    family, mean_correction, num_workers, blas_threads,
+                )
                 compiled = compile_joint(self, panels)
 
         contexts = build_joint_prediction_contexts(self, panels, compiled, result)
@@ -460,7 +479,10 @@ class Joint:
                 return sum(float(hp.prior.logpdf(values[hp.name])) for hp in priored)
         return bounds, initial, penalty
 
-    def _run_empirical_bayes(self, family, mean_correction: bool = False):
+    def _run_empirical_bayes(
+        self, family, mean_correction: bool = False,
+        num_workers: int = 1, blas_threads: int | None = None,
+    ):
         """Type-II ML / MAP-II fit. Mirrors LGM._run_empirical_bayes (model.py:428)."""
         import warnings
 
@@ -474,6 +496,7 @@ class Joint:
             fit=partial(fit_laplace, mean_correction=mean_correction) if mean_correction
             else fit_laplace,
             penalty=penalty,
+            num_workers=num_workers, blas_threads=blas_threads,
         )
         diagnostics = dict(eb.fit.diagnostics)
         diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
@@ -492,8 +515,11 @@ class Joint:
             )
         return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
 
-    def _run_inla(self, family, latent_strategy: str = "gaussian",
-                  mean_correction: bool = False):
+    def _run_inla(
+        self, family, latent_strategy: str = "gaussian",
+        mean_correction: bool = False,
+        num_workers: int = 1, blas_threads: int | None = None,
+    ):
         """INLA grid integration. Mirrors LGM._run_inla (model.py:450)."""
         from pylgm.inference.laplace import fit_laplace
         from pylgm.optimization.inla import integrate_inla
@@ -504,4 +530,5 @@ class Joint:
         return integrate_inla(
             family, bounds, initial=initial, fit=conditional, penalty=penalty,
             latent_strategy=latent_strategy,
+            num_workers=num_workers, blas_threads=blas_threads,
         )
