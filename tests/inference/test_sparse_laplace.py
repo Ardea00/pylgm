@@ -155,3 +155,87 @@ def test_sparse_laplace_estimates_hyperparameters_like_dense(hyperparameters, mo
     # The reported lml is not stationary at the penalised optimum (the PC prior's
     # slope balances it there), so the argmax gap enters it at first order.
     np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, rtol=1e-5)
+
+
+def _dense_and_sparse(fit, monkeypatch):
+    dense = fit()
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = fit()
+    monkeypatch.undo()
+    assert sparse._covariance is None and dense._covariance is not None
+    return sparse, dense
+
+
+BASE = dict(response="count", offset="logE", panel=("region",), time="t")
+FIELD = Fixed("1 + x") + Besag("s", index="region", graph=RING, precision=3.0) \
+    + IID("v", index="t", precision=10.0)
+
+
+def test_nonzero_rhs_label_constraint(monkeypatch):
+    model = LGM(likelihood=Poisson(), predictor=FIELD,
+                constraints=[({"v:0": 1.0, "v:1": 1.0}, 0.5)], **BASE)
+    sparse, dense = _dense_and_sparse(lambda: model.fit(_frame(), engine="laplace"), monkeypatch)
+    _assert_same(sparse, dense)
+    labels = list(sparse.labels)
+    assert sparse.mean[labels.index("v:0")] + sparse.mean[labels.index("v:1")] == pytest.approx(0.5)
+
+
+def test_mean_correction(monkeypatch):
+    model = LGM(likelihood=Poisson(), predictor=FIELD, **BASE)
+    sparse, dense = _dense_and_sparse(
+        lambda: model.fit(_frame(), engine="laplace", mean_correction=True), monkeypatch
+    )
+    _assert_same(sparse, dense)
+
+
+def test_zero_inflated_poisson(monkeypatch):
+    from pylgm import ZeroInflated
+
+    frame = _frame()
+    frame.loc[::5, "count"] = 0.0
+    model = LGM(likelihood=ZeroInflated(Poisson(), pi=0.2), predictor=FIELD, **BASE)
+    sparse, dense = _dense_and_sparse(lambda: model.fit(frame, engine="laplace"), monkeypatch)
+    _assert_same(sparse, dense)
+
+
+def test_joint_with_a_shared_field_and_a_data_constraint(monkeypatch):
+    """Two outcomes on one latent field, one of them pinned by an exact aggregate."""
+    from pylgm.joint import Joint, Shared
+    from pylgm.observations import LinearConstraint
+
+    frame = _frame()
+    frame["level"] = np.log1p(frame["count"].fillna(2.0)) + 0.1 * frame["x"]
+    joint = Joint(
+        [LGM(response="level", likelihood=Gaussian(0.5), predictor=Fixed("1 + x"),
+             panel=("region",), time="t"),
+         LGM(response="count", likelihood=Poisson(), offset="logE", predictor=Fixed("1 + x"),
+             panel=("region",), time="t")],
+        shared=[Shared(Besag("s", index="region", graph=RING, precision=3.0), scale=(1.0, 0.8))],
+    )
+    operator = np.zeros((1, len(frame)))
+    operator[0, :REGIONS] = 1.0 / REGIONS
+    constraint = LinearConstraint(operator, [1.0])
+    sparse, dense = _dense_and_sparse(
+        lambda: joint.fit(frame, constraints={"level": [constraint]}), monkeypatch
+    )
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
+
+
+def test_mean_correction_with_data_constraints_is_refused_on_the_sparse_path(monkeypatch):
+    from pylgm.exceptions import UnsupportedEngineError
+    from pylgm.joint import Joint
+    from pylgm.observations import LinearConstraint
+
+    frame = _frame()
+    frame["level"] = np.log1p(frame["count"].fillna(2.0))
+    joint = Joint([
+        LGM(response="level", likelihood=Gaussian(0.5), predictor=FIELD, panel=("region",), time="t"),
+        LGM(response="count", likelihood=Poisson(), offset="logE", predictor=Fixed("1"),
+            panel=("region",), time="t"),
+    ])
+    constraint = LinearConstraint(np.eye(1, len(frame)), [1.0])
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    with pytest.raises(UnsupportedEngineError, match="mean_correction"):
+        joint.fit(frame, constraints={"level": [constraint]}, mean_correction=True)
