@@ -609,3 +609,21 @@ def test_prior_logdet_cofactor_matches_dense_reference():
     assert _is_connected_intrinsic(np.vstack([np.ones(n), np.r_[np.ones(20), -np.ones(20)]]), Q) is False
     mixed = np.array([[1.0, -1.0] * (n // 2)])
     assert _is_connected_intrinsic(mixed, Q) is False
+
+
+
+def test_selected_inverse_on_a_factor_with_cancelled_fill():
+    """Takahashi needs the symbolic fill pattern. This A_ss (a grounded Knorr-Held
+    posterior precision; anchors from Linux LAPACK's pivoted QR) has L entries
+    that cancel to exactly zero, which SuperLU drops; reading Sigma as 0 off the
+    stored pattern gave entries wrong by 0.75 and marginal sds wrong by up to 7x."""
+    from pathlib import Path
+
+    from scipy.sparse import load_npz
+
+    from pylgm.inference.sparse import selected_inverse
+
+    matrix = load_npz(Path(__file__).parents[1] / "data" / "selinv_cancelled_fill.npz").tocsr()
+    exact = np.linalg.inv(matrix.toarray())
+    selected = selected_inverse(matrix).tocoo()
+    np.testing.assert_allclose(selected.data, exact[selected.row, selected.col], atol=1e-10)

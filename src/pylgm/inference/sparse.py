@@ -4,7 +4,7 @@ from functools import cached_property
 
 import numpy as np
 from scipy.linalg import cho_solve, null_space, qr, solve_triangular
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, tril
 from scipy.sparse.linalg import spsolve_triangular, splu
 
 from pylgm.exceptions import NumericalError
@@ -570,6 +570,24 @@ def selected_inverse_diagonal(matrix) -> np.ndarray:
     return selected_inverse(matrix).diagonal()
 
 
+def _symbolic_fill(strict_lower) -> list:
+    """Row indices below the diagonal of each column of the Cholesky factor's
+    symbolic pattern: struct(L_j) = struct(A_j) + the structs of j's children
+    in the elimination tree, minus j. ``strict_lower`` is csc."""
+    n = strict_lower.shape[0]
+    children: list[list[int]] = [[] for _ in range(n)]
+    structure: list = [None] * n
+    for j in range(n):
+        rows = set(strict_lower.indices[strict_lower.indptr[j]:strict_lower.indptr[j + 1]].tolist())
+        for child in children[j]:
+            rows |= structure[child]
+        rows.discard(j)
+        structure[j] = rows
+        if rows:
+            children[min(rows)].append(j)
+    return [np.fromiter(sorted(rows), dtype=int, count=len(rows)) for rows in structure]
+
+
 def selected_inverse(matrix) -> csr_matrix:
     """Entries of ``matrix⁻¹`` on the fill pattern of its factor (``L + Lᵀ``),
     for a sparse SPD matrix — the exact selected inverse via Takahashi
@@ -578,10 +596,10 @@ def selected_inverse(matrix) -> csr_matrix:
 
     Symmetric-mode ``splu`` (``MMD_AT_PLUS_A`` + ``SymmetricMode`` +
     ``diag_pivot_thresh=0.0``) yields ``perm_r == perm_c`` and a unit-lower ``L``
-    with ``U == D·Lᵀ``. A reverse column sweep on the below-diagonal fill pattern
-    reconstructs exactly the selected-inverse entries needed for the diagonal.
-    Off-pattern sub-block entries are true zeros (SuperLU drops only numerical
-    zeros), so ``Sig.get(key, 0.0)`` is exact. Result is in the original ordering.
+    with ``U == D·Lᵀ``. A reverse column sweep over the *symbolic* fill pattern
+    (``_symbolic_fill``) reconstructs the selected inverse exactly; SuperLU's
+    stored pattern is not enough, because it drops entries that cancel to zero.
+    Result is in the original ordering.
     """
     q_csc = matrix.tocsc()
     n = q_csc.shape[0]
@@ -594,32 +612,43 @@ def selected_inverse(matrix) -> csr_matrix:
     pc = lu.perm_c
     if not np.array_equal(lu.perm_r, pc):
         raise NumericalError("selected inversion expected a symmetric factorization")
-    lower = lu.L.tocsc()
-    lower.sort_indices()
     diag_u = lu.U.diagonal().astype(float)
-    indptr, indices, data = lower.indptr, lower.indices, lower.data.astype(float)
-    # Sigma lives on the lower pattern (strict fill + diagonal), keyed col * n + row:
+    original = np.argsort(pc)  # permuted index p is original index original[p]
+    # Takahashi needs the SYMBOLIC fill pattern: SuperLU drops L entries that
+    # cancel to exactly zero (integer Laplacians do this), and reading Sigma as 0
+    # off the stored pattern is wrong. Build it from the elimination tree of the
+    # permuted matrix; L's value is 0 exactly where SuperLU dropped it.
+    below = _symbolic_fill(tril(q_csc[original][:, original], k=-1, format="csc"))
+    lower = lu.L.tocsc()
+    stored = np.repeat(np.arange(n), np.diff(lower.indptr)) * n + lower.indices
+    order = np.argsort(stored)
+    stored, stored_values = stored[order], lower.data.astype(float)[order]
+
+    def l_values(column: int, rows: np.ndarray) -> np.ndarray:
+        wanted = column * n + rows
+        position = np.minimum(np.searchsorted(stored, wanted), stored.size - 1)
+        return np.where(stored[position] == wanted, stored_values[position], 0.0)
+
+    # Sigma lives on the lower symbolic pattern plus the diagonal, keyed col * n + row:
     # sorted keys make every sub-block gather one searchsorted per column.
-    column = np.repeat(np.arange(n), np.diff(indptr))
-    strict = indices > column
-    keys = np.sort(np.r_[column[strict] * n + indices[strict], np.arange(n) * (n + 1)])
+    keys = np.sort(np.r_[
+        np.concatenate([i * n + rows for i, rows in enumerate(below)] or [np.zeros(0, int)]),
+        np.arange(n) * (n + 1),
+    ])
     sig = np.zeros(keys.size)
     diagonal = np.searchsorted(keys, np.arange(n) * (n + 1))
     for i in range(n - 1, -1, -1):
-        rows, values = indices[indptr[i]:indptr[i + 1]], data[indptr[i]:indptr[i + 1]]
-        below, below_vals = rows[rows > i], values[rows > i]
-        if not below.size:
+        rows = below[i]
+        if not rows.size:
             sig[diagonal[i]] = 1.0 / diag_u[i]
             continue
-        wanted = np.minimum.outer(below, below) * n + np.maximum.outer(below, below)
-        position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
-        # Off-pattern sub-block entries are true zeros (SuperLU drops only numerical zeros).
-        sub = np.where(keys[position] == wanted, sig[position], 0.0)
-        sig_below = -sub @ below_vals
-        sig[np.searchsorted(keys, i * n + below)] = sig_below
-        sig[diagonal[i]] = 1.0 / diag_u[i] - below_vals @ sig_below
-    # Permuted index pc[i] is original index i.
-    original = np.argsort(pc)
+        values = l_values(i, rows)
+        wanted = np.minimum.outer(rows, rows) * n + np.maximum.outer(rows, rows)
+        # Every pair of a column's below-rows is on the symbolic pattern (closure).
+        sub = sig[np.searchsorted(keys, wanted)]
+        sig_below = -sub @ values
+        sig[np.searchsorted(keys, i * n + rows)] = sig_below
+        sig[diagonal[i]] = 1.0 / diag_u[i] - values @ sig_below
     rows, cols = original[keys % n], original[keys // n]
     off = rows != cols
     return coo_matrix(
@@ -675,9 +704,13 @@ def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64)
     stored.sort_indices()
     keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
     wanted = a.indices[first] * width + a.indices[second]
-    position = np.minimum(np.searchsorted(keys, wanted), max(keys.size - 1, 0))
-    found = keys[position] == wanted if keys.size else np.zeros(wanted.size, bool)
-    contribution = a.data[first] * a.data[second] * np.where(found, stored.data[position], 0.0)
+    if keys.size:
+        position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
+        found = keys[position] == wanted
+        entry = np.where(found, stored.data[position], 0.0)
+    else:
+        found, entry = np.zeros(wanted.size, bool), np.zeros(wanted.size)
+    contribution = a.data[first] * a.data[second] * entry
     value = np.bincount(pair_row, contribution, minlength=a.shape[0])
     lost = ~found
     missing = (pair_row[lost], a.indices[first[lost]], a.indices[second[lost]],
