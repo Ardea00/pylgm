@@ -7,7 +7,7 @@ from scipy.linalg import cho_solve, null_space, qr, solve_triangular
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve_triangular, splu
 
-from pylgm.exceptions import NumericalError, UnsupportedEngineError
+from pylgm.exceptions import NumericalError
 from pylgm.inference.gaussian import _block_slices, _factor_positive_definite
 from pylgm.ir.model import CompiledLGM
 
