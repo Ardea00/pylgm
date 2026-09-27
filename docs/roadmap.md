@@ -33,11 +33,25 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   negative binomial, gamma and zero-inflated Laplace fits now use the observed
   curvature at the mode. See [likelihoods](likelihoods.md).
 - **Inference** — `mean_correction=True` moves a Laplace mean from the mode
-  toward the posterior mean; INLA explores the hyperparameter grid by density
-  and switches to CCD or a Korobov lattice past a handful of hyperparameters;
-  simulation-based calibration in `pylgm.validation`.
+  toward the posterior mean (R-INLA's default VB correction); INLA explores the
+  hyperparameter grid by density and switches to CCD or a Korobov lattice past a
+  handful of hyperparameters; simulation-based calibration in `pylgm.validation`.
+- **Sparse Laplace engine** — non-Gaussian fits above ~1 000 latents run on the
+  partitioned sparse solver (Newton warm-started across the INLA grid and EB
+  search), including confounded intrinsic effects (Besag + RW1, BYM2 + RW1,
+  Knorr-Held with main effects), constraints coupling blocks, and
+  simplified-Laplace marginals; predictive variances come from the selected
+  inverse. See [INLA integration](inla.md#large-models).
+- **Parallel evaluations and EB at scale** — `num_workers`/`blas_threads` fan an
+  EB search's or INLA grid's independent conditional fits out over threads
+  (results identical to `num_workers=1`); the EB search keeps memory flat, uses
+  a central-difference gradient and stops on a plateau (`objective_tolerance`,
+  `stall_iterations`). See [empirical Bayes](empirical-bayes.md#parallel-evaluations).
 - **Effects** — `RW1`/`RW2` take `scale=True` (Sørbye-Rue, R-INLA's
-  `scale.model`).
+  `scale.model`), and `RW1Structure`/`RW2Structure` take the same flag with the
+  same default; `Fixed(prior_precision=Hyperparameter(...))` learns the ridge on
+  the coefficients; `Replicated(Grouped(...))` is R-INLA's `group` + `replicate`
+  on one term.
 
 ## Shipped through 0.6
 

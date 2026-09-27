@@ -218,6 +218,19 @@ approximation otherwise) -> `"simplified_laplace"` (adds a numerator
 skewness correction) -> `"laplace"` (adds the denominator correction too,
 unconstrained models only).
 
+## Large models
+
+Past the dense guard — and for Laplace fits already above ~1 000 latents, where
+refactoring a dense Hessian at every Newton step dominates — conditional fits
+run on the partitioned sparse solver: the Newton iteration is a weighted sparse
+Gaussian solve, warm-started from the mode at the EB optimum across the grid,
+and marginal and predictive variances come from the selected inverse. Results
+match the dense engine to solver tolerance; the difference a user sees is that
+`result.covariance` is not materialised (`latent_marginals`, `predict`,
+`linear_combinations` and `sample` are unchanged). Two intrinsic effects whose
+constants are confounded (Besag + RW1) are grounded exactly rather than refused.
+`num_workers` parallelises the grid on this path too, with identical results.
+
 ## Model-assessment criteria
 
 Every integrated fit (`hyperparameters="integrate"`, either the
