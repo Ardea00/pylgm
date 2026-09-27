@@ -228,7 +228,32 @@ raises `UnsupportedEngineError`, with a post-kriging constraint-residual
 backstop. Supporting these models sparsely needs a grounded KKT solve (one
 anchor node per intrinsic block moved into the dense Schur block, constraint
 rows as multipliers) and a sampler that does not need `H^1/2`: a follow-up
-slice, **E-sparse-D2**. Until then they fit on the dense engines.
+slice, **E-sparse-D2**.
+
+### E-sparse-D2 (implemented)
+
+Built differently from the KKT sketch above, reusing every kriging and
+determinant identity unchanged:
+
+- **Exact regulariser.** `H_hat = H + U U^T`, with `U^T` the involved blocks'
+  own constraint rows. On `{C x = e}`, `x^T U U^T x = ||e_U||^2` is constant, so
+  the constrained posterior is unchanged; `N^T U U^T N = 0`, so the reduced
+  logdet is unchanged; and `H_hat` is SPD, so kriging applies as is. The null
+  basis comes from `_confounded_null_space` (the SVD of `W^1/2 Z_s V`, `V` the
+  blocks' null-space constraint rows).
+- **Grounding.** `U U^T` is dense on the field, so `k` anchor nodes (pivoted QR
+  on the null basis) move to the dense Schur block, leaving `A_s's'` SPD and
+  sparse; the prior's `Q_sd`, zero for a block-granular partition, is now
+  included in `B`.
+- **Woodbury.** The rank-`k` remainder `U_s' U_s'^T` rides on the sparse factor
+  (`_LowRankSpdFactor`): SMW solves, determinant-lemma logdet, an exact square
+  root `F (I + g g^T)^1/2` for the capacitance QR and sampling, and a
+  `w M^-1 w^T` correction to the selected-inverse variances.
+
+Oracle: dense vs sparse on Besag + RW1 (Gaussian and Poisson), RW2 + RW1 on one
+index, and the full Knorr-Held type IV model. At scale: Poisson, Besag on 4 900
+areas + RW1, 19 600 rows, both precisions estimated by EB: 10 s, constraints
+met to 1e-16.
 
 ## Testing
 

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import numpy as np
-from scipy.linalg import cho_solve, null_space, solve_triangular
+from scipy.linalg import cho_solve, null_space, qr, solve_triangular
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve_triangular, splu
 
@@ -68,6 +68,47 @@ class SparseSpdFactor:
         return spsolve_triangular(self._lu.L.T.tocsr(), scaled, lower=False, unit_diagonal=True)[
             self._lu.perm_c
         ]
+
+    @property
+    def logdet(self) -> float:
+        return self._logdet
+
+
+class _LowRankSpdFactor:
+    """``A + U U^T`` for a sparse SPD factor ``A`` and a thin dense ``U`` (n x k), exact.
+
+    Solves by Sherman-Morrison-Woodbury, ``logdet`` by the determinant lemma, and
+    a square root from ``A = F F^T``: ``A + U U^T = F (I + g g^T) F^T`` with
+    ``g = F^-1 U = Q R`` (thin QR), and ``(I + g g^T)^-1/2 = I - Q Q^T +
+    Q (I + R R^T)^-1/2 Q^T``. ``base`` stays reachable for the selected inverse,
+    which is taken of ``A`` and corrected by ``w M^-1 w^T`` (``w = A^-1 U``).
+    """
+
+    def __init__(self, base: "SparseSpdFactor", u: np.ndarray) -> None:
+        self.base = base
+        self.u = u
+        self.w = base.solve(u)                                       # A^-1 U
+        m = np.eye(u.shape[1]) + u.T @ self.w
+        self.m_factor, logdet_m = _factor_positive_definite(m, "low-rank capacitance")
+        self._logdet = base.logdet + logdet_m
+        self._q, r = np.linalg.qr(base.half_solve(u))
+        values, vectors = np.linalg.eigh(np.eye(r.shape[0]) + r @ r.T)
+        self._inverse_root = (vectors / np.sqrt(values)) @ vectors.T
+
+    def solve(self, b: np.ndarray) -> np.ndarray:
+        x = self.base.solve(b)
+        return x - self.w @ cho_solve(self.m_factor, self.u.T @ x)
+
+    def _whiten(self, v: np.ndarray) -> np.ndarray:
+        """``(I + g g^T)^-1/2 v``."""
+        projected = self._q.T @ v
+        return v - self._q @ projected + self._q @ (self._inverse_root @ projected)
+
+    def half_solve(self, b: np.ndarray) -> np.ndarray:
+        return self._whiten(self.base.half_solve(b))
+
+    def half_solve_transpose(self, z: np.ndarray) -> np.ndarray:
+        return self.base.half_solve_transpose(self._whiten(np.asarray(z, dtype=float)))
 
     @property
     def logdet(self) -> float:
@@ -185,8 +226,27 @@ class SparsePosterior:
 
     @cached_property
     def _selected_ss(self) -> csr_matrix:
-        """``A_ss⁻¹`` on its factor's fill pattern (one Takahashi sweep, cached)."""
+        """``A_ss⁻¹`` on its factor's fill pattern (one Takahashi sweep, cached).
+
+        Of the sparse matrix itself: a low-rank (Woodbury) factor's ``U U^T`` part
+        is corrected for separately (``_low_rank_diagonal``).
+        """
         return selected_inverse(self.a_ss_matrix)
+
+    @property
+    def _base_ss(self):
+        """The sparse factor of ``a_ss_matrix``, under any low-rank update."""
+        return getattr(self.a_ss, "base", self.a_ss)
+
+    def _low_rank_diagonal(self, rows=None) -> np.ndarray:
+        """``diag(rows w M^-1 w^T rows^T)``: what the Woodbury update subtracts
+        from ``rows A_ss^-1 rows^T`` (``rows`` n x n_s; ``None`` = identity); zero
+        without an update."""
+        size = self.sparse_index.size if rows is None else rows.shape[0]
+        if not isinstance(self.a_ss, _LowRankSpdFactor):
+            return np.zeros(size)
+        projected = self.a_ss.w if rows is None else np.asarray(rows @ self.a_ss.w)
+        return np.einsum("ij,ji->i", projected, cho_solve(self.a_ss.m_factor, projected.T))
 
     @cached_property
     def _w_dense(self) -> np.ndarray:
@@ -198,7 +258,7 @@ class SparsePosterior:
         diag = np.zeros(self.latent_size)
         s, d = self.sparse_index, self.dense_index
         if s.size:
-            diag_ss = self._selected_ss.diagonal()                   # diag(A_ss^-1)
+            diag_ss = self._selected_ss.diagonal() - self._low_rank_diagonal()
             if d.size:
                 w = self._w_dense                                    # A_ss^-1 B  (n_s x m)
                 sinv_wt = cho_solve(self.schur_factor, w.T)          # S^-1 W^T   (m x n_s)
@@ -248,7 +308,7 @@ class SparsePosterior:
                 if cover.size <= np.unique(row).size:
                     basis = np.zeros((s.size, cover.size))
                     basis[cover, np.arange(cover.size)] = 1.0
-                    columns = self.a_ss.solve(basis)
+                    columns = self._base_ss.solve(basis)
                     other = np.where(pick == j, k, j)
                     value += np.bincount(
                         row, weight * columns[other, np.searchsorted(cover, pick)],
@@ -261,7 +321,8 @@ class SparsePosterior:
                 # ponytail: one solve per uncovered row; batch the columns if a
                 # huge request of such rows ever makes this the memory ceiling.
                 slow = a_s[~fast].toarray()
-                var[~fast] = np.einsum("ij,ji->i", slow, self.a_ss.solve(slow.T))
+                var[~fast] = np.einsum("ij,ji->i", slow, self._base_ss.solve(slow.T))
+            var -= self._low_rank_diagonal(a_s)
             if d.size:
                 diff = np.asarray(a_s @ self._w_dense) - design[:, d].toarray()
                 var += np.einsum("ij,ji->i", diff, cho_solve(self.schur_factor, diff.T))
@@ -602,46 +663,49 @@ class _SparseSolve:
     dense_dimension: int
 
 
-def _require_identified_field(model: CompiledLGM, sparse_index, z_s, weights) -> None:
-    """Raise when ``A_ss = Q_ss + Z_s^T W Z_s`` is singular by construction.
+def _confounded_null_space(model: CompiledLGM, sparse_index, z_s, weights):
+    """``(N, rows)``: the null space of ``A_ss = Q_ss + Z_s^T W Z_s``, or ``(None, None)``.
 
     A block whose constraint rows span its prior null space (Besag, RW1/RW2,
-    SpaceTime, Grouped, Replicated) leaves ``A_ss`` singular exactly when some
-    combination ``v`` of those null vectors is invisible to the data,
-    ``W^1/2 Z_s v = 0`` -- two intrinsic effects whose constants are confounded
-    (Besag + RW1). Whether SuperLU then reports it depends on the sign of a
-    round-off pivot, so check the structure instead. The constrained problem is
-    still well posed (the dense engine reduces onto null(C) first); the sparse
-    path needs a grounded KKT solve for it, not yet built.
+    SpaceTime, Grouped, Replicated) leaves ``A_ss`` singular exactly along the
+    combinations ``v = V a`` of those null vectors the data cannot see,
+    ``W^1/2 Z_s V a = 0`` -- two intrinsic effects with confounded constants
+    (Besag + RW1). ``N`` (n_s x k, sparse coordinates) is a basis of them and
+    ``rows`` (r x latent) the constraint rows of the blocks involved, which
+    ``_sparse_solve`` uses to regularise exactly (see there). A block whose
+    constraint rows are not its null vectors (BYM2's augmented block) is left to
+    the post-kriging backstop.
     """
-    position = np.full(model.precision.shape[0], -1)
+    latent_size = model.precision.shape[0]
+    position = np.full(latent_size, -1)
     position[sparse_index] = np.arange(sparse_index.size)
-    columns, names, start = [], [], 0
-    for block in model.blocks:
+    columns, owners, lifted, start = [], [], {}, 0
+    for block_number, block in enumerate(model.blocks):
         width = block.design.shape[1]
         rows = np.asarray(block.constraints, dtype=float)
         span = position[start:start + width]
         start += width
         if not rows.shape[0] or span[0] < 0:
             continue
-        # Only rows that are the prior's null vectors (see docstring); a BYM2
-        # augmented block's constraint is not, and is left to the backstop.
         if np.abs(block.precision @ rows.T).max() > 1e-8 * max(1.0, abs(block.precision).max()):
             continue
         null = np.zeros((sparse_index.size, rows.shape[0]))
         null[span] = rows.T
+        lifted[block_number] = np.zeros((rows.shape[0], latent_size))
+        lifted[block_number][:, start - width:start] = rows
         columns.append(null)
-        names.append(block.name)
+        owners.extend([block_number] * rows.shape[0])
     if len(columns) < 2:
-        return
-    seen = np.asarray(z_s @ np.hstack(columns)) * np.sqrt(np.clip(weights, 0.0, None))[:, None]
-    singular = np.linalg.svd(seen, compute_uv=False)
-    if singular.size and singular.min() <= 1e-9 * max(singular.max(), 1.0):
-        raise UnsupportedEngineError(
-            f"intrinsic effects {names} have confounded null spaces (e.g. a Besag and "
-            "an RW1 constant): the sparse solver cannot fit this model yet. Fit it with "
-            "allow_large_dense=True, or make one of the effects proper"
-        )
+        return None, None
+    v = np.hstack(columns)
+    seen = np.asarray(z_s @ v) * np.sqrt(np.clip(weights, 0.0, None))[:, None]
+    _, singular, right = np.linalg.svd(seen, full_matrices=False)
+    invisible = singular <= 1e-9 * max(singular.max(initial=0.0), 1.0)
+    if not invisible.any():
+        return None, None
+    coefficients = right[invisible].T                                 # c x k
+    involved = sorted({owners[i] for i in np.flatnonzero(np.abs(coefficients).max(axis=1) > 1e-12)})
+    return v @ coefficients, np.vstack([lifted[block] for block in involved])
 
 
 def _sparse_solve(
@@ -671,27 +735,53 @@ def _sparse_solve(
     q = model.precision
     weights = np.asarray(weights, dtype=float)
 
+    # Confounded intrinsic blocks leave A_ss singular before the constraints
+    # (E-sparse-D2). Regularise with R = U U^T, U^T the involved blocks' own
+    # constraint rows: on {C x = e}, x^T R x is constant, so the constrained
+    # posterior and the reduced logdet are unchanged while H + R is SPD. R is
+    # dense on the field, so ground it: move one anchor node per null direction
+    # (pivoted QR on the null basis) to the dense block -- making the remaining
+    # A_s'.s' SPD and sparse -- and carry U's sparse part by Woodbury.
+    null, u_rows = (
+        _confounded_null_space(model, sparse_index, observed_design[:, sparse_index], weights)
+        if sparse_index.size else (None, None)
+    )
+    if null is not None:
+        _, _, pivots = qr(null.T, pivoting=True, mode="economic")
+        anchors = sparse_index[pivots[:null.shape[1]]]
+        sparse_index = np.setdiff1d(sparse_index, anchors)
+        dense_index = np.sort(np.r_[dense_index, anchors])
+
     z_s = observed_design[:, sparse_index]
     z_d = observed_design[:, dense_index]
     wz_s = csr_matrix(z_s.multiply(weights[:, None]))
     wz_d = csr_matrix(z_d.multiply(weights[:, None]))
     n_s = sparse_index.size
     m = dense_index.size
+    u_s = u_d = None
+    if null is not None:
+        u_s, u_d = u_rows[:, sparse_index].T, u_rows[:, dense_index].T
 
     logdet_posterior = 0.0
     a_s = schur_factor = d_factor = b = None
     a_ss_matrix = None
 
     if n_s:
-        _require_identified_field(model, sparse_index, z_s, weights)
         q_ss = q[sparse_index][:, sparse_index]
         a_ss_matrix = (q_ss + z_s.T @ wz_s).tocsr()
         a_s = SparseSpdFactor(a_ss_matrix, "sparse posterior precision")
+        if u_s is not None:
+            a_s = _LowRankSpdFactor(a_s, u_s)
         logdet_posterior += a_s.logdet
     if m:
         d = q[dense_index][:, dense_index].toarray() + (z_d.T @ wz_d).toarray()
+        if u_d is not None:
+            d = d + u_d @ u_d.T
     if n_s and m:
-        b = (z_s.T @ wz_d).toarray()  # n_s x m
+        # Q_sd is zero for a block-granular partition; anchors make it nonzero.
+        b = q[sparse_index][:, dense_index].toarray() + (z_s.T @ wz_d).toarray()  # n_s x m
+        if u_s is not None:
+            b = b + u_s @ u_d.T
         schur = d - b.T @ a_s.solve(b)  # m x m
         schur_factor, logdet_schur = _factor_positive_definite(schur, "dense Schur complement")
         logdet_posterior += logdet_schur

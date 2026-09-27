@@ -10,7 +10,8 @@ import pytest
 
 import pylgm.inference.gaussian as gaussian_engine
 from pylgm import (
-    AR1, IID, LGM, RW1, Besag, Binomial, Fixed, Gaussian, NegativeBinomial, Poisson, WeibullSurv,
+    AR1, IID, LGM, RW1, RW2, Besag, Binomial, Fixed, Gaussian, NegativeBinomial, Poisson, SpaceTime,
+    WeibullSurv,
 )
 from pylgm.compiler import compile_lgm
 from pylgm.config.schema import DataConfig
@@ -112,19 +113,47 @@ def test_sparse_laplace_on_a_gaussian_likelihood_is_exact(monkeypatch):
     np.testing.assert_allclose(laplace.predictive_variance, exact.predictive_variance, atol=1e-10)
 
 
-@pytest.mark.parametrize("likelihood,response", [(Gaussian(0.7), "x"), (Poisson(), "count")])
-def test_confounded_intrinsic_effects_raise_on_the_sparse_path(likelihood, response, monkeypatch):
-    """Besag + RW1: A_ss is singular before the constraints. The sparse path
-    used to return a mean violating both sum-to-zero rows; it must refuse."""
-    from pylgm.exceptions import UnsupportedEngineError
+CONFOUNDED = {
+    # Besag + RW1: A_ss is singular along (1_s, -1_t) before the constraints.
+    "gaussian_besag_rw1": (Gaussian(0.7), "x", Fixed("1") + Besag("s", index="region", graph=RING)
+                           + RW1("trend", index="t")),
+    "poisson_besag_rw1": (Poisson(), "count", Fixed("1 + x") + Besag("s", index="region", graph=RING)
+                          + RW1("trend", index="t", precision=4.0)),
+    # RW2 + RW1 on one index: the shared constant.
+    "binomial_rw2_rw1": (Binomial(trials="n"), "k", Fixed("1") + RW2("r2", index="t", precision=20.0)
+                         + RW1("r1", index="t", precision=5.0)),
+    # Knorr-Held type IV: main effects plus an interaction whose null space overlaps both.
+    "poisson_knorr_held": (Poisson(), "count", Fixed("1") + Besag("s", index="region", graph=RING)
+                           + RW1("trend", index="t", precision=4.0)
+                           + SpaceTime("st", space="region", time="t", graph=RING, interaction="IV")),
+}
 
-    model = LGM(response, likelihood, Fixed("1") + Besag("s", index="region", graph=RING)
-                + RW1("trend", index="t"), panel=("region",), time="t")
+
+@pytest.mark.parametrize("name", sorted(CONFOUNDED))
+def test_confounded_intrinsic_effects_match_dense(name, monkeypatch):
+    """E-sparse-D2: the sparse path regularises with the confounded blocks' own
+    constraint rows (exact on the constraint set) and SMW-updates a grounded
+    factor. It used to refuse these models -- and before that, silently return
+    a mean violating the sum-to-zero rows."""
+    likelihood, response, predictor = CONFOUNDED[name]
+    model = LGM(response, likelihood, predictor, offset="logE" if response == "count" else None,
+                panel=("region",), time="t")
+    engine = "exact_gaussian" if response == "x" else "laplace"
     frame = _frame()
-    model.fit(frame, engine="laplace" if response == "count" else "exact_gaussian")  # dense: fine
+    dense = model.fit(frame, engine=engine)
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
-    with pytest.raises(UnsupportedEngineError, match="confounded"):
-        model.fit(frame, engine="laplace" if response == "count" else "exact_gaussian")
+    sparse = model.fit(frame, engine=engine)
+    assert sparse._covariance is None
+    _assert_same(sparse, dense) if engine == "laplace" else (
+        np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7),
+        np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7),
+        np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10),
+    )
+    for block in dense.block_slices:
+        np.testing.assert_allclose(sparse.latent_marginals(block).std, dense.latent_marginals(block).std,
+                                   rtol=1e-6)
+    draws = sparse.sample(20_000, rng=1)
+    np.testing.assert_allclose(draws.std(axis=0), np.sqrt(dense.predictive_variance), rtol=0.05)
 
 
 @pytest.mark.parametrize("hyperparameters", ["optimize", "integrate"])
