@@ -40,17 +40,22 @@ class _ComposableEffect:
 
 @dataclass(frozen=True)
 class Fixed(_ComposableEffect):
-    """A fixed-effect formula and its Gaussian prior precision."""
+    """A fixed-effect formula and its Gaussian prior precision.
+
+    A ``Hyperparameter`` makes ``prior_precision`` a learned ridge on the
+    non-intercept coefficients, estimated (or integrated) like any other
+    precision.
+    """
 
     formula: str
-    prior_precision: float = 1e-6
+    prior_precision: float | Hyperparameter = 1e-6
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "formula", _non_empty_string(self.formula, "formula"))
         object.__setattr__(
             self,
             "prior_precision",
-            _positive_real(self.prior_precision, "prior_precision"),
+            _positive_precision(self.prior_precision, "prior_precision"),
         )
 
     @property

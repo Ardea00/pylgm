@@ -53,6 +53,19 @@ Every model needs at most one `Fixed` term; its columns are recomputed from the
 formula when `predict` scores new rows, which is how a categorical level unseen
 at fit time is caught rather than silently mis-encoded.
 
+`prior_precision` may also be a `Hyperparameter`, giving a learned ridge: the
+shrinkage strength is estimated from the data (by empirical Bayes, or
+integrated with `hyperparameters="integrate"`) rather than fixed in advance.
+It applies to every coefficient except the intercept, which stays at the
+diffuse default — shrinking the intercept toward 0 is never what a learned
+ridge means. A single shared precision assumes the covariates are on
+comparable scales, so standardize them first. This is useful with many
+correlated covariates:
+
+```python
+Fixed("1 + x1 + x2 + x3", prior_precision=Hyperparameter("tau_beta", initial=1.0))
+```
+
 ### `IID(name, index, precision=1.0)`
 
 Exchangeable random effects: one latent value per level of `index`, independent

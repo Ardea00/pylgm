@@ -319,6 +319,38 @@ see the caveat below). Model criteria (DIC/WAIC/CPO/PIT) cover the
 in stacked order (NaN at unobserved rows) followed by one entry per
 observation row, each read on its original `sigma` scale.
 
+## Outcomes at different frequencies
+
+A higher-frequency outcome (several releases per lower-frequency period) can
+measure the same latent as a lower-frequency outcome, with the latest
+period's low-frequency value still missing (a ragged edge). Each
+higher-frequency row names the period it belongs to in the same `period`
+column the lower-frequency outcome uses (same dtype on both), and a `Shared`
+effect indexed on `period` links the two. Sub-periods not yet
+released are simply absent rows -- there is no need to pad them with NaN.
+`allow_ragged=True` is required whenever the low-frequency outcome has no row
+for the latest period (its level set is missing one the shared index has),
+which is exactly the case here:
+
+```python
+Joint(
+    [
+        LGM(response="target", likelihood=Gaussian(sigma=0.3), predictor=Fixed("1")),
+        LGM(response="indicator", likelihood=Gaussian(sigma=0.4), predictor=Fixed("1")),
+    ],
+    shared=[Shared(AR1("u", index="period", precision=1.0, rho=0.7),
+                   scale=(1.0, 0.8), allow_ragged=True)],
+)
+```
+
+The latest period's target is read back with
+`result.predict(pd.DataFrame({"period": [latest_period]}), outcome="target")`.
+Each `Shared` scale is one float/`Hyperparameter` **per sub-model**, not per
+row, so a per-sub-period loading is not expressible inside a single
+higher-frequency sub-model; if sub-periods need different loadings, split
+them into separate sub-models (one per sub-period), each `Shared` against the
+same `period`-indexed latent with its own scale.
+
 ## Not supported yet
 
 - **`latent_strategy="laplace"` is not recommended on joint models.** Under
