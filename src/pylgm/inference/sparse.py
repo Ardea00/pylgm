@@ -236,14 +236,8 @@ class SparsePosterior:
         var = np.zeros(design.shape[0])
         if s.size:
             a_s = design[:, s]
-            selected = self._selected_ss
-            pattern = a_s.copy()
-            pattern.data[:] = 1.0
-            support = selected.copy()
-            support.data[:] = 1.0
-            covered = np.asarray((pattern @ support).multiply(pattern).sum(axis=1)).ravel()
-            fast = covered == pattern.getnnz(axis=1).astype(float) ** 2
-            var[fast] = np.asarray((a_s[fast] @ selected).multiply(a_s[fast]).sum(axis=1)).ravel()
+            value, fast = _pattern_quadratic(a_s, self._selected_ss)
+            var[fast] = value[fast]
             if not fast.all():
                 # ponytail: one solve per uncovered row; batch the columns if a
                 # huge request of such rows ever makes this the memory ceiling.
@@ -460,44 +454,91 @@ def selected_inverse(matrix) -> csr_matrix:
     if not np.array_equal(lu.perm_r, pc):
         raise NumericalError("selected inversion expected a symmetric factorization")
     lower = lu.L.tocsc()
+    lower.sort_indices()
     diag_u = lu.U.diagonal().astype(float)
     indptr, indices, data = lower.indptr, lower.indices, lower.data.astype(float)
-    below_rows: list = [None] * n
-    below_l: list = [None] * n
-    sig: dict = {}
-    for i in range(n):
-        seg = indices[indptr[i]:indptr[i + 1]]
-        val = data[indptr[i]:indptr[i + 1]]
-        mask = seg > i
-        below_rows[i] = seg[mask]
-        below_l[i] = val[mask]
+    # Sigma lives on the lower pattern (strict fill + diagonal), keyed col * n + row:
+    # sorted keys make every sub-block gather one searchsorted per column.
+    column = np.repeat(np.arange(n), np.diff(indptr))
+    strict = indices > column
+    keys = np.sort(np.r_[column[strict] * n + indices[strict], np.arange(n) * (n + 1)])
+    sig = np.zeros(keys.size)
+    diagonal = np.searchsorted(keys, np.arange(n) * (n + 1))
     for i in range(n - 1, -1, -1):
-        below = below_rows[i]
-        below_vals = below_l[i]
-        if len(below):
-            k = len(below)
-            sub = np.empty((k, k))
-            for a in range(k):
-                for b in range(k):
-                    ra, rb = below[a], below[b]
-                    lo, hi = (ra, rb) if ra <= rb else (rb, ra)
-                    sub[a, b] = sig.get((hi, lo), 0.0)
-            sig_below = -sub @ below_vals
-            for a in range(k):
-                sig[(below[a], i)] = sig_below[a]
-            sig[(i, i)] = 1.0 / diag_u[i] - below_vals @ sig_below
-        else:
-            sig[(i, i)] = 1.0 / diag_u[i]
+        rows, values = indices[indptr[i]:indptr[i + 1]], data[indptr[i]:indptr[i + 1]]
+        below, below_vals = rows[rows > i], values[rows > i]
+        if not below.size:
+            sig[diagonal[i]] = 1.0 / diag_u[i]
+            continue
+        wanted = np.minimum.outer(below, below) * n + np.maximum.outer(below, below)
+        position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
+        # Off-pattern sub-block entries are true zeros (SuperLU drops only numerical zeros).
+        sub = np.where(keys[position] == wanted, sig[position], 0.0)
+        sig_below = -sub @ below_vals
+        sig[np.searchsorted(keys, i * n + below)] = sig_below
+        sig[diagonal[i]] = 1.0 / diag_u[i] - below_vals @ sig_below
     # Permuted index pc[i] is original index i.
     original = np.argsort(pc)
-    keys = np.array(list(sig), dtype=int).reshape(-1, 2)
-    values = np.fromiter(sig.values(), dtype=float, count=len(sig))
-    rows, cols = original[keys[:, 0]], original[keys[:, 1]]
+    rows, cols = original[keys % n], original[keys // n]
     off = rows != cols
     return coo_matrix(
-        (np.r_[values, values[off]], (np.r_[rows, cols[off]], np.r_[cols, rows[off]])),
+        (np.r_[sig, sig[off]], (np.r_[rows, cols[off]], np.r_[cols, rows[off]])),
         shape=(n, n),
     ).tocsr()
+
+
+def _row_pairs(a: csr_matrix, max_row_nnz: int):
+    """Every ordered pair of nonzeros sharing a row of ``a``, as data positions.
+
+    Returns ``(first, second, pair_row, small)``; rows with more than
+    ``max_row_nnz`` nonzeros are skipped (``small`` False) rather than
+    enumerating their ``nnz^2`` pairs.
+    """
+    counts = np.diff(a.indptr)
+    small = counts <= max_row_nnz
+    row_of = np.repeat(np.arange(a.shape[0]), counts)
+    entry = np.flatnonzero(small[row_of])
+    reps = counts[row_of[entry]]
+    first = np.repeat(entry, reps)
+    offset = np.arange(first.size) - np.repeat(np.cumsum(reps) - reps, reps)
+    second = np.repeat(a.indptr[row_of[entry]], reps) + offset
+    return first, second, row_of[first], small
+
+
+def sparse_row_quadratic(a, dense: np.ndarray, max_row_nnz: int = 64) -> np.ndarray:
+    """``diag(a M aᵀ)`` for sparse ``a`` and dense symmetric ``M``, never forming ``a M``."""
+    a = csr_matrix(a, dtype=float)
+    first, second, pair_row, small = _row_pairs(a, max_row_nnz)
+    value = np.bincount(
+        pair_row,
+        a.data[first] * a.data[second] * dense[a.indices[first], a.indices[second]],
+        minlength=a.shape[0],
+    )
+    if not small.all():
+        wide = a[~small]
+        value[~small] = np.asarray(wide.multiply(wide @ dense).sum(axis=1)).ravel()
+    return value
+
+
+def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64):
+    """``(a_iᵀ M a_i, covered_i)`` per row, reading ``M`` only where ``stored`` has it.
+
+    ``covered_i`` is True when every pair of row ``i``'s nonzeros is stored (so the
+    value is exact); rows with more than ``max_row_nnz`` nonzeros are reported
+    uncovered.
+    """
+    width = a.shape[1]
+    first, second, pair_row, small = _row_pairs(a, max_row_nnz)
+    stored = stored.tocsr()
+    stored.sort_indices()
+    keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
+    wanted = a.indices[first] * width + a.indices[second]
+    position = np.minimum(np.searchsorted(keys, wanted), max(keys.size - 1, 0))
+    found = keys[position] == wanted if keys.size else np.zeros(wanted.size, bool)
+    contribution = a.data[first] * a.data[second] * np.where(found, stored.data[position], 0.0)
+    value = np.bincount(pair_row, contribution, minlength=a.shape[0])
+    missing = np.bincount(pair_row, ~found, minlength=a.shape[0])
+    return value, small & (missing == 0)
 
 
 def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:

@@ -217,9 +217,13 @@ def quadratic_form_diagonal(weights, covariance) -> np.ndarray:
     ``W @ Sigma`` is a single GEMM (or a sparse matmul when ``W`` is sparse)
     followed by an O(n p) row-wise reduction.
     """
-    projected = np.asarray(weights @ covariance)
     if issparse(weights):
-        return np.asarray(weights.multiply(projected).sum(axis=1)).reshape(-1)
+        # Sparse rows: sum a_ij a_ik Sigma_jk over each row's nonzero pairs, never
+        # forming the n x p product W @ Sigma.
+        from pylgm.inference.sparse import sparse_row_quadratic
+
+        return sparse_row_quadratic(weights, np.asarray(covariance))
+    projected = np.asarray(weights @ covariance)
     return np.einsum("ij,ij->i", projected, np.asarray(weights))
 
 
