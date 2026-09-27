@@ -461,9 +461,8 @@ With `structure=BesagStructure(graph)` and an inner `RW1`/`RW2`, `Grouped`
 reproduces the Knorr-Held space-time interaction types that
 [`SpaceTime`](effects.md#spacetime-effect-knorr-held-interaction) provides in
 curated form; `AR1Structure` is outside that family. See
-[Grouped](effects.md#grouped) for the full reference, including the Sørbye-Rue
-scaling caveat when a plain `RW1`/`RW2` and an `RW1Structure` appear in the
-same model.
+[Grouped](effects.md#grouped) for the full reference, including when to pass
+`scale=True` to the inner `RW1`/`RW2` to match `SpaceTime`.
 
 ## Dynamic spatial panel (SDPD)
 

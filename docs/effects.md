@@ -566,25 +566,18 @@ inner effect's own precision plays `K_t` (the time factor), exactly as in
 (groups correlated by a stationary AR1, `rho` fixed), used the same way `AR1`
 is used as a temporal main effect outside the Knorr-Held family. This
 equivalence to `SpaceTime` is checked directly, matrix for matrix, in
-`tests/test_grouped_spacetime_oracle.py` — **except that the RW-based types
-(II and IV) match only up to one global scalar on the precision**: `Grouped`'s
-inner `RW1`/`RW2` compiles through the library's ordinary, *unscaled*
-random-walk builder, while `SpaceTime` always builds its time factor
-Sørbye-Rue *scaled*. See [research status](research-status.md) for the exact
-ratio and what it means for a model that mixes the two.
+`tests/test_grouped_spacetime_oracle.py`. For the RW-based types (II and IV)
+declare the inner effect with `scale=True` (`RW1("u", index="t", scale=True)`):
+`SpaceTime` scales its factors by default (its own `scale` flag), a plain
+`RW1`/`RW2` does not.
 
-**The same divergence also shows up inside one `Grouped` call, not only
-between `Grouped` and `SpaceTime`.** `RW1Structure()`/`RW2Structure()` build
-their between-group precision Sørbye-Rue *scaled* (`rw_structure(n, order,
-scale=True)`), while a plain `RW1`/`RW2` passed as the *inner* effect is
-*unscaled* unless it is declared with `scale=True`. So
-`Grouped(RW1("u", index="t"), over="g", structure=RW1Structure())` compiles to
-exactly `kron(rw_structure(G, 1, scale=True), rw_structure(T, 1, scale=False))`
-— the outer factor scaled, the inner factor not, both spelled `RW1` in the
-same line. Nothing here is a match against R-INLA's default: R-INLA's own
-`rw1`/`rw2` take an explicit `scale.model` argument that leaves scaling off
-unless asked, so check what your own R call passed before assuming either
-side of a `Grouped(RW1(...), structure=RW1Structure())` call matches it.
+**Scaling is explicit and the same everywhere.** `RW1Structure`/`RW2Structure`
+take the same keyword-only `scale` flag as `RW1`/`RW2`, with the same default
+(`False`, unscaled — R-INLA's `scale.model` default too). So
+`Grouped(RW1("u", index="t"), over="g", structure=RW1Structure())` is the
+Kronecker product of two identical RW1 matrices; pass `scale=True` to both for
+the Sørbye-Rue scaled model. (Before 0.7, `RW*Structure` was always scaled —
+the same name, two matrices in one call.)
 
 **Structure: `Q_S ⊗ Q_E`, group-major labels.** The precision is the
 Kronecker product of the structure's precision over `over`'s levels and the

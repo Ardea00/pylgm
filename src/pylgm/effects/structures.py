@@ -12,7 +12,7 @@ without an eigendecomposition, so every structure states its own.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 import numpy as np
@@ -74,11 +74,14 @@ class AR1Structure:
 class _RandomWalkStructure:
     """Shared body of RW1Structure and RW2Structure.
 
-    A plain mixin, not a dataclass: ``order`` is declared by each subclass, and
-    a fieldless frozen dataclass reading ``self.order`` would read as a defect.
+    A plain mixin, not a dataclass: ``order`` is declared by each subclass.
+    ``scale`` has the same meaning and default as ``RW1``/``RW2``'s own (Sørbye-Rue
+    scaling off unless asked for), so ``Grouped(RW1(...), structure=RW1Structure())``
+    is ``kron`` of two identical RW1 matrices, not a scaled and an unscaled one.
     """
 
     order: ClassVar[int]
+    scale: bool
 
     def levels(self, observed: tuple[str, ...]) -> tuple[str, ...]:
         return observed
@@ -89,7 +92,7 @@ class _RandomWalkStructure:
                 f"RW{self.order}Structure needs more than {self.order} group "
                 f"level(s), got {len(levels)}"
             )
-        return csr_matrix(rw_structure(len(levels), self.order, scale=True))
+        return csr_matrix(rw_structure(len(levels), self.order, scale=self.scale))
 
     def null_basis(self, levels: tuple[str, ...]) -> np.ndarray:
         count = len(levels)
@@ -105,6 +108,11 @@ class RW1Structure(_RandomWalkStructure):
     """First-order random walk between groups: null is the constant."""
 
     order: ClassVar[int] = 1
+    scale: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scale, bool):
+            raise TypeError("scale must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -112,6 +120,11 @@ class RW2Structure(_RandomWalkStructure):
     """Second-order random walk between groups: null is the constant and ramp."""
 
     order: ClassVar[int] = 2
+    scale: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scale, bool):
+            raise TypeError("scale must be a boolean")
 
 
 @dataclass(frozen=True)

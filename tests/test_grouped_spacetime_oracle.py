@@ -127,26 +127,36 @@ def test_same_span_discriminates_different_subspaces():
     assert not _same_span(reference_basis, different_basis)
 
 
-def test_the_rw_scaling_discrepancy_is_real_and_not_yet_reconciled():
-    """Pins the finding itself, so it is not buried in a docstring.
+def test_rw_scaling_is_explicit_and_consistent():
+    """The RW scaling divergence, reconciled.
 
-    ``rw_structure`` is genuinely different scaled vs. unscaled, and as a
-    direct consequence a ``Grouped(RW1(...))`` and a ``SpaceTime`` type-II
-    interaction built with the same nominal ``precision`` do NOT represent the
-    same model -- their precision matrices differ by the scalar computed in
-    ``_rw_scale_ratio``. Neither ``RW1``/``RW2`` nor ``build_spacetime`` may
-    change to close this gap in this slice.
+    ``RW1``/``RW2`` and ``RW1Structure``/``RW2Structure`` now share one default
+    (unscaled) and one ``scale`` flag, so two things spelled RW1 in one call are
+    the same matrix; and asking for scaling on the inner effect reproduces
+    ``SpaceTime``, whose own ``scale`` flag defaults to True.
     """
-    scaled = rw_structure(5, 1, scale=True)
-    raw = rw_structure(5, 1, scale=False)
-    assert not np.allclose(scaled, raw)
+    from scipy.sparse import kron
+
+    from pylgm.effects.structures import RW1Structure
 
     frame = _frame()
-    reference = build_spacetime(frame, "st", "s", "t", GRAPH, "II", 1, precision=1.0)
     grouped, _ = _build_effect_block(
+        Grouped(RW1("u", index="t"), over="s", structure=RW1Structure()), frame
+    )
+    groups = frame["s"].nunique()
+    periods = frame["t"].nunique()
+    expected = kron(rw_structure(groups, 1, scale=False), rw_structure(periods, 1, scale=False))
+    assert np.allclose(grouped.precision.toarray(), expected.toarray())
+
+    reference = build_spacetime(frame, "st", "s", "t", GRAPH, "II", 1, precision=1.0)
+    unscaled, _ = _build_effect_block(
         Grouped(RW1("st", index="t"), over="s", structure=IIDStructure()), frame
     )
-    assert not np.allclose(grouped.precision.toarray(), reference.precision.toarray())
+    scaled, _ = _build_effect_block(
+        Grouped(RW1("st", index="t", scale=True), over="s", structure=IIDStructure()), frame
+    )
+    assert not np.allclose(unscaled.precision.toarray(), reference.precision.toarray())
+    assert np.allclose(scaled.precision.toarray(), reference.precision.toarray())
 
 
 def test_same_span_rejects_a_degenerate_first_argument():
