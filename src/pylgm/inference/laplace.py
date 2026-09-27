@@ -100,8 +100,47 @@ def _prediction_outputs(model: CompiledLGM, mean: np.ndarray, predictive_varianc
     )
 
 
+def _polished(objective, point: np.ndarray, candidate: np.ndarray) -> np.ndarray:
+    """``candidate`` (one more Newton step) unless it raises the objective past round-off.
+
+    The Laplace log marginal likelihood depends on the mode to first order
+    (through ``logdet H(x)``), so stopping anywhere under the gradient tolerance
+    leaves up to ~1e-9 in it -- which a finite-difference Hessian over theta
+    (step 1e-3) amplifies to ~1e-3, and which differs with the Newton start
+    (a warm start stops at a different point than a cold one). Near the mode
+    Newton converges quadratically, so one extra step removes that dependence.
+    """
+    try:
+        current, proposed = objective(point), objective(candidate)
+    except FloatingPointError:
+        return point
+    if np.isfinite(proposed) and proposed <= current + 1e-12 * max(1.0, abs(current)):
+        return candidate
+    return point
+
+
+def _reported_predictions(model, mean, variances, wanted: bool):
+    """``(predictive_variance, predictive_mean, fitted_mean)`` on the prediction grid.
+
+    ``wanted=False`` is for intermediate objective evaluations, which read only
+    the log marginal likelihood: the variances are skipped (``None``) and the
+    fitted mean, which needs them, is NaN.
+    """
+    if not wanted:
+        predictive_mean = np.asarray(
+            model.prediction_offset + model.prediction_design @ mean
+        ).reshape(-1)
+        return None, predictive_mean, np.full(predictive_mean.shape, np.nan)
+    predictive_variance = variances()
+    predictive_mean, fitted_mean = _prediction_outputs(model, mean, predictive_variance)
+    _require_finite("predictive variance", predictive_variance)
+    _require_finite("fitted mean", fitted_mean)
+    return predictive_variance, predictive_mean, fitted_mean
+
+
 def _fit_laplace_dense(
-    model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False
+    model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False,
+    initial_mode: np.ndarray | None = None, predictive_variances: bool = True,
 ) -> LaplaceResult:
     likelihood = model.likelihood
     precision = model.precision.toarray()
@@ -157,6 +196,10 @@ def _fit_laplace_dense(
         )
 
     z = np.zeros(reduced_dim)
+    if initial_mode is not None and reduced_dim:
+        # Warm start: the reduced coordinates of the given latent vector.
+        shift = initial_mode if x_p is None else initial_mode - x_p
+        z = basis.T @ shift
     gradient_norm = 0.0
     newton_decrement = None
     iterations = 0
@@ -220,6 +263,13 @@ def _fit_laplace_dense(
                     raise InferenceConvergenceError(iterations, gradient_norm)
                 converged = True
                 newton_decrement = decrement
+        # Polish: one more Newton step from the accepted point (see _polished).
+        eta = reduced_design @ z + offset_obs
+        gradient = reduced_precision @ z + prior_linear - reduced_design.T @ lk_obs.gradient(eta, y_obs)
+        weights = lk_obs.working_weights(eta, y_obs)
+        hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
+        polish_factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
+        z = _polished(objective, z, z + cho_solve(polish_factor, -gradient))
         eta = reduced_design @ z + offset_obs
         weights = lk_obs.working_weights(eta, y_obs)
         hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
@@ -290,15 +340,15 @@ def _fit_laplace_dense(
 
     prediction_design = model.prediction_design
     prediction_offset = model.prediction_offset
-    predictive_variance = quadratic_form_diagonal(prediction_design, covariance)
-    predictive_mean, fitted_mean = _prediction_outputs(model, mean, predictive_variance)
+    predictive_variance, predictive_mean, fitted_mean = _reported_predictions(
+        model, mean, lambda: quadratic_form_diagonal(prediction_design, covariance),
+        predictive_variances,
+    )
 
     _require_finite("posterior mean", mean)
     _require_finite("posterior covariance", covariance)
     _require_finite("log marginal likelihood", log_marginal_likelihood)
     _require_finite("predictive mean", predictive_mean)
-    _require_finite("predictive variance", predictive_variance)
-    _require_finite("fitted mean", fitted_mean)
 
     return LaplaceResult(
         labels=model.labels,
@@ -329,7 +379,8 @@ def _fit_laplace_dense(
 
 
 def _fit_laplace_sparse(
-    model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False
+    model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False,
+    initial_mode: np.ndarray | None = None, predictive_variances: bool = True,
 ) -> LaplaceResult:
     """The dense engine's Newton iteration on the partitioned sparse solver.
 
@@ -377,8 +428,11 @@ def _fit_laplace_sparse(
         eta = design @ x + offset_obs
         return project(q @ x - design.T @ lk_obs.gradient(eta, y_obs))
 
-    # A feasible start: the minimum-norm solution of C_s x = e_s.
-    x = rows.T @ cho_solve(gram, rhs) if gram is not None and np.any(rhs) else np.zeros(latent_size)
+    # A feasible start: the warm-start mode projected onto C_s x = e_s, or the
+    # minimum-norm solution of C_s x = e_s.
+    x = np.zeros(latent_size) if initial_mode is None else np.asarray(initial_mode, dtype=float)
+    if gram is not None:
+        x = x - rows.T @ cho_solve(gram, rows @ x - rhs)
     gradient_norm = 0.0
     newton_decrement = None
     iterations = 0
@@ -417,6 +471,7 @@ def _fit_laplace_sparse(
             newton_decrement = decrement
         converged = True
 
+    x = _polished(objective, x, newton_target(x)[0].structural_mean)
     solve, eta = newton_target(x, final=True)
     posterior = solve.posterior
     centered = x - solve.nu
@@ -442,14 +497,14 @@ def _fit_laplace_sparse(
         mean = mean + posterior.covariance_apply(design.T @ (0.5 * eta_variance * third))
 
     prediction_design = model.prediction_design
-    predictive_variance = posterior.predictive_variances(prediction_design)
-    predictive_mean, fitted_mean = _prediction_outputs(model, mean, predictive_variance)
+    predictive_variance, predictive_mean, fitted_mean = _reported_predictions(
+        model, mean, lambda: posterior.predictive_variances(prediction_design),
+        predictive_variances,
+    )
 
     _require_finite("posterior mean", mean)
     _require_finite("log marginal likelihood", log_marginal_likelihood)
     _require_finite("predictive mean", predictive_mean)
-    _require_finite("predictive variance", predictive_variance)
-    _require_finite("fitted mean", fitted_mean)
     likelihood = model.likelihood
     return LaplaceResult(
         labels=model.labels,
@@ -485,6 +540,8 @@ def fit_laplace(
     max_iterations: int = 100,
     tolerance: float = 1e-8,
     mean_correction: bool = False,
+    initial_mode: np.ndarray | None = None,
+    predictive_variances: bool = True,
 ) -> LaplaceResult:
     """Fit a latent Gaussian model by a Laplace approximation at fixed hyperparameters.
 
@@ -492,6 +549,12 @@ def fit_laplace(
     partitioned solver and keeps no dense ``covariance``; marginals, ``predict``,
     ``linear_combinations`` and ``sample`` work unchanged. ``allow_large_dense=True``
     forces the dense engine.
+
+    ``initial_mode`` warm-starts Newton from a latent vector (the mode at a
+    nearby hyperparameter): it changes the iteration count, not the fixed point.
+    ``predictive_variances=False`` skips the prediction-grid variances (and so
+    the fitted mean, left NaN) for callers that only read the log marginal
+    likelihood, as ``fit_gaussian``'s flag does.
 
     Likelihood-agnostic: any compiled likelihood implementing the GLM protocol works,
     so a Gaussian likelihood is fit exactly and serves as the correctness anchor.
@@ -517,6 +580,7 @@ def fit_laplace(
     fit = _fit_laplace_sparse if sparse and not allow_large_dense else _fit_laplace_dense
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            return fit(model, max_iterations, tolerance, mean_correction)
+            return fit(model, max_iterations, tolerance, mean_correction,
+                       initial_mode, predictive_variances)
     except FloatingPointError as error:
         raise NumericalError("Laplace numerical calculation was non-finite") from error

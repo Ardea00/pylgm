@@ -239,3 +239,37 @@ def test_mean_correction_with_data_constraints_is_refused_on_the_sparse_path(mon
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
     with pytest.raises(UnsupportedEngineError, match="mean_correction"):
         joint.fit(frame, constraints={"level": [constraint]}, mean_correction=True)
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_warm_start_changes_iterations_not_the_answer(sparse, monkeypatch):
+    """Same mode and lml from a warm start, in fewer iterations -- and to the
+    precision a finite-difference Hessian over theta needs: without the polish
+    step a warm start stopped just under the gradient tolerance and moved the
+    INLA Hessian by 0.2%."""
+    from pylgm import Hyperparameter
+    from pylgm.compiler import compile_family
+
+    if sparse:
+        monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    panel = CanonicalPanel.from_frame(_frame(), DataConfig(time="t", response="count", panel=("region",)))
+    model = LGM(likelihood=Poisson(), predictor=Fixed("1 + x") + Besag(
+        "s", index="region", graph=RING, precision=Hyperparameter("tau", initial=1.0)), **BASE)
+    family = compile_family(model, panel)
+    start = fit_laplace(family.materialize({"tau": 3.0})).mean
+
+    def lml(tau, **kw):
+        return fit_laplace(family.materialize({"tau": tau}), **kw)
+
+    cold, warm = lml(3.3), lml(3.3, initial_mode=start)
+    np.testing.assert_allclose(warm.mean, cold.mean, atol=1e-10)
+    assert warm.log_marginal_likelihood == pytest.approx(cold.log_marginal_likelihood, abs=1e-11)
+    assert warm.diagnostics["newton_iterations"] < cold.diagnostics["newton_iterations"]
+    h = 1e-3
+    u = np.log(3.0)
+
+    def hessian(**kw):
+        f = [lml(float(np.exp(u + k * h)), **kw).log_marginal_likelihood for k in (-1, 0, 1)]
+        return (f[0] - 2 * f[1] + f[2]) / h**2
+
+    assert hessian(initial_mode=start) == pytest.approx(hessian(), rel=1e-5)
