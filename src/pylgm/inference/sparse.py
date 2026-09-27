@@ -663,6 +663,40 @@ class _SparseSolve:
     dense_dimension: int
 
 
+def _block_null_basis(block) -> np.ndarray | None:
+    """A basis of the block prior's null space (width x k), or ``None``.
+
+    Every shipped intrinsic block carries exactly as many constraint rows as its
+    null dimension (unconstrained blocks are proper -- Seasonal carries a ridge).
+    Usually the rows *are* the null vectors (Besag, RW, SpaceTime, Grouped).
+    When they are not -- BYM2's augmented block has null vector
+    ``(sqrt(phi) 1, 1)`` but its sum-to-zero row sits on the ``u*`` half -- solve
+    ``Q N = 0`` exactly by grounding: fix ``N_J = I`` on ``k`` columns ``J``
+    pivoted from the rows (where the pinned null vectors are nonzero) and solve
+    ``Q_KK N_K = -Q_KJ`` on the rest.
+    """
+    rows = np.asarray(block.constraints, dtype=float)
+    if not rows.shape[0]:
+        return None
+    q = block.precision.tocsr()
+    tolerance = 1e-8 * max(1.0, abs(q).max())
+    if np.abs(q @ rows.T).max() <= tolerance:
+        return rows.T
+    k, width = rows.shape
+    _, _, pivots = qr(rows, pivoting=True, mode="economic")
+    grounded = np.sort(pivots[:k])
+    rest = np.setdiff1d(np.arange(width), grounded)
+    basis = np.zeros((width, k))
+    basis[grounded, np.arange(k)] = 1.0
+    try:
+        basis[rest] = SparseSpdFactor(q[rest][:, rest], "grounded block prior").solve(
+            -q[rest][:, grounded].toarray()
+        )
+    except NumericalError:
+        return None  # left to the post-kriging backstop
+    return basis if np.abs(q @ basis).max() <= tolerance * max(1.0, np.abs(basis).max()) else None
+
+
 def _confounded_null_space(model: CompiledLGM, sparse_index, z_s, weights):
     """``(N, rows)``: the null space of ``A_ss = Q_ss + Z_s^T W Z_s``, or ``(None, None)``.
 
@@ -672,9 +706,9 @@ def _confounded_null_space(model: CompiledLGM, sparse_index, z_s, weights):
     ``W^1/2 Z_s V a = 0`` -- two intrinsic effects with confounded constants
     (Besag + RW1). ``N`` (n_s x k, sparse coordinates) is a basis of them and
     ``rows`` (r x latent) the constraint rows of the blocks involved, which
-    ``_sparse_solve`` uses to regularise exactly (see there). A block whose
-    constraint rows are not its null vectors (BYM2's augmented block) is left to
-    the post-kriging backstop.
+    ``_sparse_solve`` uses to regularise exactly (see there). Each block's null
+    basis comes from ``_block_null_basis``; one it cannot compute is left to the
+    post-kriging backstop.
     """
     latent_size = model.precision.shape[0]
     position = np.full(latent_size, -1)
@@ -687,14 +721,15 @@ def _confounded_null_space(model: CompiledLGM, sparse_index, z_s, weights):
         start += width
         if not rows.shape[0] or span[0] < 0:
             continue
-        if np.abs(block.precision @ rows.T).max() > 1e-8 * max(1.0, abs(block.precision).max()):
+        block_null = _block_null_basis(block)
+        if block_null is None:
             continue
-        null = np.zeros((sparse_index.size, rows.shape[0]))
-        null[span] = rows.T
+        null = np.zeros((sparse_index.size, block_null.shape[1]))
+        null[span] = block_null
         lifted[block_number] = np.zeros((rows.shape[0], latent_size))
         lifted[block_number][:, start - width:start] = rows
         columns.append(null)
-        owners.extend([block_number] * rows.shape[0])
+        owners.extend([block_number] * block_null.shape[1])
     if len(columns) < 2:
         return None, None
     v = np.hstack(columns)

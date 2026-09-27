@@ -302,3 +302,24 @@ def test_warm_start_changes_iterations_not_the_answer(sparse, monkeypatch):
         return (f[0] - 2 * f[1] + f[2]) / h**2
 
     assert hessian(initial_mode=start) == pytest.approx(hessian(), rel=1e-5)
+
+
+def test_augmented_bym2_confounded_with_rw1_matches_dense(monkeypatch):
+    """BYM2's augmented block pins its null vector g = (sqrt(phi) 1, 1) through a
+    row on the u* half only, so its constraint row is not a null vector; the
+    detector must still see g confounded with the RW1 constant."""
+    from pylgm import BYM2
+
+    import pylgm.effects.bym2 as bym2
+
+    monkeypatch.setattr(bym2, "_BYM2_AUGMENT_NODES", 1)  # augmented on a small graph
+    model = LGM(likelihood=Poisson(), predictor=Fixed("1 + x")
+                + BYM2("b", index="region", graph=RING, precision=2.0, phi=0.5)
+                + RW1("trend", index="t", precision=4.0), **BASE)
+    frame = _frame()
+    dense = model.fit(frame, engine="laplace")
+    assert any(label.endswith("__u") for label in dense.labels)  # really augmented
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = model.fit(frame, engine="laplace")
+    assert sparse._covariance is None
+    _assert_same(sparse, dense)
