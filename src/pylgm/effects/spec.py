@@ -598,10 +598,9 @@ class Grouped(_ComposableEffect):
             )
         if isinstance(self.effect, Replicated):
             raise TypeError(
-                "Grouped cannot wrap a Replicated: R-INLA allows `group` and "
-                "`replicate` on one term, but pyLGM does not, because the "
-                "labels would become 'replicate@group@level' and the predict "
-                "path resolves exactly one pair. Use one or the other."
+                "Grouped cannot wrap a Replicated: R-INLA's `group` + `replicate` "
+                "on one term is I_R (x) Q_S (x) Q_E, replication outermost -- "
+                "write it as Replicated(Grouped(...), over=...)"
             )
         object.__setattr__(self, "over", _non_empty_string(self.over, "over"))
         if not all(
@@ -655,7 +654,9 @@ class Replicated(_ComposableEffect):
     ``R-1`` directions unidentified while still fitting.
 
     Not to be confused with R-INLA's ``group``, which is *correlated* copies
-    with a between-group structure; that is a separate modifier.
+    with a between-group structure; that is ``Grouped``. Both on one term --
+    R-INLA's ``f(idx, model, group=g, replicate=r)`` -- is
+    ``Replicated(Grouped(...), over=r)``.
     """
 
     effect: object
@@ -668,20 +669,15 @@ class Replicated(_ComposableEffect):
                 "is one replicate over their cross product, so combine them into "
                 "a single column"
             )
-        if isinstance(self.effect, Grouped):
-            raise TypeError(
-                "Replicated cannot wrap a Grouped: R-INLA allows `group` and "
-                "`replicate` on one term, but pyLGM does not, because the "
-                "labels would become 'replicate@group@level' and the predict "
-                "path resolves exactly one pair. Use one or the other."
-            )
         # Resolve the index THROUGH a Weighted wrapper rather than giving
         # Weighted an `index` of its own: joint.Shared distinguishes "wrapper,
         # cannot be shared" from "no index at all" by hasattr(effect, "index"),
         # so an index on Weighted turns that guard into dead code. Same unwrap
         # pattern as compiler._build_effect_block and data.spark._required_columns.
         target = self.effect.effect if isinstance(self.effect, Weighted) else self.effect
-        if not hasattr(target, "index"):
+        # Replicated(Grouped(...)) is R-INLA's `group` + `replicate` on one term:
+        # I_R (x) Q_S (x) Q_E, labels replicate@group@level.
+        if not hasattr(target, "index") and not isinstance(self.effect, Grouped):
             raise TypeError(
                 f"Replicated requires an indexed effect, got "
                 f"{type(self.effect).__name__}, which has no index."

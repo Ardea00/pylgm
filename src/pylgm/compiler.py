@@ -2,6 +2,8 @@ import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
@@ -53,6 +55,7 @@ from pylgm.effects.replicate import (
     grouped_block,
     group_levels,
     replicate_levels,
+    one_hot_columns,
     replicated_block,
 )
 from pylgm.effects.ar1 import ar1_structure
@@ -562,6 +565,17 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
             # column not found". Weighting is applied afterwards instead, over
             # the real frame, exactly as the top-level Weighted branch does.
             target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+            replicates = replicate_levels(frame, effect.name, effect.over)
+            if isinstance(target, Grouped):
+                # group + replicate: the grouped block over the real frame is the
+                # replicate's cell universe (group x level); each row's cell is its
+                # one-hot column there.
+                structural, precision = _build_effect_block(target, frame)
+                block = replicated_block(
+                    structural, frame, None, effect.over, replicates,
+                    level_positions=one_hot_columns(structural.design),
+                )
+                return (block, precision)
             index = target.index
             # Keep the column's OWN dtype: stringifying here and then passing the
             # real dtype to _levels_frame is contradictory, and it is exactly the
@@ -569,7 +583,6 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
             # RW1/RW2/Seasonal/AR1. The builder sorts, so order here is irrelevant;
             # only the dtype matters.
             levels = tuple(frame[index].dropna().unique())
-            replicates = replicate_levels(frame, effect.name, effect.over)
             structural, precision = _build_effect_block(
                 target, _levels_frame(index, levels, frame[index].dtype)
             )
@@ -1293,7 +1306,7 @@ def _weighted_family_block(item, weights: np.ndarray):
     return ScalableBlock(scaled, item.parameter, item.scale)
 
 
-def _replicated_family_block(item, frame, effect, replicates, index):
+def _replicated_family_block(item, frame, effect, replicates, index, level_positions=None):
     """Compose one family block into R independent replicates.
 
     A ScalableBlock's precision is a scalar multiple, which commutes with the
@@ -1325,7 +1338,9 @@ def _replicated_family_block(item, frame, effect, replicates, index):
             "because the rebuilt design spans the level set rather than the "
             "replicated row space"
         )
-    composed = replicated_block(item.block, frame, index, effect.over, replicates)
+    composed = replicated_block(
+        item.block, frame, index, effect.over, replicates, level_positions=level_positions
+    )
     count = len(replicates)
     if isinstance(item, ParametricBlock):
         def build(values, inner_build=item.build, count=count):
@@ -1392,12 +1407,25 @@ def _append_family_blocks(
         # unwrapped target over the level frame, then apply the weighting
         # afterwards over the real frame, same as the top-level Weighted branch.
         target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+        replicates = replicate_levels(frame, effect.name, effect.over)
+        if isinstance(target, Grouped):
+            # group + replicate, as in _build_effect_block: the grouped family
+            # blocks over the real frame, replicated on their one-hot cells.
+            first = len(scalable)
+            _append_family_blocks(
+                target, frame, scalable, parameter_names, parameter_bounds, parameter_priors,
+            )
+            for position in range(first, len(scalable)):
+                scalable[position] = _replicated_family_block(
+                    scalable[position], frame, effect, replicates, None,
+                    level_positions=one_hot_columns(scalable[position].block.design),
+                )
+            return
         index = target.index
         # Keep the column's own dtype -- see _build_effect_block's Replicated
         # branch and _levels_frame: an integer index stringified here would be
         # ordered 1, 10, 11, 2 by RW1/RW2/Seasonal/AR1.
         levels = tuple(frame[index].dropna().unique())
-        replicates = replicate_levels(frame, effect.name, effect.over)
         level_frame = _levels_frame(index, levels, frame[index].dtype)
         first = len(scalable)
         _append_family_blocks(
@@ -2098,6 +2126,11 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
         target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
         replicate_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
         level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
+        if isinstance(target, Grouped):
+            # replicate@group@level: the inner entry is the grouped one, built
+            # from the group@level labels the replicate prefix leaves behind.
+            inner = _prediction_entry(target, model, panel, SimpleNamespace(labels=level_labels))
+            return ("replicated_nested", (effect.name, effect.over, replicate_labels, inner))
         entry = (
             "replicated_structured",
             (effect.name, effect.over, target.index, replicate_labels, level_labels),

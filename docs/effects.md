@@ -594,11 +594,18 @@ inner effect itself carries, and the two spans can overlap — unlike
 over=..., structure=...)` and `Weighted(Grouped(effect, over=...,
 structure=...), by=...)` compile to the same block.
 
-**`group` and `replicate` cannot combine on one effect.** R-INLA allows both
-modifiers on a single `f()` term; pyLGM does not — `Grouped(Replicated(...),
-...)`, `Replicated(Grouped(...), ...)`, and wrapping an effect that already
-declares its own `replicate=` all raise `TypeError` at construction. Use one
-or the other, or fold the two columns into a single grouping column.
+**`group` and `replicate` on one effect: `Replicated(Grouped(...), over=r)`.**
+R-INLA's `f(idx, model, group=g, replicate=r)` is `I_R ⊗ Q_S ⊗ Q_E`,
+replication outermost, and pyLGM spells it the same way round:
+
+```python
+Replicated(Grouped(RW1("u", index="t"), over="g", structure=AR1Structure(0.6)), over="r")
+```
+
+Labels are `replicate@group@level`, constraints `I_R ⊗` the grouped block's,
+and `predict()` resolves all three. The reverse nesting, `Grouped(Replicated(...))`,
+and wrapping an effect that already declares its own `replicate=` raise
+`TypeError` at construction.
 
 **The between-group structure's own parameters are fixed, not estimated.**
 `AR1Structure(rho)` takes a plain float; a declared `Hyperparameter` there is

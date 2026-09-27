@@ -441,12 +441,11 @@ control.group=list(model=...))`. `Replicated` is the special case
   group column is silently projected away and the failure moves from loud to
   silent. Pre-existing gap in a helper already blind to `MIDAS`, `SpaceTime`,
   `DynamicSpatialPanel`, and `AR1(replicate=)`'s replicate column.
-- **`group` and `replicate` together are rejected**, which R-INLA permits on
-  one `f()` term. `Grouped(Replicated(...), ...)`, `Replicated(Grouped(...),
-  ...)`, and wrapping an effect that already declares its own `replicate=`
-  all raise `TypeError` at construction. An f() parity gap, recorded rather
-  than half-implemented, since the label scheme (`replicate@group@level`) and
-  the predict path both assume exactly one pairing.
+- **`group` and `replicate` together — supported** as
+  `Replicated(Grouped(...), over=r)` (R-INLA's `f(idx, group=, replicate=)`,
+  `I_R ⊗ Q_S ⊗ Q_E`). Verified exactly: with the replicated term alone and a
+  fixed noise, the fit decomposes into one `Grouped` fit per replicate (log
+  marginal likelihood and predictions to 1e-8, `tests/test_replicated_grouped.py`).
 - **A `Hyperparameter` on a structure's own parameters is not supported.**
   `AR1Structure(rho)` takes a fixed float only; passing a `Hyperparameter`
   raises `TypeError` at construction. Only the *inner* effect's own

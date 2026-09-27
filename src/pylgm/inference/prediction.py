@@ -293,6 +293,36 @@ def _grouped_block(
     )
 
 
+def _replicated_nested_block(entry, new_data: pd.DataFrame) -> np.ndarray:
+    """``Replicated`` around a multi-column inner cell (a ``Grouped``): the inner
+    design rebuilt by its own entry, placed in the row's replicate slot.
+
+    Replicate-major, matching ``replicated_block``: column ``r * W + j`` for
+    inner column ``j`` of width ``W``.
+    """
+    name, over, replicate_labels, inner_entry = entry
+    if over not in new_data.columns:
+        raise ValueError(
+            f"predict() new_data is missing column {over!r} required by the {name!r} block"
+        )
+    position = {label: row for row, label in enumerate(replicate_labels)}
+    keys = new_data[over].map(str)
+    unknown = sorted(set(keys[~keys.isin(position)]))
+    if unknown:
+        raise ValueError(
+            f"predict() cannot score rows whose {name!r} replicate was not in the fitted "
+            f"model: {unknown!r}. To score a new replicate, include those rows at fit "
+            "time with a NaN response instead."
+        )
+    inner = _design_block_for(inner_entry, new_data)
+    width = inner.shape[1]
+    design = np.zeros((len(new_data), len(replicate_labels) * width))
+    slots = keys.map(position).to_numpy()
+    for row in range(len(new_data)):
+        design[row, slots[row] * width:(slots[row] + 1) * width] = inner[row]
+    return design
+
+
 def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     """Rebuild a shared field's design for one outcome: scale_k * incidence.
 
@@ -388,6 +418,8 @@ def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.n
         return _replicated_block(payload, new_data)
     elif kind == "grouped_structured":
         return _grouped_block(payload, new_data)
+    elif kind == "replicated_nested":
+        return _replicated_nested_block(payload, new_data)
     elif kind == "shared":
         return _shared_design_block(payload, new_data)
     elif kind == "weighted":
