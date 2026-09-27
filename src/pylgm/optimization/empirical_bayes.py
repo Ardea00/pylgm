@@ -250,6 +250,10 @@ def optimize_empirical_bayes(
         return evaluation.objective
 
     def fail(message: str) -> None:
+        # Name the root cause in the message: a failure that is the same at every
+        # theta (a dense size limit, say) otherwise reads as a convergence problem.
+        if latest_failure is not None:
+            message = f"{message} (last failure: {type(latest_failure).__name__}: {latest_failure})"
         error = OptimizationError(
             message,
             evaluations=evaluations,

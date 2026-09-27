@@ -551,6 +551,8 @@ def test_all_invalid_failure_preserves_counts_history_and_dense_root_cause(
         )
 
     error = captured.value
+    # the root cause is in the message itself, not only in __cause__
+    assert "DenseReferenceLimitError: dense root cause" in str(error)
     assert error.evaluations == 1
     assert error.cache_hits == 1
     assert error.numerical_failures == (
