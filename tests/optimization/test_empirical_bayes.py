@@ -697,6 +697,65 @@ def test_intermediate_evaluations_skip_predictive_variances(
     assert result.fit.predictive_variance is not None
 
 
+def test_cache_does_not_retain_intermediate_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache must hold at most one live fit besides the one just computed."""
+    refs: list[weakref.ReferenceType] = []
+    real_fit_gaussian = fit_gaussian
+
+    def spy(model: CompiledLGM, **kwargs: object):
+        result = real_fit_gaussian(model, **kwargs)
+        refs.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(empirical_bayes, "fit_gaussian", spy)
+
+    family = scalar_conjugate_family(y=2.0)
+    result = optimize_empirical_bayes(
+        family,
+        {"latent.precision": OptimizationBounds(initial=1.0, lower=0.05, upper=10.0)},
+    )
+
+    gc.collect()
+    assert len(refs) >= 2
+    # All but the last recorded result were produced during the search; at most
+    # one of those may still be alive (the single-slot `latest_fit`).
+    assert sum(r() is not None for r in refs[:-1]) <= 1
+    assert result.fit.log_marginal_likelihood == refs[-1]().log_marginal_likelihood
+
+
+def test_final_fit_refit_when_last_evaluation_is_not_the_optimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    family = scalar_conjugate_family(y=2.0)
+
+    def custom_fit(model: CompiledLGM) -> GaussianResult:
+        # No `predictive_variances` parameter -> the no-skip refit branch runs.
+        return fit_gaussian(model)
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        **_: object,
+    ) -> OptimizeResult:
+        objective(start)
+        objective(start + 0.5)
+        return OptimizeResult(x=start, fun=objective(start), success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    result = optimize_empirical_bayes(
+        family,
+        {"latent.precision": OptimizationBounds(initial=1.0, lower=0.05, upper=10.0)},
+        fit=custom_fit,
+    )
+
+    expected = fit_gaussian(family.materialize(result.parameters))
+    assert result.fit.log_marginal_likelihood == pytest.approx(
+        expected.log_marginal_likelihood
+    )
+    assert result.diagnostics.evaluations == 2
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -976,8 +1035,16 @@ def test_line_search_stall_at_the_optimum_is_accepted(monkeypatch) -> None:
 
     family = _ScalarFamily("tau", 1.5)
     bounds = {"tau": OptimizationBounds(1.0, 0.1, 10.0)}
+    # Disable the plateau stop: this test forces a *simulated* line-search
+    # stall on every call to `minimize`, but with central differences the real
+    # solve underneath also converges tightly enough to trip the plateau
+    # window first, which would mask the line-search-stall path this test
+    # exercises.
     result = optimize_empirical_bayes(
-        family, bounds, fit=lambda model, **kwargs: _QuadraticFit(model, 1.5)
+        family,
+        bounds,
+        fit=lambda model, **kwargs: _QuadraticFit(model, 1.5),
+        objective_tolerance=0.0,
     )
     assert result.diagnostics.converged
     assert any("line search stalled" in note for note in result.diagnostics.numerical_failures)
@@ -1000,9 +1067,15 @@ def test_line_search_stall_at_an_unusable_point_still_fails(monkeypatch) -> None
 
     family = _ScalarFamily("tau", 1.5)
     bounds = {"tau": OptimizationBounds(1.0, 0.1, 10.0)}
+    # Disable the plateau stop for the same reason as the test above -- the
+    # simulated line-search stall must be what's under test here, not a
+    # plateau stop reached first by the real central-difference solve.
     with pytest.raises(OptimizationError, match="did not converge"):
         optimize_empirical_bayes(
-            family, bounds, fit=lambda model, **kwargs: _QuadraticFit(model, 1.5)
+            family,
+            bounds,
+            fit=lambda model, **kwargs: _QuadraticFit(model, 1.5),
+            objective_tolerance=0.0,
         )
 
 
@@ -1042,7 +1115,12 @@ def test_finite_difference_step_survives_ill_conditioned_noise_floor(monkeypatch
     real_minimize = scipy.optimize.minimize
 
     def default_step_minimize(fun, x0, **kwargs):
+        # Reproduce the OLD noise-blind forward-difference default: drop the
+        # central-difference jac/callback the search now installs, along with
+        # the step override.
         kwargs["options"] = {"ftol": 1e-12, "gtol": 1e-10}
+        kwargs.pop("jac", None)
+        kwargs.pop("callback", None)
         return real_minimize(fun, x0, **kwargs)
 
     monkeypatch.setattr(scipy.optimize, "minimize", default_step_minimize)
@@ -1050,3 +1128,242 @@ def test_finite_difference_step_survives_ill_conditioned_noise_floor(monkeypatch
         fam, bounds, fit=lambda m, **k: _NoisyQuadraticFit(m, target)
     )
     assert abs(stuck.parameters[name] - target) > 0.1
+
+
+def test_minimize_uses_central_differences_and_plateau_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        *,
+        jac=None,
+        options=None,
+        callback=None,
+        **_: object,
+    ) -> OptimizeResult:
+        captured.update(jac=jac, options=options, callback=callback)
+        value = objective(start)
+        return OptimizeResult(x=start, fun=value, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    target = 1.5
+    optimize_empirical_bayes(
+        _ScalarFamily("tau", target),
+        {"tau": OptimizationBounds(initial=1.0, lower=0.1, upper=10.0)},
+        fit=lambda model, **kwargs: _QuadraticFit(model, target),
+    )
+
+    assert callable(captured["jac"])
+    assert "eps" not in captured["options"]
+    assert "finite_diff_rel_step" not in captured["options"]
+    assert callable(captured["callback"])
+
+    # `jac` must give the analytic gradient (through the log-space
+    # parameterization and the `_transform_objective` compression) of a known
+    # quadratic to high precision, at an interior point.
+    start_point = np.array([0.0])  # log(1.0)
+    raw = (1.0 - target) ** 2
+    d_raw = 2.0 * (1.0 - target) * 1.0  # d(raw_objective)/d(log_tau) at tau=1
+    expected = d_raw / (1.0 + raw)  # chain rule through log1p (raw >= 0)
+    gradient_value = captured["jac"](start_point)
+    assert gradient_value[0] == pytest.approx(expected, abs=1e-6)
+
+
+def test_gradient_is_one_sided_and_finite_at_a_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_minimize(
+        objective: Callable[[np.ndarray], float],
+        start: np.ndarray,
+        *,
+        bounds: list[tuple[float, float]],
+        jac=None,
+        **_: object,
+    ) -> OptimizeResult:
+        captured.update(jac=jac, bounds=bounds)
+        value = objective(start)
+        return OptimizeResult(x=start, fun=value, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+
+    target = 1.5
+    optimize_empirical_bayes(
+        _ScalarFamily("tau", target),
+        {"tau": OptimizationBounds(initial=1.0, lower=0.1, upper=10.0)},
+        fit=lambda model, **kwargs: _QuadraticFit(model, target),
+    )
+
+    upper_log = captured["bounds"][0][1]
+    tau_at_upper = float(np.exp(upper_log))
+    raw = (tau_at_upper - target) ** 2
+    d_raw = 2.0 * (tau_at_upper - target) * tau_at_upper
+    expected = d_raw / (1.0 + raw)
+
+    gradient_value = captured["jac"](np.array([upper_log]))
+    assert np.isfinite(gradient_value[0])
+    assert gradient_value[0] == pytest.approx(expected, abs=1e-3)
+
+
+_PLATEAU_TEST_SPACING = 1e-3  # well under _PLATEAU_STEP_TOLERANCE (1e-2)
+
+
+def _plateau_creep_fit_factory(
+    start_value: float,
+    step: float,
+    offset: float = 0.0,
+    spacing: float = _PLATEAU_TEST_SPACING,
+):
+    class _CreepFit:
+        def __init__(self, value: float) -> None:
+            self.log_marginal_likelihood = offset + step * round(
+                (np.log(value) - np.log(start_value)) / spacing
+            )
+
+    return _CreepFit
+
+
+def _plateau_creep_fake_minimize(
+    objective, start, *, callback=None, spacing: float = _PLATEAU_TEST_SPACING, **_kwargs
+):
+    point = start
+    value = objective(point)
+    try:
+        for k in range(1, 21):
+            point = start + spacing * k
+            value = objective(point)
+            if callback is not None:
+                callback(intermediate_result=OptimizeResult(x=point, fun=value))
+    except StopIteration:
+        return OptimizeResult(
+            x=point,
+            fun=value,
+            success=False,
+            status=2,
+            message="STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        )
+    return OptimizeResult(x=point, fun=value, success=True, message="ok")
+
+
+def test_plateau_stops_a_noise_floor_creep(monkeypatch: pytest.MonkeyPatch) -> None:
+    name = "v"
+    start_value = 1.0
+    step = 1e-6
+    creep_fit = _plateau_creep_fit_factory(start_value, step)
+    fam = _ScalarFamily(name, start_value)
+    bounds = {name: OptimizationBounds(start_value, 1e-3, 1e6)}
+
+    monkeypatch.setattr(
+        empirical_bayes.scipy.optimize, "minimize", _plateau_creep_fake_minimize
+    )
+    result = optimize_empirical_bayes(fam, bounds, fit=lambda m, **k: creep_fit(m))
+
+    assert result.diagnostics.converged
+    assert not any(
+        "line search stalled" in note for note in result.diagnostics.numerical_failures
+    )
+    expected_point_4 = start_value * np.exp(_PLATEAU_TEST_SPACING * 4)
+    assert result.parameters[name] == pytest.approx(expected_point_4)
+
+    monkeypatch.setattr(
+        empirical_bayes.scipy.optimize, "minimize", _plateau_creep_fake_minimize
+    )
+    full_result = optimize_empirical_bayes(
+        fam, bounds, fit=lambda m, **k: creep_fit(m), objective_tolerance=0.0
+    )
+    expected_point_20 = start_value * np.exp(_PLATEAU_TEST_SPACING * 20)
+    assert full_result.parameters[name] == pytest.approx(expected_point_20)
+
+
+def test_plateau_stop_scales_with_the_objective_magnitude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A large constant offset in the LML (|raw_objective| ~ 1e3) widens the
+    # plateau threshold to objective_tolerance * 1e3 ~= 1e-2, so a 1e-3 per-step
+    # creep -- which never stops in test_plateau_does_not_stop_while_improving,
+    # where |raw_objective| ~ 0 -- now stops at k == 4 (3e-3 < 1e-2).
+    name = "v"
+    start_value = 1.0
+    step = 1e-3
+    creep_fit = _plateau_creep_fit_factory(start_value, step, offset=1e3)
+    fam = _ScalarFamily(name, start_value)
+    bounds = {name: OptimizationBounds(start_value, 1e-3, 1e6)}
+
+    monkeypatch.setattr(
+        empirical_bayes.scipy.optimize, "minimize", _plateau_creep_fake_minimize
+    )
+    result = optimize_empirical_bayes(fam, bounds, fit=lambda m, **k: creep_fit(m))
+
+    assert result.diagnostics.converged
+    expected_point_4 = start_value * np.exp(_PLATEAU_TEST_SPACING * 4)
+    assert result.parameters[name] == pytest.approx(expected_point_4)
+
+
+def test_plateau_does_not_stop_while_improving(monkeypatch: pytest.MonkeyPatch) -> None:
+    name = "v"
+    start_value = 1.0
+    step = 1e-3
+    creep_fit = _plateau_creep_fit_factory(start_value, step)
+    fam = _ScalarFamily(name, start_value)
+    bounds = {name: OptimizationBounds(start_value, 1e-3, 1e6)}
+
+    monkeypatch.setattr(
+        empirical_bayes.scipy.optimize, "minimize", _plateau_creep_fake_minimize
+    )
+    result = optimize_empirical_bayes(fam, bounds, fit=lambda m, **k: creep_fit(m))
+
+    expected_point_20 = start_value * np.exp(_PLATEAU_TEST_SPACING * 20)
+    assert result.parameters[name] == pytest.approx(expected_point_20)
+    assert result.diagnostics.converged
+
+
+def test_plateau_requires_a_stationary_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Small objective improvements (well under the tolerance) but points that
+    # keep moving 0.1 apart (far above _PLATEAU_STEP_TOLERANCE) must never
+    # trigger the plateau stop: an objective that is flat while the point
+    # still creeps is not a plateau.
+    name = "v"
+    start_value = 1.0
+    step = 1e-6
+    creep_fit = _plateau_creep_fit_factory(start_value, step, spacing=0.1)
+    fam = _ScalarFamily(name, start_value)
+    bounds = {name: OptimizationBounds(start_value, 1e-3, 1e6)}
+
+    monkeypatch.setattr(
+        empirical_bayes.scipy.optimize,
+        "minimize",
+        lambda *a, **kw: _plateau_creep_fake_minimize(*a, spacing=0.1, **kw),
+    )
+    result = optimize_empirical_bayes(fam, bounds, fit=lambda m, **k: creep_fit(m))
+
+    expected_point_20 = start_value * np.exp(0.1 * 20)
+    assert result.parameters[name] == pytest.approx(expected_point_20)
+    assert result.diagnostics.converged
+
+
+def test_invalid_stopping_options_raise() -> None:
+    family = zero_latent_family(np.array([1.0]))
+    bounds = {"sigma": OptimizationBounds(initial=1.0, lower=0.1, upper=10.0)}
+    for bad_tolerance in (-1.0, float("nan"), True):
+        with pytest.raises(ValueError, match="objective_tolerance"):
+            optimize_empirical_bayes(family, bounds, objective_tolerance=bad_tolerance)
+    for bad_stall in (0, 1.5, True):
+        with pytest.raises(ValueError, match="stall_iterations"):
+            optimize_empirical_bayes(family, bounds, stall_iterations=bad_stall)
+
+
+def test_real_scipy_plateau_stop_is_converged() -> None:
+    fam = _ScalarFamily("tau", 1.7)
+    result = optimize_empirical_bayes(
+        fam,
+        {"tau": OptimizationBounds(1.0, 0.1, 10.0)},
+        fit=lambda m, **k: _NoisyQuadraticFit(m, 1.7),
+        objective_tolerance=1e-5,
+    )
+    assert result.diagnostics.converged
+    assert result.parameters["tau"] == pytest.approx(1.7, abs=5e-2)

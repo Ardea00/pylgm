@@ -457,6 +457,39 @@ def _bym2_augmented_logdet(rows: np.ndarray, precision) -> float | None:
     return logdet_star + np.log((c @ g) ** 2) - np.log(g @ g) - np.log(c @ c)
 
 
+def _full_rank_reduced_logdet(rows: np.ndarray, q_b, name: str) -> float | None:
+    """``logdet(basis^T Q_b basis)`` for a full-row-rank block, via the SPD
+    identity ``logdet(B^T Q B) = logdet(Q) + logdet(A Q^-1 A^T) - logdet(A A^T)``
+    (the same identity the posterior path uses, see the comment near
+    ``logdet_cap - logdet_gram``). Returns ``None`` when ``Q_b`` is not SPD
+    (intrinsic blocks) or the QR factors are not usable; the caller then falls
+    back to the dense reduction. QR rather than Cholesky of the Gram products,
+    which would square the condition number.
+    """
+    try:
+        factor = SparseSpdFactor(q_b.tocsr(), f"prior [{name}]")
+    except NumericalError:
+        return None
+    rows_t = np.asarray(rows, dtype=float).T          # n x k
+    g = factor.half_solve(rows_t)                      # G, G^T G = A Q^-1 A^T
+    r = np.linalg.qr(g, mode="r")
+    gram_r = np.linalg.qr(rows_t, mode="r")             # R^T R = A A^T
+    diag_r = np.diag(r)
+    diag_gram_r = np.diag(gram_r)
+    if (
+        not np.all(np.isfinite(diag_r))
+        or not np.all(np.isfinite(diag_gram_r))
+        or np.any(np.abs(diag_r) <= 1e-12 * np.max(np.abs(diag_r)))
+        or np.any(np.abs(diag_gram_r) <= 1e-12 * np.max(np.abs(diag_gram_r)))
+    ):
+        return None
+    return (
+        factor.logdet
+        + 2.0 * float(np.sum(np.log(np.abs(diag_r))))
+        - 2.0 * float(np.sum(np.log(np.abs(diag_gram_r))))
+    )
+
+
 def _prior_logdet(
     model: CompiledLGM, constraints: np.ndarray, spans: list[tuple[int, int, np.ndarray]]
 ) -> float:
@@ -468,10 +501,14 @@ def _prior_logdet(
     For the dominant case -- a connected intrinsic field (Besag, RW1, ...) pinned
     by a single unweighted sum-to-zero row -- that reduced logdet equals the
     pseudo-determinant, computed sparsely in near-linear time via the
-    matrix-tree cofactor identity (``_is_connected_intrinsic``). Everything else
-    (RW2, weighted or multi-row extra-constraints) keeps the dense reduction as
-    a fallback. A block with no confined rows is full rank -- its sparse logdet
-    is used directly.
+    matrix-tree cofactor identity (``_is_connected_intrinsic``). A full-rank
+    block (e.g. a replicated AR1 field pinned by a per-time centring row set)
+    instead reduces via the SPD identity (``_full_rank_reduced_logdet``), sparse
+    and near-linear via ``SparseSpdFactor`` + ``half_solve``. The dense
+    ``null_space`` reduction is the fallback for the remaining
+    rank-deficient blocks that are neither connected-intrinsic nor BYM2 (RW2,
+    weighted or multi-row extra-constraints). A block with no confined rows is
+    full rank -- its sparse logdet is used directly.
     """
     a = np.asarray(constraints, dtype=float)
     total = 0.0
@@ -492,16 +529,21 @@ def _prior_logdet(
                 if bym2_logdet is not None:
                     logdet = bym2_logdet
                 else:
-                    # ponytail: dense reduction, O(n^3), for the residual cases only
-                    # (RW2, weighted or multi-row extra-constraints) whose blocks are
-                    # small in practice. A large field carrying an extra label
-                    # constraint would hit this ceiling; generalize via the k-index
-                    # cofactor (det*(Q) det(N_S^T N_S)/det(N^T N)) if that ever bites.
-                    basis_b = null_space(rows)
-                    reduced = basis_b.T @ q_b.toarray() @ basis_b
-                    _, logdet = _factor_positive_definite(
-                        reduced, f"reduced prior [{block.name}]"
-                    )
+                    full_rank_logdet = _full_rank_reduced_logdet(rows, q_b, block.name)
+                    if full_rank_logdet is not None:
+                        logdet = full_rank_logdet
+                    else:
+                        # ponytail: dense reduction, O(n^3), for the residual
+                        # rank-deficient cases only (RW2, weighted or multi-row
+                        # extra-constraints) whose blocks are small in practice. A
+                        # large field carrying an extra label constraint would hit
+                        # this ceiling; generalize via the k-index cofactor
+                        # (det*(Q) det(N_S^T N_S)/det(N^T N)) if that ever bites.
+                        basis_b = null_space(rows)
+                        reduced = basis_b.T @ q_b.toarray() @ basis_b
+                        _, logdet = _factor_positive_definite(
+                            reduced, f"reduced prior [{block.name}]"
+                        )
         else:
             logdet = SparseSpdFactor(q_b.tocsr(), f"prior [{block.name}]").logdet
         total += logdet

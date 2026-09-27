@@ -1,3 +1,4 @@
+import functools
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from pylgm.config import RunConfig
 from pylgm.config.schema import DataConfig, EffectConfig, ModelConfig, build_effect
 from pylgm.data import CanonicalPanel
 from pylgm.data.scalars import ordered_observed_levels
+from pylgm.effects.fixed import _DIFFUSE_PRECISION
 from pylgm.effects import (
     AR1,
     Besag,
@@ -613,7 +615,13 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
                 block = _scaled_design_block(block, _weight_vector(frame, inner_spec))
             return (block, precision)
         elif isinstance(effect, Fixed):
-            block = build_fixed(frame, effect.formula, effect.prior_precision)
+            if isinstance(effect.prior_precision, Hyperparameter):
+                block = build_fixed(
+                    frame, effect.formula, effect.prior_precision.initial,
+                    exempt_intercept=True,
+                )
+            else:
+                block = build_fixed(frame, effect.formula, effect.prior_precision)
             precision = None
         elif isinstance(effect, IID):
             precision = _resolved_precision(effect.precision)
@@ -1003,6 +1011,8 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         return _effect_hyperparameters(effect.effect)
     if isinstance(effect, Copy):
         return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
+    if isinstance(effect, Fixed):
+        return [effect.prior_precision] if isinstance(effect.prior_precision, Hyperparameter) else []
     found: list[Hyperparameter] = []
     precision = getattr(effect, "precision", None)
     if isinstance(precision, Hyperparameter):
@@ -1479,6 +1489,28 @@ def _append_family_blocks(
             scalable[position] = _weighted_family_block(scalable[position], weights)
         return
     if isinstance(effect, Fixed):
+        if isinstance(effect.prior_precision, Hyperparameter):
+            hp = effect.prior_precision
+            template = _compiled_block(
+                effect.name, functools.partial(build_fixed, exempt_intercept=True),
+                frame, effect.formula, hp.initial,
+            )
+            is_intercept = np.array(
+                [label == "Intercept" for label in template.labels]
+            )
+
+            def build(values, is_intercept=is_intercept, hp_name=hp.name):
+                return diags(
+                    np.where(is_intercept, _DIFFUSE_PRECISION, values[hp_name]),
+                    format="csr",
+                )
+
+            scalable.append(ParametricBlock(template, (hp.name,), build))
+            parameter_names.append(hp.name)
+            parameter_bounds[hp.name] = _log_bounds(hp)
+            if hp.prior is not None:
+                parameter_priors[hp.name] = hp.prior
+            return
         block = _compiled_block(
             effect.name, build_fixed, frame, effect.formula, effect.prior_precision
         )
