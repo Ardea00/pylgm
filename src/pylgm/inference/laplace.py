@@ -2,7 +2,7 @@ import numpy as np
 from scipy.linalg import cho_solve, solve_triangular
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import InferenceConvergenceError, NumericalError, UnsupportedEngineError
+from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference import gaussian as _gaussian
 from pylgm.inference.gaussian import (
     _block_slices,
@@ -484,15 +484,11 @@ def _fit_laplace_sparse(
 
     mean = solve.mean
     if mean_correction:
-        if model.data_constraint_count:
-            # ponytail: the dense engine shifts before conditioning on data rows,
-            # using the structural-only covariance, which SparsePosterior does not
-            # expose. Add a structural-only covariance_apply if this is needed.
-            raise UnsupportedEngineError(
-                "mean_correction with data constraints is not available above the "
-                "sparse guard; use mean_correction=False"
-            )
-        eta_variance = posterior.predictive_variances(design)
+        # The dense engine shifts the mode with the structural-only posterior and
+        # then conditions on the data rows; by linearity that is the conditioned
+        # mean plus Sigma_all A^T (sigma_eta^2 g3 / 2), with sigma_eta^2 taken
+        # before the data rows (structural_only).
+        eta_variance = posterior.predictive_variances(design, structural_only=True)
         third = np.asarray(lk_obs.third_derivative(eta, y_obs), dtype=float)
         mean = mean + posterior.covariance_apply(design.T @ (0.5 * eta_variance * third))
 

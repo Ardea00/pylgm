@@ -171,6 +171,7 @@ class SparsePosterior:
     w_constraint: "np.ndarray | None"  # Sigma A_c^T  (latent x c), kriging basis
     cap_factor: object | None          # cho_factor of A_c Sigma A_c^T
     constraint_rows: "np.ndarray | None" = None  # A_c (c x latent), for sampling
+    structural_count: "int | None" = None  # leading rows of A_c that are structural
 
     def sample_deviations(self, n: int, rng: np.random.Generator) -> np.ndarray:
         """``n`` draws of ``x - mean`` from the constrained posterior, ``(n, latent)``.
@@ -279,7 +280,7 @@ class SparsePosterior:
             diag = diag - np.einsum("ij,ji->i", w, cw)
         return np.clip(diag, 0.0, None)
 
-    def predictive_variances(self, design) -> np.ndarray:
+    def predictive_variances(self, design, *, structural_only: bool = False) -> np.ndarray:
         """diag(design Σ_c designᵀ) — one variance per row of ``design``.
 
         With ``a = (a_s, a_d)`` split over sparse/dense columns and ``u = Wᵀ a_s``,
@@ -330,8 +331,14 @@ class SparsePosterior:
             a_d = design[:, d].toarray()
             var += np.einsum("ij,ji->i", a_d, cho_solve(self.d_factor, a_d.T))
         if self.w_constraint is not None:
-            mw = np.asarray(design @ self.w_constraint)             # n_rows x c
-            cw = cho_solve(self.cap_factor, mw.T)                   # c x n_rows
+            # structural_only: condition on the structural rows alone, not the
+            # trailing data rows. R is block upper triangular over [structural |
+            # data], so its leading block factors the structural capacitance.
+            count = self.structural_count if structural_only else None
+            w = self.w_constraint[:, :count]
+            factor = (self.cap_factor[0][:count, :count], self.cap_factor[1])
+            mw = np.asarray(design @ w)                             # n_rows x c
+            cw = cho_solve(factor, mw.T)                            # c x n_rows
             var = var - np.einsum("ij,ji->i", mw, cw)
         return np.clip(var, 0.0, None)
 
@@ -945,6 +952,7 @@ def _sparse_solve(
         w_constraint=w_constraint,
         cap_factor=cap_factor_ref,
         constraint_rows=a if constraint_count else None,
+        structural_count=structural_count,
     )
     return _SparseSolve(
         posterior=posterior, unconstrained=unconstrained, structural_mean=structural_mean,

@@ -252,8 +252,9 @@ def test_joint_with_a_shared_field_and_a_data_constraint(monkeypatch):
     np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
 
 
-def test_mean_correction_with_data_constraints_is_refused_on_the_sparse_path(monkeypatch):
-    from pylgm.exceptions import UnsupportedEngineError
+def test_mean_correction_with_data_constraints_matches_dense(monkeypatch):
+    """The shift uses the eta variances *before* conditioning on the data rows
+    (the dense engine shifts, then conditions); used to be refused above the guard."""
     from pylgm.joint import Joint
     from pylgm.observations import LinearConstraint
 
@@ -261,13 +262,18 @@ def test_mean_correction_with_data_constraints_is_refused_on_the_sparse_path(mon
     frame["level"] = np.log1p(frame["count"].fillna(2.0))
     joint = Joint([
         LGM(response="level", likelihood=Gaussian(0.5), predictor=FIELD, panel=("region",), time="t"),
-        LGM(response="count", likelihood=Poisson(), offset="logE", predictor=Fixed("1"),
+        LGM(response="count", likelihood=Poisson(), offset="logE", predictor=Fixed("1 + x"),
             panel=("region",), time="t"),
     ])
-    constraint = LinearConstraint(np.eye(1, len(frame)), [1.0])
-    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
-    with pytest.raises(UnsupportedEngineError, match="mean_correction"):
-        joint.fit(frame, constraints={"level": [constraint]}, mean_correction=True)
+    operator = np.zeros((1, len(frame)))
+    operator[0, :REGIONS] = 1.0 / REGIONS
+    constraint = LinearConstraint(operator, [1.0])
+    sparse, dense = _dense_and_sparse(
+        lambda: joint.fit(frame, constraints={"level": [constraint]}, mean_correction=True),
+        monkeypatch,
+    )
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_mean, dense.predictive_mean, atol=1e-7)
 
 
 @pytest.mark.parametrize("sparse", [False, True])
