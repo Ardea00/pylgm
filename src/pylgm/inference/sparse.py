@@ -7,7 +7,7 @@ from scipy.linalg import cho_solve, null_space, solve_triangular
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve_triangular, splu
 
-from pylgm.exceptions import NumericalError
+from pylgm.exceptions import NumericalError, UnsupportedEngineError
 from pylgm.inference.gaussian import _block_slices, _factor_positive_definite
 from pylgm.ir.model import CompiledLGM
 
@@ -602,7 +602,51 @@ class _SparseSolve:
     dense_dimension: int
 
 
-def _sparse_solve(model: CompiledLGM, weights: np.ndarray, score: np.ndarray) -> _SparseSolve:
+def _require_identified_field(model: CompiledLGM, sparse_index, z_s, weights) -> None:
+    """Raise when ``A_ss = Q_ss + Z_s^T W Z_s`` is singular by construction.
+
+    A block whose constraint rows span its prior null space (Besag, RW1/RW2,
+    SpaceTime, Grouped, Replicated) leaves ``A_ss`` singular exactly when some
+    combination ``v`` of those null vectors is invisible to the data,
+    ``W^1/2 Z_s v = 0`` -- two intrinsic effects whose constants are confounded
+    (Besag + RW1). Whether SuperLU then reports it depends on the sign of a
+    round-off pivot, so check the structure instead. The constrained problem is
+    still well posed (the dense engine reduces onto null(C) first); the sparse
+    path needs a grounded KKT solve for it, not yet built.
+    """
+    position = np.full(model.precision.shape[0], -1)
+    position[sparse_index] = np.arange(sparse_index.size)
+    columns, names, start = [], [], 0
+    for block in model.blocks:
+        width = block.design.shape[1]
+        rows = np.asarray(block.constraints, dtype=float)
+        span = position[start:start + width]
+        start += width
+        if not rows.shape[0] or span[0] < 0:
+            continue
+        # Only rows that are the prior's null vectors (see docstring); a BYM2
+        # augmented block's constraint is not, and is left to the backstop.
+        if np.abs(block.precision @ rows.T).max() > 1e-8 * max(1.0, abs(block.precision).max()):
+            continue
+        null = np.zeros((sparse_index.size, rows.shape[0]))
+        null[span] = rows.T
+        columns.append(null)
+        names.append(block.name)
+    if len(columns) < 2:
+        return
+    seen = np.asarray(z_s @ np.hstack(columns)) * np.sqrt(np.clip(weights, 0.0, None))[:, None]
+    singular = np.linalg.svd(seen, compute_uv=False)
+    if singular.size and singular.min() <= 1e-9 * max(singular.max(), 1.0):
+        raise UnsupportedEngineError(
+            f"intrinsic effects {names} have confounded null spaces (e.g. a Besag and "
+            "an RW1 constant): the sparse solver cannot fit this model yet. Fit it with "
+            "allow_large_dense=True, or make one of the effects proper"
+        )
+
+
+def _sparse_solve(
+    model: CompiledLGM, weights: np.ndarray, score: np.ndarray, *, final: bool = True
+) -> _SparseSolve:
     """Partitioned Schur solve of ``H = Q + Z^T W Z`` (``Z`` the observed design,
     ``W = diag(weights)``) against a full-length ``score``.
 
@@ -612,6 +656,10 @@ def _sparse_solve(model: CompiledLGM, weights: np.ndarray, score: np.ndarray) ->
     ``D`` and ``S`` (m x m), never the field. The same solve is exposed as
     ``apply_inverse`` and reused for the conditioning-by-kriging correction
     when ``model.constraints`` is nonempty (Rue & Held 2005 sec 2.3.3).
+
+    ``final=False`` skips the terms that do not depend on the weights or score
+    (``logdet_prior``, ``nu``: NaN / zero), for Newton steps that only need
+    ``structural_mean``.
 
     ponytail: assumes ``Q_sd == 0`` (block-diagonal prior + block-granular
     partition), so ``B = Z_s^T W Z_d``. True for every LGM this path handles;
@@ -635,6 +683,7 @@ def _sparse_solve(model: CompiledLGM, weights: np.ndarray, score: np.ndarray) ->
     a_ss_matrix = None
 
     if n_s:
+        _require_identified_field(model, sparse_index, z_s, weights)
         q_ss = q[sparse_index][:, sparse_index]
         a_ss_matrix = (q_ss + z_s.T @ wz_s).tocsr()
         a_s = SparseSpdFactor(a_ss_matrix, "sparse posterior precision")
@@ -689,7 +738,7 @@ def _sparse_solve(model: CompiledLGM, weights: np.ndarray, score: np.ndarray) ->
     structural_count = constraint_count - model.data_constraint_count
     structural = model.constraints[:structural_count]
     spans = _block_column_confinement(model, structural)
-    logdet_prior = _prior_logdet(model, structural, spans)
+    logdet_prior = _prior_logdet(model, structural, spans) if final else float("nan")
 
     w_constraint = None
     cap_factor_ref = None
@@ -726,12 +775,21 @@ def _sparse_solve(model: CompiledLGM, weights: np.ndarray, score: np.ndarray) ->
             structural_mean = _kriged(
                 unconstrained, w[:, :structural_count], (r_structural, False), rows_s, e_s
             )
+            # Backstop for a singular H the structural check cannot see: its
+            # garbage null-space component makes kriging stall off the constraints.
+            gap = np.abs(rows_s @ structural_mean - e_s).max()
+            scale = max(1.0, np.abs(e_s).max(), np.abs(structural_mean).max())
+            if gap > 1e-6 * scale:
+                raise NumericalError(
+                    "sparse posterior precision is singular: the constrained solve "
+                    f"misses its constraints by {gap:.2e}"
+                )
             # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
             # ponytail: when e is nonzero AND a connected-intrinsic sum-to-zero row
             # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
             # augmented factor densifies. Correct, but defeats sparsity: nonzero-rhs
             # extra-constraints do not scale on this path.
-            if np.any(e_s):
+            if final and np.any(e_s):
                 a_sp = csr_matrix(rows_s)
                 aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
                 w_aug = aug.solve(rows_s.T)
