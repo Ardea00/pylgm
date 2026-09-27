@@ -17,7 +17,7 @@ from formulaic import Formula
 
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
-from pylgm.effects import Fixed, Weighted
+from pylgm.effects import Fixed
 from pylgm.exceptions import DataContractError
 
 
@@ -46,18 +46,32 @@ def _validate_max_driver_rows(max_driver_rows: int | None) -> int | None:
     return max_driver_rows
 
 
+# Every attribute an effect or likelihood uses to name a data column. Wrappers
+# (Weighted, Replicated, Grouped) nest the wrapped effect under ``.effect``.
+_COLUMN_FIELDS = ("index", "unit", "space", "time", "over", "by", "replicate", "group",
+                  "trials", "event", "entry")
+
+
+def _declared_columns(item) -> set[str]:
+    columns = {getattr(item, field, None) for field in _COLUMN_FIELDS}
+    columns.update(getattr(item, "columns", None) or ())
+    columns = {column for column in columns if isinstance(column, str)}
+    for nested in (getattr(item, "effect", None), getattr(item, "base", None)):
+        if nested is not None:
+            columns |= _declared_columns(nested)
+    return columns
+
+
 def _required_columns(model) -> set[str]:
     required = {model.response, *model.panel, model.time}
     if model.offset is not None:
         required.add(model.offset)
+    required |= _declared_columns(model.likelihood)
     for effect in model.predictor.effects:
         if isinstance(effect, Fixed):
             required.update(Formula(effect.formula).required_variables)
-            continue
-        if isinstance(effect, Weighted):
-            required.add(effect.by)
-            effect = effect.effect
-        required.add(effect.index)
+        else:
+            required |= _declared_columns(effect)
     return required
 
 
