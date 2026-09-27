@@ -14,12 +14,12 @@ def _sorbye_sparse_diag(structure) -> np.ndarray:
     field would need per-component reduction instead (handled upstream by
     Besag, which still routes dense per-component blocks here).
     """
-    from pylgm.inference.sparse import SparseSpdFactor, selected_inverse_diagonal
+    from pylgm.inference.sparse import SparseSpdFactor, selected_inverse
 
     q = structure.tocsc()
     n = q.shape[0]
     q_r = q[1:, 1:].tocsc()  # delete node 0 -> SPD
-    diag_k = selected_inverse_diagonal(q_r)  # diag(K), size n-1
+    diag_k = selected_inverse(q_r).diagonal()  # diag(K), size n-1
     s = SparseSpdFactor(q_r.tocsr(), "sorbye reduced").solve(np.ones(n - 1))
     t = float(s.sum())
     diag = np.empty(n)

@@ -10,12 +10,7 @@ from scipy.special import gammaln, erf, gammaincc, gammainc, betainc, digamma, p
 from pylgm.links import IdentityLink, LogLink, LogitLink
 from pylgm.exceptions import DataContractError, ModelValidationError
 from pylgm.parameters import Hyperparameter
-
-
-def _positive_real(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite positive real value")
-    return float(value)
+from pylgm._checks import positive_real as _positive_real
 
 
 def _resolve_phi(phi: object, values: Mapping[str, float]) -> float:

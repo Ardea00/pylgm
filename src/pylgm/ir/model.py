@@ -5,12 +5,7 @@ from scipy.sparse import block_diag, csr_matrix, hstack
 
 from pylgm.exceptions import ModelValidationError
 from pylgm.likelihoods import CompiledGaussian
-
-
-def _readonly_array(value: np.ndarray) -> np.ndarray:
-    result = np.array(value, copy=True)
-    result.setflags(write=False)
-    return result
+from pylgm._checks import readonly_array as _readonly_array
 
 
 def _readonly_csr_matrix(value: csr_matrix) -> csr_matrix:

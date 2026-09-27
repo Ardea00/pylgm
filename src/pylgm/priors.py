@@ -5,17 +5,12 @@ import math
 
 import numpy as np
 from scipy.optimize import brentq
+from pylgm._checks import finite_real as _finite_real
 
 
 _LOG_FLOAT_MAX = math.log(float.fromhex("0x1.fffffffffffffp+1023"))
 _LOG_TWO = math.log(2.0)
 _LOG_TWO_PI = math.log(2.0 * math.pi)
-
-
-def _finite_real(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite real value")
-    return float(value)
 
 
 def _positive_real(value: object, name: str) -> float:

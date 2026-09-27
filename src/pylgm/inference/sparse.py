@@ -565,11 +565,6 @@ def _coupled_prior_logdet(model: CompiledLGM, constraints: np.ndarray) -> float:
     return logdet_hat + logdet_cap - logdet_gram
 
 
-def selected_inverse_diagonal(matrix) -> np.ndarray:
-    """Diagonal of ``matrix⁻¹`` for a sparse SPD matrix (see ``selected_inverse``)."""
-    return selected_inverse(matrix).diagonal()
-
-
 def _symbolic_fill(strict_lower) -> list:
     """Row indices below the diagonal of each column of the Cholesky factor's
     symbolic pattern: struct(L_j) = struct(A_j) + the structs of j's children

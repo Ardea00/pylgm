@@ -2,11 +2,11 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import math
 from typing import TypeAlias
 import warnings
 
 from pylgm.parameters import Hyperparameter
+from pylgm._checks import positive_real as _positive_real, finite_real as _finite_real
 
 
 def _non_empty_string(value: object, name: str) -> str:
@@ -15,22 +15,10 @@ def _non_empty_string(value: object, name: str) -> str:
     return value
 
 
-def _positive_real(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite positive real value")
-    return float(value)
-
-
 def _positive_precision(
     value: float | Hyperparameter, name: str
 ) -> float | Hyperparameter:
     return value if isinstance(value, Hyperparameter) else _positive_real(value, name)
-
-
-def _finite_real(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite real value")
-    return float(value)
 
 
 class _ComposableEffect:

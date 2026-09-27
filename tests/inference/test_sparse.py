@@ -344,11 +344,11 @@ def test_sparse_predictive_and_covariance_match_dense_besag(besag_with_intercept
     assert np.allclose(got_cov, dense.covariance, rtol=1e-6, atol=1e-8)
 
 
-def test_selected_inverse_diagonal_matches_dense_inverse():
+def test_selected_inverse_matches_dense_inverse():
     """Takahashi selected inversion must equal diag(inv(Q)) on ring and grid GMRFs."""
     import numpy as np
     from scipy.sparse import lil_matrix
-    from pylgm.inference.sparse import selected_inverse_diagonal
+    from pylgm.inference.sparse import selected_inverse
 
     def ring(n, ridge=0.4):
         q = lil_matrix((n, n))
@@ -375,7 +375,7 @@ def test_selected_inverse_diagonal_matches_dense_inverse():
         return q.tocsc()
 
     for mat in (ring(300), ring(1000), grid(20), grid(30)):
-        got = selected_inverse_diagonal(mat)
+        got = selected_inverse(mat).diagonal()
         want = np.diag(np.linalg.inv(mat.toarray()))
         assert np.max(np.abs(got - want)) < 1e-9
 

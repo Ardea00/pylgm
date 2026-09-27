@@ -9,12 +9,7 @@ from scipy.sparse import block_diag, csr_matrix, hstack
 from pylgm.exceptions import ModelValidationError, NumericalError
 from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian
-
-
-def _readonly_array(value: np.ndarray) -> np.ndarray:
-    result = np.array(value, copy=True)
-    result.setflags(write=False)
-    return result
+from pylgm._checks import readonly_array as _readonly_array
 
 
 def _ordinary_positive(value: object, name: str) -> float:
