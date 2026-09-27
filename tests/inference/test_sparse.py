@@ -609,3 +609,62 @@ def test_prior_logdet_cofactor_matches_dense_reference():
     assert _is_connected_intrinsic(np.vstack([np.ones(n), np.r_[np.ones(20), -np.ones(20)]]), Q) is False
     mixed = np.array([[1.0, -1.0] * (n // 2)])
     assert _is_connected_intrinsic(mixed, Q) is False
+
+
+def test_prior_logdet_full_rank_block_matches_dense_reference():
+    """`_full_rank_reduced_logdet` must match a dense null_space reference for a
+    full-rank AR1-like block with confined constraint rows, fall back (return
+    None) on an intrinsic (rank-deficient) block, and stay accurate on an
+    ill-conditioned SPD block."""
+    from pylgm.inference.sparse import _full_rank_reduced_logdet
+
+    n = 60
+    rho = 0.8
+
+    def ar1_precision(n, rho, scale=1.0):
+        q = np.zeros((n, n))
+        for i in range(n):
+            q[i, i] = (1.0 + rho**2) if 0 < i < n - 1 else 1.0
+            if i + 1 < n:
+                q[i, i + 1] = -rho
+                q[i + 1, i] = -rho
+        return csr_matrix(q * scale)
+
+    q_full = ar1_precision(n, rho, scale=3.0)
+    rng = np.random.default_rng(0)
+    dense_rows = rng.standard_normal((4, n))
+    rows = np.vstack([dense_rows, np.ones((1, n))])
+
+    got = _full_rank_reduced_logdet(rows, q_full, "ar1")
+    basis = null_space(rows)
+    _, want = np.linalg.slogdet(basis.T @ q_full.toarray() @ basis)
+    assert got is not None
+    assert abs(got - want) < 1e-9
+
+    # Ill-conditioned SPD (RW1 ring + tiny ridge) with an all-ones row.
+    def rw1_ring(n, ridge):
+        q = np.zeros((n, n))
+        for i in range(n):
+            q[i, i] = 2.0
+            q[i, (i + 1) % n] += -1.0
+            q[(i + 1) % n, i] += -1.0
+        return q + ridge * np.eye(n)
+
+    q_ill = csr_matrix(rw1_ring(n, 1e-6))
+    rows_ones = np.ones((1, n))
+    got_ill = _full_rank_reduced_logdet(rows_ones, q_ill, "seasonal")
+    basis_ill = null_space(rows_ones)
+    _, want_ill = np.linalg.slogdet(basis_ill.T @ q_ill.toarray() @ basis_ill)
+    assert got_ill is not None
+    assert abs(got_ill - want_ill) / abs(want_ill) < 1e-6
+
+    # Intrinsic (singular) RW1 ring -> not SPD -> helper returns None. Note:
+    # SuperLU's LU on this exactly-singular ring only reliably surfaces the
+    # zero pivot (raising NumericalError, which the helper turns into None)
+    # once the ring is a few hundred nodes; below that COLAMD's ordering can
+    # happen to land the ~1e-16 rounding-noise "pivot" above zero. Use n=300,
+    # confirmed to raise deterministically for this construction.
+    n_intrinsic = 300
+    q_intrinsic = csr_matrix(rw1_ring(n_intrinsic, 0.0))
+    rows_intrinsic = np.ones((1, n_intrinsic))
+    assert _full_rank_reduced_logdet(rows_intrinsic, q_intrinsic, "intrinsic") is None
