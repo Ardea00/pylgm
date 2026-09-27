@@ -354,3 +354,40 @@ def test_simplified_laplace_marginals_above_the_guard_match_dense(monkeypatch):
         np.testing.assert_allclose(s.mean, d.mean, atol=1e-6)
         np.testing.assert_allclose(s.std, d.std, rtol=1e-5)
         np.testing.assert_allclose(s.quantile(0.975), d.quantile(0.975), atol=1e-6)
+
+
+@pytest.mark.parametrize("likelihood,response", [(Gaussian(0.7), "x"), (Poisson(), "count")])
+def test_cross_block_constraint_matches_dense(likelihood, response, monkeypatch):
+    """A label constraint coupling two blocks: the prior logdet is no longer
+    block-separable. Used to raise NotImplementedError on the sparse path."""
+    model = LGM(response, likelihood, FIELD, offset="logE" if response == "count" else None,
+                panel=("region",), time="t",
+                constraints=[({"s:r0": 1.0, "v:3": -1.0}, 0.25)])
+    engine = "laplace" if response == "count" else "exact_gaussian"
+    frame = _frame()
+    dense = model.fit(frame, engine=engine)
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = model.fit(frame, engine=engine)
+    assert sparse._covariance is None
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
+    labels = list(sparse.labels)
+    assert sparse.mean[labels.index("s:r0")] - sparse.mean[labels.index("v:3")] == pytest.approx(0.25)
+
+
+def test_coupled_prior_logdet_equals_the_block_separable_one():
+    """Where both apply (every row inside one block), the general grounded
+    formula must reproduce the block-separable matrix-tree/cofactor one."""
+    from pylgm.inference.sparse import (
+        _block_column_confinement, _coupled_prior_logdet, _prior_logdet,
+    )
+
+    model = LGM("x", Gaussian(0.7), Fixed("1") + Besag("s", index="region", graph=RING)
+                + RW2("r2", index="t", precision=3.0) + IID("u", index="region"),
+                panel=("region",), time="t")
+    compiled = compile_lgm(model, CanonicalPanel.from_frame(
+        _frame(), DataConfig(time="t", response="x", panel=("region",))))
+    rows = compiled.constraints
+    separable = _prior_logdet(compiled, rows, _block_column_confinement(compiled, rows))
+    assert _coupled_prior_logdet(compiled, rows) == pytest.approx(separable, abs=1e-8)

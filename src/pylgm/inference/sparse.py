@@ -371,11 +371,10 @@ def _block_column_confinement(
     """For each block, its column span and the constraint rows confined to it.
 
     A row is *confined* to a block when all its nonzeros lie inside that block's
-    columns. Returns ``(start, stop, confined_row_mask)`` per block. Raises when a
-    row straddles two blocks -- the sparse prior/quadratic separability assumes
-    each constraint touches a single block (block sum-to-zero rows and the
-    single-block extra constraints these models carry). A cross-block row would
-    couple two reduced priors, which this decomposition cannot express.
+    columns. Returns ``(start, stop, confined_row_mask)`` per block, or ``None``
+    when a row straddles two blocks: the reduced priors are then coupled and the
+    block-separable ``_prior_logdet`` does not apply (``_coupled_prior_logdet``
+    does).
     """
     a = np.asarray(constraints, dtype=float)
     row_mass = np.abs(a).sum(axis=1) if a.shape[0] else np.zeros(0)
@@ -393,10 +392,7 @@ def _block_column_confinement(
         spans.append((start, stop, confined))
         start = stop
     if a.shape[0] and not confined_any.all():
-        raise NotImplementedError(
-            "sparse constrained solve requires each constraint row to touch a "
-            "single latent block; cross-block constraints are not yet supported"
-        )
+        return None  # a row couples blocks: see _coupled_prior_logdet
     return spans
 
 
@@ -509,6 +505,63 @@ def _prior_logdet(
             logdet = SparseSpdFactor(q_b.tocsr(), f"prior [{block.name}]").logdet
         total += logdet
     return total
+
+
+def _coupled_prior_logdet(model: CompiledLGM, constraints: np.ndarray) -> float:
+    """``logdet(N^T Q N)`` when constraint rows couple blocks (``N`` = null(C)).
+
+    With ``Q_hat = Q + C^T C`` (SPD whenever the constraints pin the prior's null
+    space, as they must for a proper constrained prior) and ``N^T C^T C N = 0``,
+
+        logdet(N^T Q N) = logdet(Q_hat) + logdet(C Q_hat^-1 C^T) - logdet(C C^T).
+
+    ``C^T C`` is dense, so ``Q_hat`` is factored as E-sparse-D2 factors ``H_hat``:
+    ground one anchor column per prior null direction into a small dense block
+    (``Q_KK`` is then SPD and sparse) and carry ``C_K^T C_K`` by Woodbury.
+    """
+    q = model.precision.tocsr()
+    c = np.asarray(constraints, dtype=float)
+    latent_size = q.shape[0]
+    nulls, start = [], 0
+    for block in model.blocks:
+        width = block.design.shape[1]
+        basis = _block_null_basis(block)
+        if basis is not None:
+            lifted = np.zeros((latent_size, basis.shape[1]))
+            lifted[start:start + width] = basis
+            nulls.append(lifted)
+        start += width
+    if nulls:
+        null = np.hstack(nulls)
+        _, _, pivots = qr(null.T, pivoting=True, mode="economic")
+        anchors = np.sort(pivots[:null.shape[1]])
+    else:
+        anchors = np.zeros(0, dtype=int)
+    rest = np.setdiff1d(np.arange(latent_size), anchors)
+    base = _LowRankSpdFactor(
+        SparseSpdFactor(q[rest][:, rest].tocsr(), "grounded prior precision"), c[:, rest].T
+    )
+    b = q[rest][:, anchors].toarray() + c[:, rest].T @ c[:, anchors]
+    d = q[anchors][:, anchors].toarray() + c[:, anchors].T @ c[:, anchors]
+    logdet_hat = base.logdet
+    schur_factor = None
+    if anchors.size:
+        schur_factor, logdet_schur = _factor_positive_definite(
+            d - b.T @ base.solve(b), "grounded prior Schur complement"
+        )
+        logdet_hat += logdet_schur
+
+    def solve(rhs: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(rhs)
+        v_k, v_j = rhs[rest], rhs[anchors]
+        x_j = cho_solve(schur_factor, v_j - b.T @ base.solve(v_k)) if anchors.size else v_j[:0]
+        out[rest] = base.solve(v_k - b @ x_j) if anchors.size else base.solve(v_k)
+        out[anchors] = x_j
+        return out
+
+    _, logdet_cap = _factor_positive_definite(c @ solve(c.T), "prior capacitance")
+    _, logdet_gram = _factor_positive_definite(c @ c.T, "constraint gram")
+    return logdet_hat + logdet_cap - logdet_gram
 
 
 def selected_inverse_diagonal(matrix) -> np.ndarray:
@@ -869,8 +922,14 @@ def _sparse_solve(
     constraint_count = model.constraints.shape[0]
     structural_count = constraint_count - model.data_constraint_count
     structural = model.constraints[:structural_count]
-    spans = _block_column_confinement(model, structural)
-    logdet_prior = _prior_logdet(model, structural, spans) if final else float("nan")
+    if not final:
+        logdet_prior = float("nan")
+    else:
+        spans = _block_column_confinement(model, structural)
+        logdet_prior = (
+            _prior_logdet(model, structural, spans) if spans is not None
+            else _coupled_prior_logdet(model, structural)
+        )
 
     w_constraint = None
     cap_factor_ref = None
