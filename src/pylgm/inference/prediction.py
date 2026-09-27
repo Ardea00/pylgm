@@ -316,11 +316,9 @@ def _replicated_nested_block(entry, new_data: pd.DataFrame) -> np.ndarray:
         )
     inner = _design_block_for(inner_entry, new_data)
     width = inner.shape[1]
-    design = np.zeros((len(new_data), len(replicate_labels) * width))
-    slots = keys.map(position).to_numpy()
-    for row in range(len(new_data)):
-        design[row, slots[row] * width:(slots[row] + 1) * width] = inner[row]
-    return design
+    design = np.zeros((len(new_data), len(replicate_labels), width))
+    design[np.arange(len(new_data)), keys.map(position).to_numpy()] = inner
+    return design.reshape(len(new_data), -1)
 
 
 def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:

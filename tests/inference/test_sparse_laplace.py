@@ -144,11 +144,9 @@ def test_confounded_intrinsic_effects_match_dense(name, monkeypatch):
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
     sparse = model.fit(frame, engine=engine)
     assert sparse._covariance is None
-    _assert_same(sparse, dense) if engine == "laplace" else (
-        np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7),
-        np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7),
-        np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10),
-    )
+    np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-7)
+    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, atol=1e-7)
+    np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
     for block in dense.block_slices:
         np.testing.assert_allclose(sparse.latent_marginals(block).std, dense.latent_marginals(block).std,
                                    rtol=1e-6)

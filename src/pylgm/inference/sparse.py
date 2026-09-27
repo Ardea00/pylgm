@@ -287,10 +287,11 @@ class SparsePosterior:
 
             var = a_sᵀ A_ss⁻¹ a_s + (u - a_d)ᵀ S⁻¹ (u - a_d) - constraint term.
 
-        The first term reads ``A_ss⁻¹`` from its selected inverse when every pair
-        of a row's sparse columns lies on the factor's fill pattern -- always so
-        for an observed row, since ``A_ss ⊇ Z_sᵀ Z_s`` -- and falls back to a
-        solve per row otherwise (unobserved or new rows touching unlinked levels).
+        The first term reads ``A_ss⁻¹`` from its selected inverse where a row's
+        column pairs lie on the factor's fill pattern -- always so for an observed
+        row, since ``A_ss ⊇ Z_sᵀ Z_s``. Off-pattern pairs (rows pairing levels
+        never observed together) come from ``Sigma``'s columns at a vertex cover
+        of those pairs, or from one solve per row when that is cheaper.
         """
         design = csr_matrix(design, dtype=float)
         s, d = self.sparse_index, self.dense_index
@@ -316,7 +317,7 @@ class SparsePosterior:
                         minlength=value.size,
                     )
                 else:
-                    fast = fast & ~np.isin(np.arange(value.size), row)
+                    fast[row] = False
             var[fast] = value[fast]
             if not fast.all():
                 # ponytail: one solve per uncovered row; batch the columns if a
@@ -554,8 +555,8 @@ def _coupled_prior_logdet(model: CompiledLGM, constraints: np.ndarray) -> float:
     def solve(rhs: np.ndarray) -> np.ndarray:
         out = np.zeros_like(rhs)
         v_k, v_j = rhs[rest], rhs[anchors]
-        x_j = cho_solve(schur_factor, v_j - b.T @ base.solve(v_k)) if anchors.size else v_j[:0]
-        out[rest] = base.solve(v_k - b @ x_j) if anchors.size else base.solve(v_k)
+        x_j = cho_solve(schur_factor, v_j - b.T @ base.solve(v_k)) if anchors.size else v_j
+        out[rest] = base.solve(v_k - b @ x_j)
         out[anchors] = x_j
         return out
 
