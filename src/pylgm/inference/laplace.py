@@ -2,7 +2,8 @@ import numpy as np
 from scipy.linalg import cho_solve, solve_triangular
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import InferenceConvergenceError, NumericalError
+from pylgm.exceptions import InferenceConvergenceError, NumericalError, UnsupportedEngineError
+from pylgm.inference import gaussian as _gaussian
 from pylgm.inference.gaussian import (
     _block_slices,
     _condition_on_data_constraints,
@@ -10,7 +11,6 @@ from pylgm.inference.gaussian import (
     _constraint_particular_solution,
     _factor_positive_definite,
     _require_finite,
-    preflight_dense_reference,
 )
 from pylgm.inference.result import LaplaceResult, quadratic_form_diagonal
 from pylgm.inference.sampling import GridSampler
@@ -54,6 +54,47 @@ def _variational_mean_shift(reduced_design, reduced_covariance, factor, eta, y, 
     return cho_solve(factor, reduced_design.T @ (0.5 * eta_variance * third))
 
 
+def _observed_likelihood(model: CompiledLGM):
+    """The likelihood bound to the observed rows, response validated.
+
+    Binomial carries a per-row trials vector; the fit loop works on the observed
+    rows, so bind their trials. For every other likelihood this returns self.
+    `restrict` re-indexes any row-indexed internal state (a mixture's masks)
+    into observed-row space first; it is a no-op for every other likelihood.
+    The model's own `likelihood` stays full-row, since `response_prediction`
+    runs over every row.
+    """
+    observed = model.observed
+    observed_likelihood = model.likelihood.restrict(observed)
+    _trials = getattr(observed_likelihood, "trials", None)
+    lk_obs = observed_likelihood.for_observations(
+        {"trials": _trials[observed]} if _trials is not None else None
+    )
+    lk_obs.validate_response(model.y[observed])
+    return lk_obs
+
+
+def _prediction_outputs(model: CompiledLGM, mean: np.ndarray, predictive_variance: np.ndarray):
+    """``(predictive_mean, fitted_mean)`` on the prediction grid.
+
+    Report on `prediction_design`/`prediction_offset`, not the fit `design`/
+    `offset`: for an unmodified model the two are identical (CompiledLGM's
+    default), but a model augmented with LinearObservation pseudo-rows (Joint)
+    fits against extra rows appended to `design` that must not leak into the
+    reported predictions. A projected joint model appends those pseudo-rows
+    after the prediction-grid rows, so the grid's likelihood is that prefix.
+    """
+    predictive_mean = np.asarray(model.prediction_offset + model.prediction_design @ mean).reshape(-1)
+    prediction_likelihood = model.likelihood
+    if model.prediction_design.shape[0] != model.design.shape[0]:
+        prediction_likelihood = model.likelihood.restrict(
+            np.arange(model.design.shape[0]) < model.prediction_design.shape[0]
+        )
+    return predictive_mean, prediction_likelihood.response_prediction(
+        predictive_mean, predictive_variance
+    )
+
+
 def _fit_laplace_dense(
     model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False
 ) -> LaplaceResult:
@@ -66,18 +107,7 @@ def _fit_laplace_dense(
     observed = model.observed
     y_obs = y[observed]
     offset_obs = offset[observed]
-    # Binomial carries a per-row trials vector; the fit loop works on the observed
-    # rows, so bind their trials. For every other likelihood this returns self.
-    # `restrict` re-indexes any row-indexed internal state (a mixture's masks)
-    # into observed-row space first; it is a no-op for every other likelihood.
-    # Bind the restricted likelihood to its own name: `likelihood` itself must
-    # stay full-row, since `response_prediction` below runs over every row.
-    observed_likelihood = likelihood.restrict(observed)
-    _trials = getattr(observed_likelihood, "trials", None)
-    lk_obs = observed_likelihood.for_observations(
-        {"trials": _trials[observed]} if _trials is not None else None
-    )
-    lk_obs.validate_response(y_obs)
+    lk_obs = _observed_likelihood(model)
 
     # A trailing ``data_constraint_count`` rows of ``model.constraints`` are
     # exact data (a ``LinearConstraint``), not pure conditioning: they enter
@@ -253,24 +283,10 @@ def _fit_laplace_dense(
     mean = basis @ z_reported if x_p is None else x_p + basis @ z_reported
     covariance = covariance_factor @ covariance_factor.T
 
-    # Report on `prediction_design`/`prediction_offset`, not the fit `design`/
-    # `offset`: for an unmodified model the two are identical (CompiledLGM's
-    # default), but a model augmented with LinearObservation pseudo-rows (Joint)
-    # fits against extra rows appended to `design` that must not leak into the
-    # reported predictions -- exactly the split `inference/gaussian.py` already
-    # makes for the exact Gaussian engine.
     prediction_design = model.prediction_design
     prediction_offset = model.prediction_offset
-    predictive_mean = np.asarray(prediction_offset + prediction_design @ mean).reshape(-1)
     predictive_variance = quadratic_form_diagonal(prediction_design, covariance)
-    # A projected joint model appends its LinearObservation pseudo-rows after
-    # the prediction-grid rows, so the grid's likelihood is that prefix.
-    prediction_likelihood = likelihood
-    if prediction_design.shape[0] != design.shape[0]:
-        prediction_likelihood = likelihood.restrict(
-            np.arange(design.shape[0]) < prediction_design.shape[0]
-        )
-    fitted_mean = prediction_likelihood.response_prediction(predictive_mean, predictive_variance)
+    predictive_mean, fitted_mean = _prediction_outputs(model, mean, predictive_variance)
 
     _require_finite("posterior mean", mean)
     _require_finite("posterior covariance", covariance)
@@ -307,6 +323,156 @@ def _fit_laplace_dense(
     )
 
 
+def _fit_laplace_sparse(
+    model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False
+) -> LaplaceResult:
+    """The dense engine's Newton iteration on the partitioned sparse solver.
+
+    One Newton step for ``f(x) = -log p(y | x) + x^T Q x / 2`` on ``C_s x = e_s``
+    is the weighted Gaussian solve ``x_N = H^-1 A^T (W A x + g)`` with
+    ``H = Q + A^T W A``, kriged onto the structural rows -- ``_sparse_solve``
+    with the working weights. Line search, convergence test and the
+    Newton-decrement rescue mirror ``_fit_laplace_dense`` so both stop at the
+    same mode; see docs/design/specs/2026-09-27-pylgm-sparse-laplace-design.md.
+    """
+    from pylgm.inference.sparse import _sparse_solve
+
+    latent_size = model.precision.shape[0]
+    observed = model.observed
+    design = model.design[observed]
+    y_obs = model.y[observed]
+    offset_obs = model.offset[observed]
+    q = model.precision
+    lk_obs = _observed_likelihood(model)
+
+    structural_count = model.constraints.shape[0] - model.data_constraint_count
+    rows = model.constraints[:structural_count]
+    rhs = model.constraint_rhs[:structural_count]
+    gram = _factor_positive_definite(rows @ rows.T, "constraint gram")[0] if structural_count else None
+
+    def project(v: np.ndarray) -> np.ndarray:
+        """Orthogonal projection onto null(C_s): the reduced gradient."""
+        return v if gram is None else v - rows.T @ cho_solve(gram, rows @ v)
+
+    def objective(x: np.ndarray) -> float:
+        eta = design @ x + offset_obs
+        return -lk_obs.log_likelihood(eta, y_obs) + 0.5 * float(x @ (q @ x))
+
+    def newton_target(x: np.ndarray, *, final: bool = False):
+        eta = design @ x + offset_obs
+        weights = lk_obs.working_weights(eta, y_obs)
+        # final: score = H x, so the solve returns x itself and every kriging /
+        # determinant term is evaluated at the mode, as the dense engine does.
+        pull = q @ x if final else design.T @ lk_obs.gradient(eta, y_obs)
+        solve = _sparse_solve(model, weights, pull + design.T @ (weights * (design @ x)),
+                              final=final)
+        return solve, eta
+
+    def reduced_gradient(x: np.ndarray) -> np.ndarray:
+        eta = design @ x + offset_obs
+        return project(q @ x - design.T @ lk_obs.gradient(eta, y_obs))
+
+    # A feasible start: the minimum-norm solution of C_s x = e_s.
+    x = rows.T @ cho_solve(gram, rhs) if gram is not None and np.any(rhs) else np.zeros(latent_size)
+    gradient_norm = 0.0
+    newton_decrement = None
+    iterations = 0
+    converged = False
+    current = objective(x)
+    for iterations in range(1, max_iterations + 1):
+        gradient = reduced_gradient(x)
+        gradient_norm = float(np.max(np.abs(gradient)))
+        if gradient_norm < tolerance:
+            converged = True
+            break
+        step = newton_target(x)[0].structural_mean - x
+        slope = float(gradient @ step)
+        scale = 1.0
+        for _ in range(50):
+            candidate = x + scale * step
+            try:
+                candidate_obj = objective(candidate)
+            except FloatingPointError:
+                candidate_obj = np.inf
+            if np.isfinite(candidate_obj) and candidate_obj <= current + 1e-4 * scale * slope:
+                break
+            scale *= 0.5
+        else:
+            raise NumericalError("Laplace line search failed to reduce the objective")
+        x = candidate
+        current = candidate_obj
+    if not converged:
+        gradient = reduced_gradient(x)
+        gradient_norm = float(np.max(np.abs(gradient)))
+        if gradient_norm >= tolerance:
+            # Scale-invariant rescue, exactly as the dense engine (see there).
+            decrement = -0.5 * float(gradient @ (newton_target(x)[0].structural_mean - x))
+            if decrement >= tolerance:
+                raise InferenceConvergenceError(iterations, gradient_norm)
+            newton_decrement = decrement
+        converged = True
+
+    solve, eta = newton_target(x, final=True)
+    posterior = solve.posterior
+    centered = x - solve.nu
+    log_marginal_likelihood = float(
+        lk_obs.log_likelihood(eta, y_obs)
+        - 0.5 * float(centered @ (q @ centered))
+        + 0.5 * solve.logdet_prior
+        - 0.5 * solve.logdet_posterior
+    ) + model.log_likelihood_normalization + solve.data_log_density
+
+    mean = solve.mean
+    if mean_correction:
+        if model.data_constraint_count:
+            # ponytail: the dense engine shifts before conditioning on data rows,
+            # using the structural-only covariance, which SparsePosterior does not
+            # expose. Add a structural-only covariance_apply if this is needed.
+            raise UnsupportedEngineError(
+                "mean_correction with data constraints is not available above the "
+                "sparse guard; use mean_correction=False"
+            )
+        eta_variance = posterior.predictive_variances(design)
+        third = np.asarray(lk_obs.third_derivative(eta, y_obs), dtype=float)
+        mean = mean + posterior.covariance_apply(design.T @ (0.5 * eta_variance * third))
+
+    prediction_design = model.prediction_design
+    predictive_variance = posterior.predictive_variances(prediction_design)
+    predictive_mean, fitted_mean = _prediction_outputs(model, mean, predictive_variance)
+
+    _require_finite("posterior mean", mean)
+    _require_finite("log marginal likelihood", log_marginal_likelihood)
+    _require_finite("predictive mean", predictive_mean)
+    _require_finite("predictive variance", predictive_variance)
+    _require_finite("fitted mean", fitted_mean)
+    likelihood = model.likelihood
+    return LaplaceResult(
+        labels=model.labels,
+        mean=mean,
+        covariance=None,  # never materialised above the guard
+        log_marginal_likelihood=log_marginal_likelihood,
+        predictive_mean=predictive_mean,
+        predictive_variance=predictive_variance,
+        fitted_mean=fitted_mean,
+        link_name=likelihood.link.name if hasattr(likelihood, "link") else "mixture",
+        block_slices=_block_slices(model),
+        diagnostics={
+            "latent_dimension": int(latent_size),
+            "observed_count": int(np.count_nonzero(observed)),
+            "constraint_count": int(model.constraints.shape[0]),
+            "newton_iterations": int(iterations),
+            "final_gradient_norm": float(gradient_norm),
+            "newton_decrement": newton_decrement,
+            "sparse_dimension": solve.sparse_dimension,
+            "dense_dimension": solve.dense_dimension,
+        },
+        sparse_posterior=posterior,
+        sampler=GridSampler(
+            mean, csr_matrix(prediction_design), model.prediction_offset, posterior=posterior
+        ),
+    )
+
+
 def fit_laplace(
     model: CompiledLGM,
     *,
@@ -327,9 +493,17 @@ def fit_laplace(
     because that is a Laplace approximation *at the mode* and would stop being
     one if evaluated anywhere else.
     """
-    preflight_dense_reference(model, allow_large_dense=allow_large_dense)
+    if type(allow_large_dense) is not bool:
+        raise TypeError("allow_large_dense must be a boolean")
+    # Past the dense threshold, route to the sparse engine (as the exact Gaussian
+    # engine does); allow_large_dense=True still forces the dense reference.
+    fit = (
+        _fit_laplace_sparse
+        if not allow_large_dense and _gaussian._exceeds_dense_threshold(model)
+        else _fit_laplace_dense
+    )
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            return _fit_laplace_dense(model, max_iterations, tolerance, mean_correction)
+            return fit(model, max_iterations, tolerance, mean_correction)
     except FloatingPointError as error:
         raise NumericalError("Laplace numerical calculation was non-finite") from error

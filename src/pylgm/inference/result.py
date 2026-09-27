@@ -1055,6 +1055,7 @@ class LaplaceResult(_BaseResult):
     _fitted_mean: np.ndarray = field(repr=False)
     link_name: str
     _sampler: "GridSampler | None" = field(repr=False)
+    _sparse_posterior: "SparsePosterior | None" = field(repr=False)
 
     def __init__(
         self,
@@ -1073,11 +1074,13 @@ class LaplaceResult(_BaseResult):
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
         sampler: "GridSampler | None" = None,
+        sparse_posterior: "SparsePosterior | None" = None,
     ) -> None:
         def _store_laplace_extras() -> None:
             object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
             object.__setattr__(self, "link_name", str(link_name))
             object.__setattr__(self, "_sampler", sampler)
+            object.__setattr__(self, "_sparse_posterior", sparse_posterior)
 
         self._init_common(
             labels=labels,
