@@ -135,8 +135,6 @@ def test_rw_scaling_is_explicit_and_consistent():
     the same matrix; and asking for scaling on the inner effect reproduces
     ``SpaceTime``, whose own ``scale`` flag defaults to True.
     """
-    from scipy.sparse import kron
-
     from pylgm.effects.structures import RW1Structure
 
     frame = _frame()
@@ -145,8 +143,8 @@ def test_rw_scaling_is_explicit_and_consistent():
     )
     groups = frame["s"].nunique()
     periods = frame["t"].nunique()
-    expected = kron(rw_structure(groups, 1, scale=False), rw_structure(periods, 1, scale=False))
-    assert np.allclose(grouped.precision.toarray(), expected.toarray())
+    expected = np.kron(rw_structure(groups, 1, scale=False), rw_structure(periods, 1, scale=False))
+    assert np.allclose(grouped.precision.toarray(), expected)
 
     reference = build_spacetime(frame, "st", "s", "t", GRAPH, "II", 1, precision=1.0)
     unscaled, _ = _build_effect_block(
