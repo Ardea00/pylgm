@@ -18,7 +18,6 @@ from pylgm.ir import CompiledFamily, LatentBlock, ScalableBlock
 from pylgm.joint import Joint, Shared
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.optimization import OptimizationBounds, optimize_empirical_bayes
-from pylgm.optimization import empirical_bayes
 from pylgm.parallel import blas_limit, validate_blas_threads, validate_workers
 from scipy.sparse import csr_matrix
 
