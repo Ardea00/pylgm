@@ -8,4 +8,4 @@ dist/
 .base/
 .base-ast/
 research/
-examples/regional_gdp_nowcast
+examples/regional_gdp_nowcastbenchmarks/**/*.jsonl
