@@ -184,6 +184,47 @@ What you give up:
 - **Many hyperparameters.** The INLA grid grows as \((2r+1)^d\) in the number
   \(d\) of hyperparameters, so it is practical for a handful, not dozens.
 
+## Versus INLA (pyINLA)
+
+[pyINLA](https://pyinla.org/) drives the `inla` C program from Python, so it is
+the reference implementation of the same method. The benchmark in
+[`benchmarks/pyinla`](https://github.com/Ardea00/pylgm/tree/main/benchmarks/pyinla)
+fits the same model, priors (PC(1, 0.01) on every precision, scaled Besag) and
+data in both, with `hyperparameters="integrate"`; median of 3 runs, pyINLA
+0.1.10, pyLGM in the Python 3.11 environment pyINLA requires (pyLGM runs about
+1.3-2.5x faster on current NumPy/SciPy).
+
+| model | size | pyLGM | pyINLA |
+|---|---|---|---|
+| Gaussian + IID | 5 000 rows | 1.80 s | 0.31 s |
+| | 50 000 rows | 6.57 s | 1.66 s |
+| Poisson + Besag | 100 areas | 0.11 s | 0.20 s |
+| | 2 500 areas | 3.85 s | 0.44 s |
+| | 4 900 areas | 9.13 s | 0.70 s |
+
+**Accuracy is at parity**: hyperparameter posterior means agree to 4-5
+significant figures (24.3396 vs 24.3404 at 2 500 areas), fixed-effect posterior
+sds within 1%. Fixed-effect *means* differ by 0.006-0.02 on the Poisson model at
+every size -- not a scaling artefact; under investigation (INLA's default
+simplified-Laplace latent marginals are the first suspect).
+
+**Speed**: pyINLA is faster on one-off fits of large non-Gaussian models, by a
+constant factor that now comes from re-analysing the sparse factorisation at
+every Newton step (SciPy exposes no symbolic/numeric split).
+
+**Where pyLGM is ahead: absorbing new data.** `GaussianResult.update` conditions
+a fitted posterior on new rows exactly, with no refactorisation
+([prediction](prediction.md#sequential-updates)); INLA refits. Per new period of
+a regional panel, at the same fixed hyperparameters:
+
+| panel | latents | `update` | pyLGM refit | pyINLA refit |
+|---|---|---|---|---|
+| 100 x 60 | 162 | 0.004 s | 0.015 s | 0.32 s |
+| 1 000 x 100 | 1 102 | 0.30 s | 0.61 s | 1.19 s |
+
+`update` equals the refit to 1e-9. It pays off when a batch of new rows is small
+next to the latent field; when every batch touches every latent, refit.
+
 ## When *not* to reach for pyLGM
 
 Being clear about this is more useful than a feature list:

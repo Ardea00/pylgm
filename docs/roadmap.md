@@ -16,8 +16,14 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   likelihood as `log p(e | y)`, so empirical Bayes and INLA learn from them.
   `Joint.fit` takes them per outcome; `scale="log"` ties a log-scale predictor to
   aggregates on levels (Gauss-Newton relinearization to the exact mode); and
-  `pylgm.operators` builds aggregation, difference and cumulation operators. See
+  `pylgm.operators` builds aggregation, difference and cumulation operators;
+  `pylgm.index_numbers` converts chain-linked volumes to additive
+  previous-year-price values (annual overlap). See
   [linear observations](linear-observations.md).
+- **Sequential updates** — `GaussianResult.update(new_rows)` conditions a fitted
+  exact-Gaussian posterior on new observations at fixed hyperparameters, with no
+  refactorisation, identical to a refit on all rows. See
+  [prediction](prediction.md#sequential-updates).
 - **Joint posterior draws** — `result.sample(n, rng)` for exact-Gaussian (dense
   and sparse), Laplace and integrated fits, every draw meeting the exact
   constraints; `pylgm.evaluation.crps_from_draws` scores nonlinear targets built
@@ -63,10 +69,6 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   [effects](effects.md#weighted-effects), and
   [research status](research-status.md) for what is and is not verified.
 
-- **Hybrid composition** — a mixed-frequency `MIDAS` term, a spatial `BYM2`
-  term, and a temporal `AR1` term sum through `+` into one latent field that
-  fits and predicts, demonstrated end to end in
-  [`examples/hybrid_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/hybrid_nowcast).
 - **Spatial (CAR) family** — `Besag` (ICAR), `ProperCAR` (with `ρ` fixed or
   estimated), and `BYM2` (with `φ` fixed or estimated), complete for the dense
   reference regime. Graphs may be **weighted** (`{node: {neighbour: weight}}`),
@@ -167,10 +169,6 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
 1. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-2. **Hybrid HF/LF nowcasting frontend** — a higher-level mixed-frequency
-   nowcasting API that handles the HF→LF lag alignment (still the caller's job
-   today). The underlying effects ship both in the Python API and as the
-   declarative `midas` / `midas_parametric` YAML types.
 
 ## Deferred (not planned for the near term)
 

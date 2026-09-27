@@ -71,6 +71,7 @@ class PredictionContext:
     offset: str | None
     trials: str | None = None
     width: int = 0
+    response: str | None = None
     column_slices: tuple[tuple[int, int], ...] = ()
     """Per-entry ``(start, stop)`` column spans in the fitted latent.
 

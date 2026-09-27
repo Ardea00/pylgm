@@ -201,3 +201,24 @@ def test_shared_effect_hyperparameter_precision_raises(shared_component_frame):
     )
     with pytest.raises(CompilationError, match="not supported"):
         joint.fit(frame, engine="laplace")
+
+
+def test_grouped_inside_joint_matches_its_replicated_equivalent(shared_component_frame):
+    """Grouped with an IID structure is Replicated (I_R kron Q), so the two
+    must fit identically inside a Joint too."""
+    from pylgm import Grouped, IIDStructure, Replicated
+
+    frame, _ = shared_component_frame()
+    frame["region"] = frame["district"].str[1:].astype(int).mod(4).astype(str)
+
+    def fit(effect):
+        return Joint(
+            [LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1") + effect),
+             LGM(response="larynx", likelihood=Poisson(), predictor=Fixed("1"))],
+        ).fit(frame, engine="laplace")
+
+    grouped = fit(Grouped(IID("g", index="district", precision=2.0), over="region",
+                          structure=IIDStructure()))
+    replicated = fit(Replicated(IID("g", index="district", precision=2.0), over="region"))
+    assert grouped.log_marginal_likelihood == pytest.approx(replicated.log_marginal_likelihood, abs=1e-8)
+    np.testing.assert_allclose(grouped.mean, replicated.mean, atol=1e-8)

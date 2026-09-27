@@ -201,9 +201,16 @@ def optimize_empirical_bayes(
     # stand-in with a different signature, and this must follow the
     # signature, not the name.
     try:
-        skip_intermediate_variances = "predictive_variances" in inspect.signature(fit).parameters
+        fit_parameters = inspect.signature(fit).parameters
     except (TypeError, ValueError):
-        skip_intermediate_variances = False
+        fit_parameters = {}
+    skip_intermediate_variances = "predictive_variances" in fit_parameters
+    # A Laplace fit warm-starts Newton from ONE fixed mode -- the first
+    # evaluation's, at the initial point -- never from the previous evaluation:
+    # finite-difference gradients turn a history-dependent change in the
+    # objective into a gradient error that moves the optimum.
+    warm_start = "initial_mode" in fit_parameters
+    last_mode: np.ndarray | None = None
     names, initial_values = _validate_problem(family, bounds, initial)
     transforms = [bounds[name].transform for name in names]
     natural_lower = np.asarray([bounds[name].lower for name in names])
@@ -239,7 +246,7 @@ def optimize_empirical_bayes(
     latest_fit: tuple[tuple[float, ...], object] | None = None
 
     def objective(log_parameters: np.ndarray) -> float:
-        nonlocal evaluations, cache_hits, latest_failure, latest_fit
+        nonlocal evaluations, cache_hits, latest_failure, latest_fit, last_mode
         key = tuple(float(value) for value in log_parameters)
         if key in cache:
             cache_hits += 1
@@ -261,7 +268,11 @@ def optimize_empirical_bayes(
                 fit_kwargs["allow_large_dense"] = True
             if skip_intermediate_variances:
                 fit_kwargs["predictive_variances"] = False
+            if warm_start and last_mode is not None:
+                fit_kwargs["initial_mode"] = last_mode
             result = fit(model, **fit_kwargs)
+            if warm_start and last_mode is None:
+                last_mode = np.asarray(result.mean)
             raw_objective = -float(result.log_marginal_likelihood)
             if penalty is not None:
                 raw_objective -= float(penalty(parameters))
@@ -311,6 +322,10 @@ def optimize_empirical_bayes(
         return result
 
     def fail(message: str) -> None:
+        # Name the root cause in the message: a failure that is the same at every
+        # theta (a dense size limit, say) otherwise reads as a convergence problem.
+        if latest_failure is not None:
+            message = f"{message} (last failure: {type(latest_failure).__name__}: {latest_failure})"
         error = OptimizationError(
             message,
             evaluations=evaluations,
@@ -451,6 +466,8 @@ def optimize_empirical_bayes(
         final_fit_kwargs: dict[str, object] = {}
         if allow_large_dense:
             final_fit_kwargs["allow_large_dense"] = True
+        if warm_start and last_mode is not None:
+            final_fit_kwargs["initial_mode"] = last_mode
         final_fit = fit(final_model, **final_fit_kwargs)
         final_evaluation = _Evaluation(
             final_evaluation.objective,
@@ -476,6 +493,8 @@ def optimize_empirical_bayes(
         final_fit_kwargs: dict[str, object] = {}
         if allow_large_dense:
             final_fit_kwargs["allow_large_dense"] = True
+        if warm_start and last_mode is not None:
+            final_fit_kwargs["initial_mode"] = last_mode
         final_fit = fit(final_model, **final_fit_kwargs)
         final_evaluation = _Evaluation(
             final_evaluation.objective,

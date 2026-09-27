@@ -669,8 +669,7 @@ Laplace (`latent_strategy="laplace"`).
 **Aligning the HF data to the LF target is the caller's job.** `MIDAS` takes
 the lag columns as given; building them (e.g. `frame[f"x_lag{k}"] =
 hf.shift(k)` after resampling the HF series onto the LF rows) is upstream data
-prep. See [`examples/midas_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/midas_nowcast)
-for an end-to-end nowcasting run that recovers a known decaying kernel.
+prep.
 Parametric lag kernels (exp-Almon / Beta weight functions) are now shipped —
 see [Restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) below.
 

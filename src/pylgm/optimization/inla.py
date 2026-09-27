@@ -1,3 +1,4 @@
+import inspect
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from scipy.interpolate import CubicSpline
 from scipy.linalg import cho_factor
+from scipy.sparse import csr_matrix
 from scipy.special import logsumexp
 from scipy.stats import norm
 
@@ -540,16 +542,25 @@ def integrate_inla(
     lower = np.array([bounds[name].lower for name in names])
     upper = np.array([bounds[name].upper for name in names])
 
+    try:
+        warm_start = "initial_mode" in inspect.signature(conditional_fit).parameters
+    except (TypeError, ValueError):
+        warm_start = False
+    start_mode = None  # the mode at theta*, set once the EB search has found it
+
     def evaluate(u):
         theta = {
             name: float(np.clip(transforms[i].from_internal(value), lower[i], upper[i]))
             for i, (name, value) in enumerate(zip(names, u, strict=True))
         }
         compiled = family.materialize(theta)
-        conditional = (
-            conditional_fit(compiled, allow_large_dense=True)
-            if allow_large_dense else conditional_fit(compiled)
-        )
+        # Every grid point starts Newton from the mode at theta* -- all lie within
+        # a few posterior sds of it -- so the result does not depend on the order
+        # the grid is explored in.
+        kwargs = {"allow_large_dense": True} if allow_large_dense else {}
+        if warm_start and start_mode is not None:
+            kwargs["initial_mode"] = start_mode
+        conditional = conditional_fit(compiled, **kwargs)
         s_value = float(conditional.log_marginal_likelihood)
         if penalty is not None:
             s_value += float(penalty(theta))
@@ -562,6 +573,7 @@ def integrate_inla(
     u_star = np.array(
         [transforms[i].to_internal(eb.parameters[name]) for i, name in enumerate(names)]
     )
+    start_mode = np.asarray(eb.fit.mean)
     hessian = _finite_difference_hessian(lambda u: evaluate(u)[0], u_star)
     internal_lower = np.array([transforms[i].to_internal(lower[i]) for i in range(len(names))])
     internal_upper = np.array([transforms[i].to_internal(upper[i]) for i in range(len(names))])
@@ -908,7 +920,9 @@ def _row_scaled(compiled, observed):
 
 
 def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):
-    dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, dtype=float)
+    # Kept sparse: both the dense (quadratic_form_diagonal) and the sparse
+    # (selected-inverse) variance paths take a CSR design, and densifying is n x p.
+    dense = csr_matrix(design, dtype=float)
     offset = np.asarray(offset, dtype=float)
     y = np.asarray(y, dtype=float)
     nodes, gh = hermgauss(n_nodes)

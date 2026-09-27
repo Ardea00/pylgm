@@ -41,7 +41,7 @@ def test_general_lgm_api_is_exported_without_removing_legacy_api() -> None:
     }
 
     assert expected.issubset(set(pylgm.__all__))
-    assert pylgm.__version__ == "0.7.0rc3"
+    assert pylgm.__version__ == "0.7.0rc4"
     assert metadata["project"]["version"] == pylgm.__version__
 
 
@@ -54,7 +54,7 @@ def test_docs_do_not_claim_a_different_version_than_the_package() -> None:
     import re
 
     root = Path(__file__).parents[1]
-    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.7.0rc3" -> "0.7"
+    series = ".".join(pylgm.__version__.split(".")[:2])  # "0.7.0rc4" -> "0.7"
     roadmap = (root / "docs" / "roadmap.md").read_text(encoding="utf-8")
 
     claimed = set(re.findall(r"(?:pyLGM|Shipped in) (\d+\.\d+)", roadmap))
@@ -152,17 +152,6 @@ def test_inla_criteria_example_reports_dic_waic():
     )
     assert completed.returncode == 0, completed.stderr
     assert "waic" in completed.stdout.lower()
-
-
-def test_hybrid_nowcast_example_reports_correlation():
-    root = Path(__file__).parents[1]
-    env = {**os.environ, "PYTHONPATH": str(root / "src")}
-    completed = subprocess.run(
-        [sys.executable, str(root / "examples/hybrid_nowcast/run.py")],
-        capture_output=True, check=False, text=True, env=env,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "corr(pred,y)=" in completed.stdout
 
 
 def test_directed_network_sar_example_estimates_rho():

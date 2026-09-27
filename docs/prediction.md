@@ -168,3 +168,39 @@ exact-Gaussian fits, dense or sparse, and for Laplace fits, where the draws come
 from the Gaussian approximation at the mode (centred on the corrected mean when
 `mean_correction=True`), so they inherit its accuracy rather than the exact
 posterior's skewness.
+
+## Sequential updates
+
+When new observations arrive for rows already on the fitted grid, an
+exact-Gaussian result absorbs them without refitting:
+
+```python
+grid.loc[grid["t"] >= 12, "y"] = np.nan        # future periods on the grid, NaN response
+result = model.fit(grid)
+result = result.update(new_rows)                # rows for t == 12, response observed
+result = result.update(more_rows)               # updates chain
+```
+
+At fixed hyperparameters, `k` new rows `y = A x + offset + e` condition the
+posterior exactly:
+
+\[
+S = A\Sigma A^\top + \sigma^2 I,\quad
+\mu' = \mu + \Sigma A^\top S^{-1} r,\quad
+\Sigma' = \Sigma - \Sigma A^\top S^{-1} A \Sigma,\quad
+r = y - \text{offset} - A\mu,
+\]
+
+and `log_marginal_likelihood` gains \(\log \mathcal N(r; 0, S) = \log p(y_\text{new}\mid y_\text{old})\).
+The cost is `k` solves against the factor the fit already holds — no new
+factorisation — and \(\Sigma'\) is kept as the base posterior minus a rank-`k`
+term, so marginals, `predict()`, `linear_combinations()` and `sample()` (via
+Matheron's rule) all reflect the new rows, on dense and sparse fits alike. The
+result is identical to a refit on all rows at the same hyperparameters.
+
+Limits: hyperparameters are not re-estimated (refit when they should move);
+every latent level the new rows touch must already be on the grid (a new level
+raises, as in `predict()`); rows with a NaN response are skipped; results from
+`hyperparameters="integrate"`, Laplace fits and joint models do not support
+`update` yet. Accumulated low-rank terms grow by `k` columns per update, so
+refit after many large updates.

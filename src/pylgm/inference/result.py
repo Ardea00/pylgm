@@ -217,9 +217,13 @@ def quadratic_form_diagonal(weights, covariance) -> np.ndarray:
     ``W @ Sigma`` is a single GEMM (or a sparse matmul when ``W`` is sparse)
     followed by an O(n p) row-wise reduction.
     """
-    projected = np.asarray(weights @ covariance)
     if issparse(weights):
-        return np.asarray(weights.multiply(projected).sum(axis=1)).reshape(-1)
+        # Sparse rows: sum a_ij a_ik Sigma_jk over each row's nonzero pairs, never
+        # forming the n x p product W @ Sigma.
+        from pylgm.inference.sparse import sparse_row_quadratic
+
+        return sparse_row_quadratic(weights, np.asarray(covariance))
+    projected = np.asarray(weights @ covariance)
     return np.einsum("ij,ij->i", projected, np.asarray(weights))
 
 
@@ -953,6 +957,21 @@ class GaussianResult(_BaseResult):
     def _sampling_components(self) -> tuple:
         return () if self._sampler is None else ((1.0, self._sampler),)
 
+    def update(self, new_data) -> "GaussianResult":
+        """Condition this posterior on ``new_data``'s rows, hyperparameters held fixed.
+
+        Exact Gaussian conditioning with no refactorisation: the result equals a
+        refit on all rows seen so far at the same hyperparameters, and
+        ``log_marginal_likelihood`` gains ``log p(y_new | y_old)``. Rows with a
+        NaN response are skipped. Every latent level ``new_data`` touches must
+        already be in the fit -- put future periods on the grid at fit time with
+        a NaN response. Hyperparameters are not re-estimated; refit when they
+        should move.
+        """
+        from pylgm.inference.update import condition_on_rows
+
+        return condition_on_rows(self, new_data)
+
 
 @dataclass(frozen=True, init=False)
 class ModelCriteria:
@@ -1036,6 +1055,7 @@ class LaplaceResult(_BaseResult):
     _fitted_mean: np.ndarray = field(repr=False)
     link_name: str
     _sampler: "GridSampler | None" = field(repr=False)
+    _sparse_posterior: "SparsePosterior | None" = field(repr=False)
 
     def __init__(
         self,
@@ -1054,11 +1074,13 @@ class LaplaceResult(_BaseResult):
         hyperparameters: Mapping[str, float] | None = None,
         prediction_context: object | None = None,
         sampler: "GridSampler | None" = None,
+        sparse_posterior: "SparsePosterior | None" = None,
     ) -> None:
         def _store_laplace_extras() -> None:
             object.__setattr__(self, "_fitted_mean", _readonly_array(fitted_mean))
             object.__setattr__(self, "link_name", str(link_name))
             object.__setattr__(self, "_sampler", sampler)
+            object.__setattr__(self, "_sparse_posterior", sparse_posterior)
 
         self._init_common(
             labels=labels,

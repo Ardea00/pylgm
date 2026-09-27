@@ -213,7 +213,8 @@ def _rebuild_result(
         if sampler is not None and caller_order is not None:
             sampler = sampler.reordered(caller_order)
         return LaplaceResult(
-            fitted_mean=fitted_mean, link_name=result.link_name, sampler=sampler, **common
+            fitted_mean=fitted_mean, link_name=result.link_name, sampler=sampler,
+            sparse_posterior=getattr(result, "_sparse_posterior", None), **common
         )
     if isinstance(result, INLAResult):
         fitted_mean = (

@@ -1,12 +1,13 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 from scipy.linalg import cho_solve, null_space, solve_triangular
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve_triangular, splu
 
-from pylgm.exceptions import NumericalError
+from pylgm.exceptions import NumericalError, UnsupportedEngineError
 from pylgm.inference.gaussian import _block_slices, _factor_positive_definite
 from pylgm.ir.model import CompiledLGM
 
@@ -175,14 +176,31 @@ class SparsePosterior:
             out[d] = cho_solve(self.d_factor, rhs[d])
         return out
 
+    def covariance_apply(self, rhs: np.ndarray) -> np.ndarray:
+        """``Sigma_c @ rhs`` -- the constrained covariance, 1-D or 2-D ``rhs``."""
+        out = self.apply_inverse(rhs)
+        if self.w_constraint is not None:
+            out = out - self.w_constraint @ cho_solve(self.cap_factor, self.w_constraint.T @ rhs)
+        return out
+
+    @cached_property
+    def _selected_ss(self) -> csr_matrix:
+        """``A_ss⁻¹`` on its factor's fill pattern (one Takahashi sweep, cached)."""
+        return selected_inverse(self.a_ss_matrix)
+
+    @cached_property
+    def _w_dense(self) -> np.ndarray:
+        """``W = A_ss⁻¹ B`` (n_s x m): so ``Sigma_ss = A_ss⁻¹ + W S⁻¹ Wᵀ``, ``Sigma_sd = -W S⁻¹``."""
+        return self.a_ss.solve(self.b)
+
     def _unconstrained_marginal(self) -> np.ndarray:
         """diag(P_post^-1) -- the unconstrained posterior variance, full length."""
         diag = np.zeros(self.latent_size)
         s, d = self.sparse_index, self.dense_index
         if s.size:
-            diag_ss = selected_inverse_diagonal(self.a_ss_matrix)   # diag(A_ss^-1)
+            diag_ss = self._selected_ss.diagonal()                   # diag(A_ss^-1)
             if d.size:
-                w = self.a_ss.solve(self.b)                          # A_ss^-1 B  (n_s x m)
+                w = self._w_dense                                    # A_ss^-1 B  (n_s x m)
                 sinv_wt = cho_solve(self.schur_factor, w.T)          # S^-1 W^T   (m x n_s)
                 diag_ss = diag_ss + np.einsum("ij,ji->i", w, sinv_wt)
             diag[s] = diag_ss
@@ -202,15 +220,56 @@ class SparsePosterior:
         return np.clip(diag, 0.0, None)
 
     def predictive_variances(self, design) -> np.ndarray:
-        """diag(design Σ_c designᵀ) — one variance per row of ``design``."""
-        dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
-        # ponytail: apply_inverse densifies designᵀ to (latent x n_rows). At very
-        # large latent × request width this is the memory ceiling — batch the
-        # columns of designᵀ if it ever bites; fine at current network scale.
-        cov_dt = self.apply_inverse(dense.T)                        # Σ designᵀ (latent x n_rows)
-        var = np.einsum("ij,ji->i", dense, cov_dt)
+        """diag(design Σ_c designᵀ) — one variance per row of ``design``.
+
+        With ``a = (a_s, a_d)`` split over sparse/dense columns and ``u = Wᵀ a_s``,
+
+            var = a_sᵀ A_ss⁻¹ a_s + (u - a_d)ᵀ S⁻¹ (u - a_d) - constraint term.
+
+        The first term reads ``A_ss⁻¹`` from its selected inverse when every pair
+        of a row's sparse columns lies on the factor's fill pattern -- always so
+        for an observed row, since ``A_ss ⊇ Z_sᵀ Z_s`` -- and falls back to a
+        solve per row otherwise (unobserved or new rows touching unlinked levels).
+        """
+        design = csr_matrix(design, dtype=float)
+        s, d = self.sparse_index, self.dense_index
+        var = np.zeros(design.shape[0])
+        if s.size:
+            a_s = design[:, s]
+            value, fast, (row, j, k, weight) = _pattern_quadratic(a_s, self._selected_ss)
+            if row.size:
+                # Off-pattern pairs (rows pairing levels never observed together):
+                # solve for Sigma's columns at a vertex cover of those pairs --
+                # each pair's higher-degree end, so a whole unobserved period
+                # costs one solve -- unless that beats one solve per affected row.
+                degree = np.bincount(np.r_[j, k], minlength=s.size)
+                pick = np.where(degree[j] >= degree[k], j, k)
+                cover = np.unique(pick)
+                if cover.size <= np.unique(row).size:
+                    basis = np.zeros((s.size, cover.size))
+                    basis[cover, np.arange(cover.size)] = 1.0
+                    columns = self.a_ss.solve(basis)
+                    other = np.where(pick == j, k, j)
+                    value += np.bincount(
+                        row, weight * columns[other, np.searchsorted(cover, pick)],
+                        minlength=value.size,
+                    )
+                else:
+                    fast = fast & ~np.isin(np.arange(value.size), row)
+            var[fast] = value[fast]
+            if not fast.all():
+                # ponytail: one solve per uncovered row; batch the columns if a
+                # huge request of such rows ever makes this the memory ceiling.
+                slow = a_s[~fast].toarray()
+                var[~fast] = np.einsum("ij,ji->i", slow, self.a_ss.solve(slow.T))
+            if d.size:
+                diff = np.asarray(a_s @ self._w_dense) - design[:, d].toarray()
+                var += np.einsum("ij,ji->i", diff, cho_solve(self.schur_factor, diff.T))
+        elif d.size:
+            a_d = design[:, d].toarray()
+            var += np.einsum("ij,ji->i", a_d, cho_solve(self.d_factor, a_d.T))
         if self.w_constraint is not None:
-            mw = dense @ self.w_constraint                          # n_rows x c
+            mw = np.asarray(design @ self.w_constraint)             # n_rows x c
             cw = cho_solve(self.cap_factor, mw.T)                   # c x n_rows
             var = var - np.einsum("ij,ji->i", mw, cw)
         return np.clip(var, 0.0, None)
@@ -427,8 +486,15 @@ def _prior_logdet(
 
 
 def selected_inverse_diagonal(matrix) -> np.ndarray:
-    """Diagonal of ``matrix⁻¹`` for a sparse SPD matrix — the exact selected
-    inverse via Takahashi recursion on the SuperLU fill pattern.
+    """Diagonal of ``matrix⁻¹`` for a sparse SPD matrix (see ``selected_inverse``)."""
+    return selected_inverse(matrix).diagonal()
+
+
+def selected_inverse(matrix) -> csr_matrix:
+    """Entries of ``matrix⁻¹`` on the fill pattern of its factor (``L + Lᵀ``),
+    for a sparse SPD matrix — the exact selected inverse via Takahashi
+    recursion on the SuperLU fill pattern. Entries off that pattern are not
+    stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own.
 
     Symmetric-mode ``splu`` (``MMD_AT_PLUS_A`` + ``SymmetricMode`` +
     ``diag_pivot_thresh=0.0``) yields ``perm_r == perm_c`` and a unit-lower ``L``
@@ -449,35 +515,94 @@ def selected_inverse_diagonal(matrix) -> np.ndarray:
     if not np.array_equal(lu.perm_r, pc):
         raise NumericalError("selected inversion expected a symmetric factorization")
     lower = lu.L.tocsc()
+    lower.sort_indices()
     diag_u = lu.U.diagonal().astype(float)
     indptr, indices, data = lower.indptr, lower.indices, lower.data.astype(float)
-    below_rows: list = [None] * n
-    below_l: list = [None] * n
-    sig: dict = {}
-    for i in range(n):
-        seg = indices[indptr[i]:indptr[i + 1]]
-        val = data[indptr[i]:indptr[i + 1]]
-        mask = seg > i
-        below_rows[i] = seg[mask]
-        below_l[i] = val[mask]
+    # Sigma lives on the lower pattern (strict fill + diagonal), keyed col * n + row:
+    # sorted keys make every sub-block gather one searchsorted per column.
+    column = np.repeat(np.arange(n), np.diff(indptr))
+    strict = indices > column
+    keys = np.sort(np.r_[column[strict] * n + indices[strict], np.arange(n) * (n + 1)])
+    sig = np.zeros(keys.size)
+    diagonal = np.searchsorted(keys, np.arange(n) * (n + 1))
     for i in range(n - 1, -1, -1):
-        below = below_rows[i]
-        below_vals = below_l[i]
-        if len(below):
-            k = len(below)
-            sub = np.empty((k, k))
-            for a in range(k):
-                for b in range(k):
-                    ra, rb = below[a], below[b]
-                    lo, hi = (ra, rb) if ra <= rb else (rb, ra)
-                    sub[a, b] = sig.get((hi, lo), 0.0)
-            sig_below = -sub @ below_vals
-            for a in range(k):
-                sig[(below[a], i)] = sig_below[a]
-            sig[(i, i)] = 1.0 / diag_u[i] - below_vals @ sig_below
-        else:
-            sig[(i, i)] = 1.0 / diag_u[i]
-    return np.array([sig[(pc[i], pc[i])] for i in range(n)])
+        rows, values = indices[indptr[i]:indptr[i + 1]], data[indptr[i]:indptr[i + 1]]
+        below, below_vals = rows[rows > i], values[rows > i]
+        if not below.size:
+            sig[diagonal[i]] = 1.0 / diag_u[i]
+            continue
+        wanted = np.minimum.outer(below, below) * n + np.maximum.outer(below, below)
+        position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
+        # Off-pattern sub-block entries are true zeros (SuperLU drops only numerical zeros).
+        sub = np.where(keys[position] == wanted, sig[position], 0.0)
+        sig_below = -sub @ below_vals
+        sig[np.searchsorted(keys, i * n + below)] = sig_below
+        sig[diagonal[i]] = 1.0 / diag_u[i] - below_vals @ sig_below
+    # Permuted index pc[i] is original index i.
+    original = np.argsort(pc)
+    rows, cols = original[keys % n], original[keys // n]
+    off = rows != cols
+    return coo_matrix(
+        (np.r_[sig, sig[off]], (np.r_[rows, cols[off]], np.r_[cols, rows[off]])),
+        shape=(n, n),
+    ).tocsr()
+
+
+def _row_pairs(a: csr_matrix, max_row_nnz: int):
+    """Every ordered pair of nonzeros sharing a row of ``a``, as data positions.
+
+    Returns ``(first, second, pair_row, small)``; rows with more than
+    ``max_row_nnz`` nonzeros are skipped (``small`` False) rather than
+    enumerating their ``nnz^2`` pairs.
+    """
+    counts = np.diff(a.indptr)
+    small = counts <= max_row_nnz
+    row_of = np.repeat(np.arange(a.shape[0]), counts)
+    entry = np.flatnonzero(small[row_of])
+    reps = counts[row_of[entry]]
+    first = np.repeat(entry, reps)
+    offset = np.arange(first.size) - np.repeat(np.cumsum(reps) - reps, reps)
+    second = np.repeat(a.indptr[row_of[entry]], reps) + offset
+    return first, second, row_of[first], small
+
+
+def sparse_row_quadratic(a, dense: np.ndarray, max_row_nnz: int = 64) -> np.ndarray:
+    """``diag(a M aᵀ)`` for sparse ``a`` and dense symmetric ``M``, never forming ``a M``."""
+    a = csr_matrix(a, dtype=float)
+    first, second, pair_row, small = _row_pairs(a, max_row_nnz)
+    value = np.bincount(
+        pair_row,
+        a.data[first] * a.data[second] * dense[a.indices[first], a.indices[second]],
+        minlength=a.shape[0],
+    )
+    if not small.all():
+        wide = a[~small]
+        value[~small] = np.asarray(wide.multiply(wide @ dense).sum(axis=1)).ravel()
+    return value
+
+
+def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64):
+    """``(a_iᵀ M a_i over stored pairs, small_i, missing)`` per row of ``a``.
+
+    Reads ``M`` only where ``stored`` has it. ``missing = (row, j, k, a_ij a_ik)``
+    lists the pairs it could not read, so a row's value is exact once those are
+    added. Rows with more than ``max_row_nnz`` nonzeros are not enumerated
+    (``small_i`` False).
+    """
+    width = a.shape[1]
+    first, second, pair_row, small = _row_pairs(a, max_row_nnz)
+    stored = stored.tocsr()
+    stored.sort_indices()
+    keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
+    wanted = a.indices[first] * width + a.indices[second]
+    position = np.minimum(np.searchsorted(keys, wanted), max(keys.size - 1, 0))
+    found = keys[position] == wanted if keys.size else np.zeros(wanted.size, bool)
+    contribution = a.data[first] * a.data[second] * np.where(found, stored.data[position], 0.0)
+    value = np.bincount(pair_row, contribution, minlength=a.shape[0])
+    lost = ~found
+    missing = (pair_row[lost], a.indices[first[lost]], a.indices[second[lost]],
+               a.data[first[lost]] * a.data[second[lost]])
+    return value, small, missing
 
 
 def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:
@@ -502,56 +627,113 @@ def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:
     return mean
 
 
-def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
-    """Partitioned Schur solve, matching ``gaussian._fit_dense``.
+@dataclass(frozen=True)
+class _SparseSolve:
+    """One partitioned solve of ``H = Q + Z^T W Z`` against a score, with every
+    constraint and determinant term the Gaussian and Laplace engines share."""
+
+    posterior: "SparsePosterior"
+    unconstrained: np.ndarray    # H^-1 score
+    structural_mean: np.ndarray  # kriged onto the structural rows (== unconstrained if none)
+    mean: np.ndarray             # kriged onto every row (the reported mean)
+    logdet_posterior: float      # logdet of H reduced onto the structural null space
+    logdet_prior: float          # logdet of Q reduced onto the structural null space
+    nu: np.ndarray               # argmin_{C_s x = e_s} x^T Q x (zero for homogeneous rows)
+    data_log_density: float      # log p(e_D | y, structural); 0 without data rows
+    sparse_dimension: int
+    dense_dimension: int
+
+
+def _require_identified_field(model: CompiledLGM, sparse_index, z_s, weights) -> None:
+    """Raise when ``A_ss = Q_ss + Z_s^T W Z_s`` is singular by construction.
+
+    A block whose constraint rows span its prior null space (Besag, RW1/RW2,
+    SpaceTime, Grouped, Replicated) leaves ``A_ss`` singular exactly when some
+    combination ``v`` of those null vectors is invisible to the data,
+    ``W^1/2 Z_s v = 0`` -- two intrinsic effects whose constants are confounded
+    (Besag + RW1). Whether SuperLU then reports it depends on the sign of a
+    round-off pivot, so check the structure instead. The constrained problem is
+    still well posed (the dense engine reduces onto null(C) first); the sparse
+    path needs a grounded KKT solve for it, not yet built.
+    """
+    position = np.full(model.precision.shape[0], -1)
+    position[sparse_index] = np.arange(sparse_index.size)
+    columns, names, start = [], [], 0
+    for block in model.blocks:
+        width = block.design.shape[1]
+        rows = np.asarray(block.constraints, dtype=float)
+        span = position[start:start + width]
+        start += width
+        if not rows.shape[0] or span[0] < 0:
+            continue
+        # Only rows that are the prior's null vectors (see docstring); a BYM2
+        # augmented block's constraint is not, and is left to the backstop.
+        if np.abs(block.precision @ rows.T).max() > 1e-8 * max(1.0, abs(block.precision).max()):
+            continue
+        null = np.zeros((sparse_index.size, rows.shape[0]))
+        null[span] = rows.T
+        columns.append(null)
+        names.append(block.name)
+    if len(columns) < 2:
+        return
+    seen = np.asarray(z_s @ np.hstack(columns)) * np.sqrt(np.clip(weights, 0.0, None))[:, None]
+    singular = np.linalg.svd(seen, compute_uv=False)
+    if singular.size and singular.min() <= 1e-9 * max(singular.max(), 1.0):
+        raise UnsupportedEngineError(
+            f"intrinsic effects {names} have confounded null spaces (e.g. a Besag and "
+            "an RW1 constant): the sparse solver cannot fit this model yet. Fit it with "
+            "allow_large_dense=True, or make one of the effects proper"
+        )
+
+
+def _sparse_solve(
+    model: CompiledLGM, weights: np.ndarray, score: np.ndarray, *, final: bool = True
+) -> _SparseSolve:
+    """Partitioned Schur solve of ``H = Q + Z^T W Z`` (``Z`` the observed design,
+    ``W = diag(weights)``) against a full-length ``score``.
 
     Partitions the latent columns into a sparse GMRF field block ``s`` and a
-    small dense fixed block ``d`` (``_partition_blocks``), then solves the
-    posterior precision ``Q + Z^T Z / sigma^2`` by a Schur complement on the
-    dense block -- densifying only ``B`` (n_s x m), ``D`` and ``S`` (m x m),
-    never the field. The same solve is exposed as ``apply_inverse`` and reused
-    for the unconstrained mean and, when ``model.constraints`` is nonempty, the
-    conditioning-by-kriging correction (Rue & Held 2005 sec 2.3.3).
+    small dense fixed block ``d`` (``_partition_blocks``), then solves by a
+    Schur complement on the dense block -- densifying only ``B`` (n_s x m),
+    ``D`` and ``S`` (m x m), never the field. The same solve is exposed as
+    ``apply_inverse`` and reused for the conditioning-by-kriging correction
+    when ``model.constraints`` is nonempty (Rue & Held 2005 sec 2.3.3).
+
+    ``final=False`` skips the terms that do not depend on the weights or score
+    (``logdet_prior``, ``nu``: NaN / zero), for Newton steps that only need
+    ``structural_mean``.
 
     ponytail: assumes ``Q_sd == 0`` (block-diagonal prior + block-granular
-    partition), so ``B = Z_s^T Z_d / sigma^2``. True for every LGM this path
-    handles; a cross-block prior term would need adding here.
+    partition), so ``B = Z_s^T W Z_d``. True for every LGM this path handles;
+    a cross-block prior term would need adding here.
     """
-    variance = float(model.likelihood.variance)
-    if not np.isfinite(variance) or variance <= 0:
-        raise NumericalError("sigma squared must be finite and positive")
-
     sparse_index, dense_index = _partition_blocks(model)
     latent_size = model.precision.shape[0]
-    observed = model.observed
-    design = model.design
-    observed_design = design[observed]
-    residual = model.y[observed] - model.offset[observed]
+    observed_design = model.design[model.observed]
     q = model.precision
+    weights = np.asarray(weights, dtype=float)
 
     z_s = observed_design[:, sparse_index]
     z_d = observed_design[:, dense_index]
+    wz_s = csr_matrix(z_s.multiply(weights[:, None]))
+    wz_d = csr_matrix(z_d.multiply(weights[:, None]))
     n_s = sparse_index.size
     m = dense_index.size
-
-    # Score g = Z^T r / sigma^2 (full-length, split per block).
-    g_full = np.zeros(latent_size)
-    g_full[sparse_index] = np.asarray(z_s.T @ residual).reshape(-1) / variance
-    g_full[dense_index] = np.asarray(z_d.T @ residual).reshape(-1) / variance
 
     logdet_posterior = 0.0
     a_s = schur_factor = d_factor = b = None
     a_ss_matrix = None
 
     if n_s:
+        _require_identified_field(model, sparse_index, z_s, weights)
         q_ss = q[sparse_index][:, sparse_index]
-        a_ss_matrix = (q_ss + (z_s.T @ z_s) / variance).tocsr()
+        a_ss_matrix = (q_ss + z_s.T @ wz_s).tocsr()
         a_s = SparseSpdFactor(a_ss_matrix, "sparse posterior precision")
         logdet_posterior += a_s.logdet
     if m:
-        d = q[dense_index][:, dense_index].toarray() + (z_d.T @ z_d).toarray() / variance
+        d = q[dense_index][:, dense_index].toarray() + (z_d.T @ wz_d).toarray()
     if n_s and m:
-        b = (z_s.T @ z_d).toarray() / variance  # n_s x m
+        b = (z_s.T @ wz_d).toarray()  # n_s x m
         schur = d - b.T @ a_s.solve(b)  # m x m
         schur_factor, logdet_schur = _factor_positive_definite(schur, "dense Schur complement")
         logdet_posterior += logdet_schur
@@ -560,7 +742,7 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         logdet_posterior += logdet_d
 
     def apply_inverse(rhs: np.ndarray) -> np.ndarray:
-        """``Q_post^-1 @ rhs`` via the Schur solve; ``rhs`` is 1-D or 2-D."""
+        """``H^-1 @ rhs`` via the Schur solve; ``rhs`` is 1-D or 2-D."""
         rhs = np.asarray(rhs, dtype=float)
         out = np.zeros_like(rhs)
         if n_s and m:
@@ -574,12 +756,12 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
             out[dense_index] = cho_solve(d_factor, rhs[dense_index])
         return out
 
-    mean = apply_inverse(g_full)  # unconstrained posterior mean
+    unconstrained = apply_inverse(np.asarray(score, dtype=float))
 
     def half_inverse(rhs: np.ndarray) -> np.ndarray:
-        """``G`` with ``G^T G = rhs^T Q_post^-1 rhs``, through the Schur partition.
+        """``G`` with ``G^T G = rhs^T H^-1 rhs``, through the Schur partition.
 
-        ``Q_post = U^T diag(A_ss, S) U`` with ``U = [[I, A_ss^-1 B], [0, I]]``, so
+        ``H = U^T diag(A_ss, S) U`` with ``U = [[I, A_ss^-1 B], [0, I]]``, so
         ``G`` stacks the half-solves of ``U^-T rhs`` against ``A_ss`` and ``S``.
         """
         parts = []
@@ -598,17 +780,19 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     structural_count = constraint_count - model.data_constraint_count
     structural = model.constraints[:structural_count]
     spans = _block_column_confinement(model, structural)
-    logdet_prior = _prior_logdet(model, structural, spans)
+    logdet_prior = _prior_logdet(model, structural, spans) if final else float("nan")
 
     w_constraint = None
     cap_factor_ref = None
-    conditioned_mean = mean
+    mean = structural_mean = unconstrained
+    nu = np.zeros(latent_size)
+    data_log_density = 0.0
     if constraint_count:
         # Conditioning by kriging on all rows, for the reported posterior.
         a = np.asarray(model.constraints, dtype=float)
         e = np.asarray(model.constraint_rhs, dtype=float)
         w = apply_inverse(a.T)  # latent x c
-        # The capacitance K = A Q_post^-1 A^T is never formed: near-unit-root
+        # The capacitance K = A H^-1 A^T is never formed: near-unit-root
         # fields and nearly redundant aggregates push cond(K) past 1/eps, where
         # Cholesky on K fails although K is positive definite. With G such that
         # K = G^T G, QR gives K = R^T R from sqrt(cond K). R is block upper
@@ -619,68 +803,52 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
             raise NumericalError("kriging capacitance must be positive definite")
         cap_factor_ref = (r_factor, False)
         w_constraint = w
-        conditioned_mean = _kriged(mean, w, cap_factor_ref, a, e)
+        mean = _kriged(unconstrained, w, cap_factor_ref, a, e)
 
-    structural_factor = None
-    if structural_count:
-        # The structural rows alone, for log p(y | structural): the two SPD-identity
-        # determinant terms, logdet(basis^T Q_post basis) = logdet(Q_post)
-        # + logdet(A Q_post^-1 A^T) - logdet(A A^T).
-        rows_s, e_s = a[:structural_count], e[:structural_count]
-        r_structural = r_factor[:structural_count, :structural_count]
-        structural_factor = (r_structural, False)
-        logdet_cap = float(2.0 * np.log(np.abs(np.diag(r_structural))).sum())
-        _, logdet_gram = _factor_positive_definite(rows_s @ rows_s.T, "constraint gram")
-        logdet_posterior += logdet_cap - logdet_gram
-        mean = _kriged(mean, w[:, :structural_count], structural_factor, rows_s, e_s)
+        if structural_count:
+            # The structural rows alone, for log p(y | structural): the two
+            # SPD-identity determinant terms, logdet(basis^T H basis) = logdet(H)
+            # + logdet(A H^-1 A^T) - logdet(A A^T).
+            rows_s, e_s = a[:structural_count], e[:structural_count]
+            r_structural = r_factor[:structural_count, :structural_count]
+            logdet_cap = float(2.0 * np.log(np.abs(np.diag(r_structural))).sum())
+            _, logdet_gram = _factor_positive_definite(rows_s @ rows_s.T, "constraint gram")
+            logdet_posterior += logdet_cap - logdet_gram
+            structural_mean = _kriged(
+                unconstrained, w[:, :structural_count], (r_structural, False), rows_s, e_s
+            )
+            # Backstop for a singular H the structural check cannot see: its
+            # garbage null-space component makes kriging stall off the constraints.
+            gap = np.abs(rows_s @ structural_mean - e_s).max()
+            scale = max(1.0, np.abs(e_s).max(), np.abs(structural_mean).max())
+            if gap > 1e-6 * scale:
+                raise NumericalError(
+                    "sparse posterior precision is singular: the constrained solve "
+                    f"misses its constraints by {gap:.2e}"
+                )
+            # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
+            # ponytail: when e is nonzero AND a connected-intrinsic sum-to-zero row
+            # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
+            # augmented factor densifies. Correct, but defeats sparsity: nonzero-rhs
+            # extra-constraints do not scale on this path.
+            if final and np.any(e_s):
+                a_sp = csr_matrix(rows_s)
+                aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
+                w_aug = aug.solve(rows_s.T)
+                nu = w_aug @ np.linalg.solve(rows_s @ w_aug, e_s)
 
-        # Two-term quadratic (robust to the confounded near-singular Q_post):
-        # (r0 - Z mu*)^T (r0 - Z mu*) / var + (mu* - nu)^T Q (mu* - nu), where
-        # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
-        # ponytail: when e is nonzero AND a connected-intrinsic sum-to-zero row
-        # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
-        # augmented factor densifies. Correct, but defeats sparsity: nonzero-rhs
-        # extra-constraints do not scale on this path.
-        if np.any(e_s):
-            a_sp = csr_matrix(rows_s)
-            aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
-            w_aug = aug.solve(rows_s.T)
-            nu = w_aug @ np.linalg.solve(rows_s @ w_aug, e_s)
-        else:
-            nu = np.zeros(latent_size)
-        prior_residual = mean - nu
-        model_residual = residual - np.asarray(observed_design @ mean).reshape(-1)
-        quadratic = float(
-            model_residual @ model_residual / variance
-            + prior_residual @ np.asarray(q @ prior_residual).reshape(-1)
-        )
-    else:
-        quadratic = float(residual @ residual / variance - mean @ g_full)
-
-    n_observed = int(np.count_nonzero(observed))
-    log_marginal_likelihood = -0.5 * (
-        n_observed * np.log(2 * np.pi * variance)
-        - logdet_prior
-        + logdet_posterior
-        + quadratic
-    ) + model.log_likelihood_normalization
-
-    if structural_count < constraint_count:
-        # log p(e_D | y, structural) = log N(e_D; A_D mu_S, K_DD - K_DS K_SS^-1 K_SD),
-        # the Schur complement of the capacitance already factored above.
-        data = slice(structural_count, constraint_count)
-        r_data = r_factor[data, data]
-        gap = e[data] - a[data] @ mean
-        whitened = solve_triangular(r_data, gap, trans="T")
-        log_marginal_likelihood += -0.5 * (
-            gap.size * np.log(2 * np.pi)
-            + 2.0 * np.log(np.abs(np.diag(r_data))).sum()
-            + whitened @ whitened
-        )
-    mean = conditioned_mean
-    predictive_mean = np.asarray(
-        model.prediction_offset + model.prediction_design @ mean
-    ).reshape(-1)
+        if structural_count < constraint_count:
+            # log p(e_D | y, structural) = log N(e_D; A_D mu_S, K_DD - K_DS K_SS^-1 K_SD),
+            # the Schur complement of the capacitance already factored above.
+            data = slice(structural_count, constraint_count)
+            r_data = r_factor[data, data]
+            gap = e[data] - a[data] @ structural_mean
+            whitened = solve_triangular(r_data, gap, trans="T")
+            data_log_density = -0.5 * (
+                gap.size * np.log(2 * np.pi)
+                + 2.0 * np.log(np.abs(np.diag(r_data))).sum()
+                + whitened @ whitened
+            )
 
     posterior = SparsePosterior(
         latent_size=latent_size,
@@ -695,17 +863,59 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
         cap_factor=cap_factor_ref,
         constraint_rows=a if constraint_count else None,
     )
+    return _SparseSolve(
+        posterior=posterior, unconstrained=unconstrained, structural_mean=structural_mean,
+        mean=mean, logdet_posterior=logdet_posterior, logdet_prior=logdet_prior, nu=nu,
+        data_log_density=data_log_density, sparse_dimension=int(n_s), dense_dimension=int(m),
+    )
+
+
+def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
+    """Exact Gaussian posterior on the partitioned sparse solver, matching
+    ``gaussian._fit_dense``: ``_sparse_solve`` with ``W = I / sigma^2``."""
+    variance = float(model.likelihood.variance)
+    if not np.isfinite(variance) or variance <= 0:
+        raise NumericalError("sigma squared must be finite and positive")
+    observed = model.observed
+    observed_design = model.design[observed]
+    residual = model.y[observed] - model.offset[observed]
+    score = np.asarray(observed_design.T @ residual).reshape(-1) / variance
+    n_observed = int(np.count_nonzero(observed))
+    solve = _sparse_solve(model, np.full(n_observed, 1.0 / variance), score)
+
+    structural_count = model.constraints.shape[0] - model.data_constraint_count
+    if structural_count:
+        # Two-term quadratic (robust to the confounded near-singular H):
+        # (r0 - Z mu*)^T (r0 - Z mu*) / var + (mu* - nu)^T Q (mu* - nu).
+        prior_residual = solve.structural_mean - solve.nu
+        model_residual = residual - np.asarray(observed_design @ solve.structural_mean).reshape(-1)
+        quadratic = float(
+            model_residual @ model_residual / variance
+            + prior_residual @ np.asarray(model.precision @ prior_residual).reshape(-1)
+        )
+    else:
+        quadratic = float(residual @ residual / variance - solve.unconstrained @ score)
+
+    log_marginal_likelihood = -0.5 * (
+        n_observed * np.log(2 * np.pi * variance)
+        - solve.logdet_prior
+        + solve.logdet_posterior
+        + quadratic
+    ) + model.log_likelihood_normalization + solve.data_log_density
+    predictive_mean = np.asarray(
+        model.prediction_offset + model.prediction_design @ solve.mean
+    ).reshape(-1)
     return SparseFit(
-        mean=mean,
+        mean=solve.mean,
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         block_slices=_block_slices(model),
         diagnostics={
-            "latent_dimension": int(latent_size),
+            "latent_dimension": int(model.precision.shape[0]),
             "observed_count": n_observed,
-            "constraint_count": int(constraint_count),
-            "sparse_dimension": int(n_s),
-            "dense_dimension": int(m),
+            "constraint_count": int(model.constraints.shape[0]),
+            "sparse_dimension": solve.sparse_dimension,
+            "dense_dimension": solve.dense_dimension,
         },
-        posterior=posterior,
+        posterior=solve.posterior,
     )
