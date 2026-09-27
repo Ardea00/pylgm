@@ -1,11 +1,21 @@
+from pylgm.ir import CompiledFamily
 import numpy as np
 import pytest
 from scipy.sparse import csr_matrix, diags, eye
 
 from pylgm.exceptions import ModelValidationError
-from pylgm.ir.family import CompiledGaussianFamily, Hyperparameters, ParametricBlock, ScalableBlock
+from pylgm.ir.family import ParametricBlock, ScalableBlock
 from pylgm.ir.model import LatentBlock
 from pylgm.likelihoods import CompiledGaussian
+
+
+def gaussian_family(*, sigma=1.0, **fields):
+    """A Gaussian CompiledFamily: ``sigma`` is the likelihood's value unless optimised."""
+    return CompiledFamily(
+        likelihood_factory=lambda values: CompiledGaussian(values.get("sigma", sigma)),
+        **fields,
+    )
+
 
 
 def _car_block(name, d, w):
@@ -73,13 +83,13 @@ def test_compiled_gaussian_family_mixes_scalable_and_parametric_blocks():
     parametric = _car_block("region", d, w)
     scalable = ScalableBlock(_fixed_block("fixed", n_obs, 2), None, 1.0)
 
-    family = CompiledGaussianFamily(
+    family = gaussian_family(
         y=np.zeros(n_obs),
         observed=np.ones(n_obs, dtype=bool),
         offset=np.zeros(n_obs),
         blocks=(scalable, parametric),
         parameter_names=("sigma", "region.precision", "region.rho"),
-        initial=Hyperparameters(sigma=1.0, precisions={}),
+        sigma=1.0,
     )
 
     compiled = family.materialize({"sigma": 0.5, "region.precision": 3.0, "region.rho": 0.5})
@@ -109,13 +119,13 @@ def test_compiled_gaussian_family_rejects_parametric_parameters_missing_from_nam
 
     n_obs = len(d)
     with pytest.raises(ModelValidationError):
-        CompiledGaussianFamily(
+        gaussian_family(
             y=np.zeros(n_obs),
             observed=np.ones(n_obs, dtype=bool),
             offset=np.zeros(n_obs),
             blocks=(parametric,),
             parameter_names=("region.precision",),  # missing "region.rho"
-            initial=Hyperparameters(sigma=1.0, precisions={}),
+            sigma=1.0,
         )
 
 
@@ -128,13 +138,13 @@ def test_family_carries_parameter_priors():
         def logpdf(self, value):
             return -value
 
-    family = CompiledGaussianFamily(
+    family = gaussian_family(
         y=np.array([1.0]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(ScalableBlock(block, "latent.precision", 1.0),),
         parameter_names=("latent.precision",),
-        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+        sigma=1.0,
         parameter_priors={"latent.precision": _Prior()},
     )
     assert family.parameter_priors["latent.precision"].logpdf(2.0) == -2.0

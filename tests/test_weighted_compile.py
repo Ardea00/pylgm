@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from pylgm import Fixed, IID, LGM, Poisson, Weighted
-from pylgm.compiler import _build_effect_block, _effect_hyperparameters
+from pylgm.compiler import _effect_block, _effect_hyperparameters
 from pylgm.exceptions import CompilationError
 from pylgm.parameters import Hyperparameter
 
@@ -15,8 +15,8 @@ def _frame(z):
 def test_weighted_design_is_the_inner_design_scaled_row_wise():
     z = [2.0, -1.0, 0.5, 3.0]
     frame = _frame(z)
-    plain, _ = _build_effect_block(IID("u", index="district"), frame)
-    weighted, _ = _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+    plain = _effect_block(IID("u", index="district"), frame)
+    weighted = _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
     expected = np.diag(z) @ plain.design.toarray()
     assert np.allclose(weighted.design.toarray(), expected)
@@ -24,8 +24,8 @@ def test_weighted_design_is_the_inner_design_scaled_row_wise():
 
 def test_weighted_preserves_precision_labels_and_constraints():
     frame = _frame([2.0, -1.0, 0.5, 3.0])
-    plain, _ = _build_effect_block(IID("u", index="district"), frame)
-    weighted, _ = _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+    plain = _effect_block(IID("u", index="district"), frame)
+    weighted = _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
     assert weighted.name == plain.name == "u"
     assert weighted.labels == plain.labels
@@ -35,8 +35,8 @@ def test_weighted_preserves_precision_labels_and_constraints():
 
 def test_all_ones_weights_reduce_to_the_unweighted_block():
     frame = _frame([1.0, 1.0, 1.0, 1.0])
-    plain, _ = _build_effect_block(IID("u", index="district"), frame)
-    weighted, _ = _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+    plain = _effect_block(IID("u", index="district"), frame)
+    weighted = _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
     assert (weighted.design != plain.design).nnz == 0
 
 
@@ -49,12 +49,12 @@ def test_inner_hyperparameters_are_still_discovered_through_the_wrapper():
 def test_missing_weight_column_is_rejected_naming_the_effect_and_column():
     frame = _frame([1.0, 1.0, 1.0, 1.0]).drop(columns=["z"])
     with pytest.raises(CompilationError, match="z"):
-        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+        _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
 def test_missing_weight_column_raises_the_same_type_with_or_without_a_hyperparameter():
     """A bad `by` column must raise CompilationError whether the inner effect's
-    precision is a plain float (routed through _build_effect_block) or a
+    precision is a plain float (routed through _effect_block) or a
     Hyperparameter (routed through compile_family's _append_family_blocks).
     Before, the Hyperparameter path raised a raw DataContractError instead,
     because _append_family_blocks called _weight_vector outside the wrapping
@@ -79,7 +79,7 @@ def test_missing_weight_column_raises_the_same_type_with_or_without_a_hyperparam
 def test_non_numeric_weight_column_is_rejected():
     frame = _frame(["a", "b", "c", "d"])
     with pytest.raises(CompilationError, match="z"):
-        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+        _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
 def test_datetime_weight_column_is_rejected_not_silently_cast_to_nanoseconds():
@@ -94,7 +94,7 @@ def test_datetime_weight_column_is_rejected_not_silently_cast_to_nanoseconds():
         datetime.date(2020, 1, 3), datetime.date(2020, 1, 4),
     ]
     with pytest.raises(CompilationError, match="z"):
-        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+        _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
 def test_datetime64_weight_column_is_rejected_at_fit_time():
@@ -105,19 +105,19 @@ def test_datetime64_weight_column_is_rejected_at_fit_time():
         ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"]
     )
     with pytest.raises(CompilationError, match="z"):
-        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+        _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
 def test_nan_weight_is_rejected():
     frame = _frame([1.0, np.nan, 1.0, 1.0])
     with pytest.raises(CompilationError, match="z"):
-        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+        _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
 def test_all_zero_weights_are_rejected_rather_than_compiling_an_inert_block():
     frame = _frame([0.0, 0.0, 0.0, 0.0])
     with pytest.raises(CompilationError, match="zero"):
-        _build_effect_block(Weighted(IID("u", index="district"), by="z"), frame)
+        _effect_block(Weighted(IID("u", index="district"), by="z"), frame)
 
 
 def test_weighted_model_fits_and_estimates_the_inner_hyperparameter():
@@ -150,7 +150,7 @@ def test_weighted_family_block_is_a_scaled_scalable_block():
     compile_family ever sees it (see _weighted_family_block). This checks the
     block kind stays a ScalableBlock and that its design still carries the
     weights, so the family path doesn't silently drop weighting the way the
-    plain compile path (_build_effect_block) could.
+    plain compile path (_effect_block) could.
     """
     from pylgm.compiler import compile_family
     from pylgm.config.schema import DataConfig

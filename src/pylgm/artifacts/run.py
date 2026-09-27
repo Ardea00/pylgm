@@ -40,7 +40,6 @@ def _environment() -> dict[str, Any]:
         "formulaic",
         "pydantic",
         "PyYAML",
-        "typer",
     ]
     return {
         "python": platform.python_version(),

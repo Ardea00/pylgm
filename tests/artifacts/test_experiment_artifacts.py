@@ -175,7 +175,6 @@ def test_experiment_environment_records_all_direct_dependencies(tmp_path: Path) 
         "pydantic",
         "PyYAML",
         "scipy",
-        "typer",
         "pyarrow",
     }
     assert all(environment["dependencies"].values())

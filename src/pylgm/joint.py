@@ -243,6 +243,9 @@ class Joint:
         """
         import pandas as pd
 
+        from pylgm.optimization.inla import require_single_mean_shift
+
+        require_single_mean_shift(latent_strategy, mean_correction)
         from pylgm.compiler import compile_joint, compile_joint_family, build_joint_prediction_contexts
         from pylgm.config.schema import DataConfig
         from pylgm.data.panel import CanonicalPanel

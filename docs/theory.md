@@ -202,10 +202,9 @@ only geographic adjacency.
 only transfer between graphs, if the effect is **scaled** so that the geometric
 mean of its marginal variances equals 1 (Sørbye & Rue, 2014). `Besag` applies
 this scaling by default, as do `SpaceTime`'s spatial and temporal factors and
-`Grouped`'s `BesagStructure`/`RW1Structure`/`RW2Structure` between-group
-factors. The plain `RW1`/`RW2` effects do **not** scale by default, nor does
-`Grouped`'s *inner* `RW1`/`RW2` — see [research status](research-status.md)
-for the resulting divergence when the two appear in the same model. Computing
+`Grouped`'s `BesagStructure`. The random walks — `RW1`/`RW2` and
+`RW1Structure`/`RW2Structure` alike — scale only when declared with
+`scale=True` (R-INLA's `scale.model` default), so one name is one matrix. Computing
 the scaling correctly requires discarding exactly the one null eigenvalue per
 connected component — a step subtle enough to have been a real bug in this
 library, fixed and regression-tested (see the

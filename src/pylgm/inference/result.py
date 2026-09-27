@@ -11,6 +11,7 @@ from scipy.special import owens_t
 from scipy.stats import norm
 
 from pylgm.exceptions import DenseReferenceLimitError
+from pylgm._checks import readonly_array as _readonly_array
 
 if TYPE_CHECKING:
     # result.py must not import sparse.py at runtime -- sparse.py imports
@@ -40,12 +41,6 @@ _IMMUTABLE_DIAGNOSTIC_TYPES = (
     complex,
     type(None),
 )
-
-
-def _readonly_array(value: np.ndarray) -> np.ndarray:
-    result = np.array(value, copy=True)
-    result.setflags(write=False)
-    return result
 
 
 def _readonly_diagnostics(value: Mapping[str, object]) -> Mapping[str, object]:

@@ -10,7 +10,16 @@ from pylgm.config.schema import DataConfig, ModelConfig, RunConfig
 from pylgm.data import CanonicalPanel
 from pylgm.exceptions import ModelValidationError, NumericalError
 from pylgm.inference import fit_gaussian
-from pylgm.ir import CompiledGaussianFamily, Hyperparameters, LatentBlock, ScalableBlock
+from pylgm.ir import CompiledFamily, LatentBlock, ScalableBlock
+from pylgm.likelihoods import CompiledGaussian
+
+
+def gaussian_family(*, sigma=1.0, **fields):
+    """A Gaussian CompiledFamily: ``sigma`` is the likelihood's value unless optimised."""
+    return CompiledFamily(
+        likelihood_factory=lambda values: CompiledGaussian(values.get("sigma", sigma)),
+        **fields,
+    )
 
 
 @pytest.fixture
@@ -69,6 +78,7 @@ def test_family_rescales_precision_without_rebuilding_design(
 def test_family_materializes_sigma_and_multiple_effect_parameters(
     data_config: DataConfig, model_config: ModelConfig, panel: CanonicalPanel
 ) -> None:
+
     family = compile_gaussian_family(
         data_config,
         model_config,
@@ -106,7 +116,10 @@ def test_family_keeps_fixed_and_unoptimized_blocks_at_configured_precisions(
         materialized.precision[group, group].toarray(), 3.0 * np.eye(2)
     )
     assert materialized.sigma == model_config.sigma
-    assert family.initial.precisions == {"group": 3.0, "trend": 2.0}
+    # Only the optimised precision is a parameter, started at its configured value.
+    assert {name: bound.initial for name, bound in family.parameter_bounds.items()} == {
+        "trend.precision": 2.0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -182,15 +195,6 @@ def test_family_matches_compile_model_at_configured_values(
     assert materialized.sigma == expected.sigma
 
 
-def test_family_hyperparameters_defensively_copy_inputs() -> None:
-    precision = {"trend": 2.0}
-    initial = Hyperparameters(sigma=1.0, precisions=precision)
-    precision["trend"] = 100.0
-    assert initial.precisions["trend"] == 2.0
-    with pytest.raises(TypeError):
-        initial.precisions["trend"] = 3.0  # type: ignore[index]
-
-
 def _trend_block(name: str = "trend") -> LatentBlock:
     return LatentBlock(
         name,
@@ -208,18 +212,17 @@ def _family_arguments() -> dict[str, object]:
         "offset": np.zeros(1),
         "blocks": (ScalableBlock(_trend_block(), "trend.precision", 1.0),),
         "parameter_names": ("trend.precision",),
-        "initial": Hyperparameters(sigma=1.0, precisions={"trend": 2.0}),
     }
 
 
 def test_sigma_only_zero_block_family_materializes_and_exactly_fits() -> None:
-    family = CompiledGaussianFamily(
+    family = gaussian_family(
         y=np.array([2.0]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(),
         parameter_names=("sigma",),
-        initial=Hyperparameters(sigma=3.0, precisions={}),
+        sigma=3.0,
     )
 
     model = family.materialize({"sigma": 0.5})
@@ -239,7 +242,6 @@ def test_sigma_only_zero_block_family_materializes_and_exactly_fits() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"parameter_names": ("trend.precision", "phantom.precision")},
         {"parameter_names": ("trend.precision", "trend.precision")},
         {"parameter_names": (1,)},
         {
@@ -249,12 +251,7 @@ def test_sigma_only_zero_block_family_materializes_and_exactly_fits() -> None:
             ),
             "parameter_names": ("trend.precision",),
         },
-        {
-            "blocks": (ScalableBlock(_trend_block(), "wrong", 1.0),),
-            "parameter_names": ("wrong",),
-        },
         {"parameter_names": ()},
-        {"initial": Hyperparameters(sigma=1.0, precisions={})},
     ],
 )
 def test_family_constructor_requires_complete_parameter_bindings(
@@ -264,7 +261,7 @@ def test_family_constructor_requires_complete_parameter_bindings(
     arguments.update(changes)
 
     with pytest.raises(ModelValidationError):
-        CompiledGaussianFamily(**arguments)  # type: ignore[arg-type]
+        gaussian_family(**arguments)  # type: ignore[arg-type]
 
 
 def test_family_does_not_rebuild_effects_when_materializing(
@@ -339,13 +336,13 @@ def test_family_reports_parameter_driven_precision_overflow_as_numerical() -> No
         csr_matrix([[2.0]]),
         np.empty((0, 1)),
     )
-    family = CompiledGaussianFamily(
+    family = gaussian_family(
         y=np.array([1.0]),
         observed=np.array([True]),
         offset=np.zeros(1),
         blocks=(ScalableBlock(block, "latent.precision", 1.0),),
         parameter_names=("latent.precision",),
-        initial=Hyperparameters(sigma=1.0, precisions={"latent": 1.0}),
+        sigma=1.0,
     )
 
     with pytest.raises(NumericalError, match="precision scaling"):
@@ -366,13 +363,13 @@ def test_family_isolates_source_values_accessors_and_materializations() -> None:
         precision,
         constraints,
     )
-    family = CompiledGaussianFamily(
+    family = gaussian_family(
         y=y,
         observed=observed,
         offset=offset,
         blocks=(ScalableBlock(block, "trend.precision", 1.0),),
         parameter_names=("trend.precision",),
-        initial=Hyperparameters(sigma=1.0, precisions={"trend": 2.0}),
+        sigma=1.0,
     )
     y[0] = 100.0
     observed[0] = False

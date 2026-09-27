@@ -113,3 +113,23 @@ def test_reaches_the_hyperparameter_paths(kwargs):
         corrected = build().fit(frame, engine="laplace", mean_correction=True, **kwargs)
     assert not np.allclose(plain.mean, corrected.mean)
     assert np.isfinite(corrected.mean).all()
+
+
+@pytest.mark.parametrize("strategy", ["simplified_laplace", "laplace"])
+def test_mean_correction_and_a_skewed_latent_strategy_are_exclusive(strategy):
+    """Both move the reported mean off the mode by the same skewness term; the
+    combination counted it twice (Poisson + Besag intercept -0.234 against
+    -0.215 for either one alone, and INLA's -0.215)."""
+    from pylgm import Fixed, IID, LGM, Poisson, Hyperparameter
+    from pylgm.joint import Joint
+
+    frame = pd.DataFrame({"t": range(8), "g": [0, 1] * 4, "y": [1.0, 3, 0, 2, 5, 1, 2, 4],
+                          "z": [0.0, 1, 1, 0, 2, 1, 0, 3]})
+    model = LGM("y", Poisson(), Fixed("1") + IID("u", index="g", precision=Hyperparameter("tau", initial=1.0)),
+                time="t")
+    with pytest.raises(ValueError, match="mean_correction"):
+        model.fit(frame, engine="laplace", hyperparameters="integrate",
+                  latent_strategy=strategy, mean_correction=True)
+    with pytest.raises(ValueError, match="mean_correction"):
+        Joint([model, LGM("z", Poisson(), Fixed("1"), time="t")]).fit(frame, hyperparameters="integrate",
+                           latent_strategy=strategy, mean_correction=True)

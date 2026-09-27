@@ -6,7 +6,7 @@ from pylgm import (
     AR1, BesagStructure, Fixed, Grouped, IID, IIDStructure, LGM, Poisson,
     Replicated, RW1, RW1Structure, Weighted,
 )
-from pylgm.compiler import _build_effect_block
+from pylgm.compiler import _effect_block
 from pylgm.exceptions import CompilationError
 from pylgm.parameters import Hyperparameter
 
@@ -25,8 +25,8 @@ def _frame():
 
 def test_precision_is_the_kronecker_product_of_structure_and_inner():
     frame = _frame()
-    inner, _ = _build_effect_block(IID("u", index="t", precision=2.0), frame)
-    outer, _ = _build_effect_block(
+    inner = _effect_block(IID("u", index="t", precision=2.0), frame)
+    outer = _effect_block(
         Grouped(IID("u", index="t", precision=2.0), over="region",
                 structure=BesagStructure(GRAPH)),
         frame,
@@ -40,7 +40,7 @@ def test_precision_is_the_kronecker_product_of_structure_and_inner():
 
 
 def test_labels_are_group_major_pairs_with_the_replicated_separator():
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Grouped(IID("u", index="t"), over="region", structure=IIDStructure()), _frame()
     )
     assert outer.labels == ("r1@a", "r1@b", "r2@a", "r2@b", "r3@a", "r3@b")
@@ -55,12 +55,12 @@ def test_an_iid_structure_reduces_grouped_to_replicated():
         {"region": r, "t": t, "y": 1.0}
         for r in ("r1", "r2", "r3") for t in range(4)
     )
-    grouped, _ = _build_effect_block(
+    grouped = _effect_block(
         Grouped(RW1("u", index="t", precision=1.5), over="region",
                 structure=IIDStructure()),
         frame,
     )
-    replicated, _ = _build_effect_block(
+    replicated = _effect_block(
         Replicated(RW1("u", index="t", precision=1.5), over="region"), frame
     )
     assert grouped.labels == replicated.labels
@@ -75,8 +75,8 @@ def test_an_iid_structure_reduces_grouped_to_replicated():
 
 def test_a_single_group_level_reduces_to_the_bare_effect():
     frame = pd.DataFrame({"region": ["r1"] * 3, "t": ["a", "b", "c"], "y": [1.0, 2.0, 3.0]})
-    bare, _ = _build_effect_block(IID("u", index="t", precision=2.0), frame)
-    grouped, _ = _build_effect_block(
+    bare = _effect_block(IID("u", index="t", precision=2.0), frame)
+    grouped = _effect_block(
         Grouped(IID("u", index="t", precision=2.0), over="region",
                 structure=IIDStructure()),
         frame,
@@ -87,7 +87,7 @@ def test_a_single_group_level_reduces_to_the_bare_effect():
 
 def test_a_correlated_structure_is_not_block_diagonal():
     """The whole point of Grouped: groups are coupled, unlike Replicated."""
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Grouped(IID("u", index="t"), over="region", structure=BesagStructure(GRAPH)),
         _frame(),
     )
@@ -97,7 +97,7 @@ def test_a_correlated_structure_is_not_block_diagonal():
 
 
 def test_constraints_span_the_null_space_of_the_composed_precision():
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Grouped(RW1("u", index="t"), over="region", structure=BesagStructure(GRAPH)),
         _frame(),
     )
@@ -110,7 +110,7 @@ def test_a_group_level_outside_the_graph_is_rejected():
     frame = _frame()
     frame.loc[0, "region"] = "elsewhere"
     with pytest.raises((CompilationError, ValueError), match="elsewhere"):
-        _build_effect_block(
+        _effect_block(
             Grouped(IID("u", index="t"), over="region", structure=BesagStructure(GRAPH)),
             frame,
         )
@@ -118,7 +118,7 @@ def test_a_group_level_outside_the_graph_is_rejected():
 
 def test_a_missing_group_column_is_named():
     with pytest.raises((CompilationError, ValueError), match="region"):
-        _build_effect_block(
+        _effect_block(
             Grouped(IID("u", index="t"), over="region", structure=IIDStructure()),
             pd.DataFrame({"t": ["a", "b"], "y": [1.0, 2.0]}),
         )
@@ -131,7 +131,7 @@ def test_a_single_group_level_is_rejected_by_rw1_itself_not_the_shape_guard():
     below for a test that actually exercises the shape guard.
     """
     with pytest.raises((CompilationError, ValueError), match="level"):
-        _build_effect_block(
+        _effect_block(
             Grouped(IID("u", index="t"), over="region", structure=RW1Structure()),
             pd.DataFrame({"region": ["only"], "t": ["a"], "y": [1.0]}),
         )
@@ -160,7 +160,7 @@ def test_a_malformed_duck_typed_structure_is_rejected():
             return np.zeros((len(levels), 0))
 
     with pytest.raises((CompilationError, ValueError), match="shape"):
-        _build_effect_block(
+        _effect_block(
             Grouped(IID("u", index="t"), over="region", structure=_MismatchedStructure()),
             _frame(),
         )
@@ -168,12 +168,12 @@ def test_a_malformed_duck_typed_structure_is_rejected():
 
 def test_grouped_and_weighted_commute():
     frame = _frame()
-    inside, _ = _build_effect_block(
+    inside = _effect_block(
         Grouped(Weighted(IID("u", index="t"), by="z"), over="region",
                 structure=BesagStructure(GRAPH)),
         frame,
     )
-    outside, _ = _build_effect_block(
+    outside = _effect_block(
         Weighted(Grouped(IID("u", index="t"), over="region",
                          structure=BesagStructure(GRAPH)), by="z"),
         frame,
@@ -191,7 +191,7 @@ def test_an_integer_index_keeps_its_numeric_level_order():
         for r in ("r1", "r2", "r3") for y in range(1, 13)
     ]
     frame = pd.DataFrame(rows)
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Grouped(RW1("u", index="year"), over="region", structure=BesagStructure(GRAPH)),
         frame,
     )
@@ -202,7 +202,7 @@ def test_an_integer_index_keeps_its_numeric_level_order():
 def test_an_integer_index_keeps_its_numeric_level_order_in_the_family_path():
     """The same guard at the second call site, _append_family_blocks.
 
-    ``_build_effect_block``'s Grouped branch and ``_append_family_blocks``'s
+    ``_effect_block``'s Grouped branch and ``_append_family_blocks``'s
     Grouped branch each pass ``frame[index].dtype`` to their own
     ``_levels_frame`` call; a Hyperparameter on the inner effect is what routes
     a model through the family path instead of the plain compile path, so this
@@ -246,7 +246,7 @@ def test_an_integer_group_column_orders_numerically_not_lexically():
         for yr in range(1, 13) for t in ("a", "b")
     ]
     frame = pd.DataFrame(rows)
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Grouped(IID("u", index="t"), over="yr", structure=RW1Structure()),
         frame,
     )
@@ -320,7 +320,7 @@ def test_an_unobserved_graph_node_still_gets_a_cell():
         "t": ["a", "b", "a", "b"],
         "y": [1.0, 2.0, 3.0, 4.0],
     })
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Grouped(IID("u", index="t"), over="region", structure=BesagStructure(GRAPH)),
         frame,
     )

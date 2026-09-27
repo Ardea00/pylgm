@@ -2,7 +2,7 @@ import numpy as np
 from scipy.linalg import cho_solve, solve_triangular
 from scipy.sparse import csr_matrix
 
-from pylgm.exceptions import InferenceConvergenceError, NumericalError, UnsupportedEngineError
+from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference import gaussian as _gaussian
 from pylgm.inference.gaussian import (
     _block_slices,
@@ -414,15 +414,17 @@ def _fit_laplace_sparse(
         eta = design @ x + offset_obs
         return -lk_obs.log_likelihood(eta, y_obs) + 0.5 * float(x @ (q @ x))
 
-    def newton_target(x: np.ndarray, *, final: bool = False):
+    def weighted_solve(x: np.ndarray, *, final: bool = False):
         eta = design @ x + offset_obs
         weights = lk_obs.working_weights(eta, y_obs)
         # final: score = H x, so the solve returns x itself and every kriging /
         # determinant term is evaluated at the mode, as the dense engine does.
         pull = q @ x if final else design.T @ lk_obs.gradient(eta, y_obs)
-        solve = _sparse_solve(model, weights, pull + design.T @ (weights * (design @ x)),
-                              final=final)
-        return solve, eta
+        return _sparse_solve(model, weights, pull + design.T @ (weights * (design @ x)),
+                             final=final)
+
+    def newton_step(x: np.ndarray) -> np.ndarray:
+        return weighted_solve(x).structural_mean - x
 
     def reduced_gradient(x: np.ndarray) -> np.ndarray:
         eta = design @ x + offset_obs
@@ -433,18 +435,15 @@ def _fit_laplace_sparse(
     x = np.zeros(latent_size) if initial_mode is None else np.asarray(initial_mode, dtype=float)
     if gram is not None:
         x = x - rows.T @ cho_solve(gram, rows @ x - rhs)
-    gradient_norm = 0.0
     newton_decrement = None
     iterations = 0
-    converged = False
     current = objective(x)
     for iterations in range(1, max_iterations + 1):
         gradient = reduced_gradient(x)
         gradient_norm = float(np.max(np.abs(gradient)))
         if gradient_norm < tolerance:
-            converged = True
             break
-        step = newton_target(x)[0].structural_mean - x
+        step = newton_step(x)
         slope = float(gradient @ step)
         scale = 1.0
         for _ in range(50):
@@ -460,19 +459,18 @@ def _fit_laplace_sparse(
             raise NumericalError("Laplace line search failed to reduce the objective")
         x = candidate
         current = candidate_obj
-    if not converged:
+    else:
         gradient = reduced_gradient(x)
         gradient_norm = float(np.max(np.abs(gradient)))
         if gradient_norm >= tolerance:
             # Scale-invariant rescue, exactly as the dense engine (see there).
-            decrement = -0.5 * float(gradient @ (newton_target(x)[0].structural_mean - x))
-            if decrement >= tolerance:
+            newton_decrement = -0.5 * float(gradient @ newton_step(x))
+            if newton_decrement >= tolerance:
                 raise InferenceConvergenceError(iterations, gradient_norm)
-            newton_decrement = decrement
-        converged = True
 
-    x = _polished(objective, x, newton_target(x)[0].structural_mean)
-    solve, eta = newton_target(x, final=True)
+    x = _polished(objective, x, x + newton_step(x))
+    solve = weighted_solve(x, final=True)
+    eta = design @ x + offset_obs
     posterior = solve.posterior
     centered = x - solve.nu
     log_marginal_likelihood = float(
@@ -484,15 +482,11 @@ def _fit_laplace_sparse(
 
     mean = solve.mean
     if mean_correction:
-        if model.data_constraint_count:
-            # ponytail: the dense engine shifts before conditioning on data rows,
-            # using the structural-only covariance, which SparsePosterior does not
-            # expose. Add a structural-only covariance_apply if this is needed.
-            raise UnsupportedEngineError(
-                "mean_correction with data constraints is not available above the "
-                "sparse guard; use mean_correction=False"
-            )
-        eta_variance = posterior.predictive_variances(design)
+        # The dense engine shifts the mode with the structural-only posterior and
+        # then conditions on the data rows; by linearity that is the conditioned
+        # mean plus Sigma_all A^T (sigma_eta^2 g3 / 2), with sigma_eta^2 taken
+        # before the data rows (structural_only).
+        eta_variance = posterior.predictive_variances(design, structural_only=True)
         third = np.asarray(lk_obs.third_derivative(eta, y_obs), dtype=float)
         mean = mean + posterior.covariance_apply(design.T @ (0.5 * eta_variance * third))
 

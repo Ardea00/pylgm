@@ -1,7 +1,11 @@
 import functools
 import warnings
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -55,6 +59,7 @@ from pylgm.effects.replicate import (
     grouped_block,
     group_levels,
     replicate_levels,
+    one_hot_columns,
     replicated_block,
 )
 from pylgm.effects.ar1 import ar1_structure
@@ -79,14 +84,13 @@ from pylgm.exceptions import (
 )
 from pylgm.ir import (
     CompiledFamily,
-    CompiledGaussianFamily,
     CompiledLGM,
-    Hyperparameters,
     ParametricBlock,
     ParametricDesignBlock,
     ScalableBlock,
 )
 from pylgm.inference.prediction import JointPredictionContext, PredictionContext
+from pylgm.ir.family import _assemble_compiled_model, _materialize_blocks
 from pylgm.ir.model import LatentBlock, _block_constraints
 from pylgm.joint import Joint, _pad_block_rows
 from pylgm.likelihoods import (
@@ -140,75 +144,14 @@ def resolve_constraints(
     return matrix, rhs
 
 
-def _unit_precision(effect: EffectConfig) -> EffectConfig:
-    """The same effect declared at precision 1.0, so a scale parameter *is* the precision.
-
-    A wrapper carries no precision of its own -- ``Grouped``'s lives on the effect
-    being copied -- so the override has to reach the inner spec.
-    """
-    if effect.effect is not None:
-        return effect.model_copy(update={"effect": _unit_precision(effect.effect)})
-    return effect.model_copy(update={"precision": 1.0})
-
-
 def _configured_precision(effect: EffectConfig) -> float:
     inner = effect.effect if effect.effect is not None else effect
     return 1.0 if inner.precision is None else float(inner.precision)
 
 
-def _structured_blocks(
-    model: ModelConfig,
-    panel: CanonicalPanel,
-    optimized: tuple[str, ...] = (),
-) -> tuple[list[LatentBlock], dict[str, float], dict[str, tuple[tuple[str, ...], object]]]:
-    """Compile configured effects through the same builders as the Python model path.
-
-    Returns the blocks, the precision to record under each effect's own name, and
-    the parametric-precision builders for effects that cannot simply be scaled.
-    An optimized effect is built at precision 1.0 and scaled by its
-    ``<name>.precision`` parameter downstream, so its configured value is only
-    the optimizer's starting point -- which is what goes into the mapping.
-    """
-    blocks: list[LatentBlock] = []
-    precisions: dict[str, float] = {}
-    # Effects whose precision is not a plain scale of the whole block. MIDAS is
-    # the only one: its precision multiplies the smoothness penalty alone --
-    # Q(tau) = tau*D'D + ridge*P0 -- so scaling the assembled block would shrink
-    # the lag curve's level and slope too, which is exactly what its design
-    # avoids. These get a ParametricBlock, as the model path already gives them.
-    parametric: dict[str, tuple[tuple[str, ...], object]] = {}
-    frame = panel.frame
-    for effect in model.effects:
-        estimated = f"{effect.name}.precision" in optimized
-        try:
-            built = build_effect(_unit_precision(effect) if estimated else effect, Path("."))
-            block, precision = _build_effect_block(built, frame)
-        except (
-            ConfigurationError,
-            DataContractError,
-            ModelValidationError,
-            KeyError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise CompilationError(
-                f"failed to compile effect {effect.name!r}: "
-                f"{_effect_failure_detail(error, frame)}"
-            ) from error
-        if precision is not None:
-            precisions[effect.name] = _configured_precision(effect) if estimated else precision
-        if estimated and effect.type == "midas":
-            parameter = f"{effect.name}.precision"
-            dtd, projector = midas_penalty(len(effect.columns or ()),
-                                           2 if effect.order is None else effect.order)
-            ridge = 1e-6 if effect.ridge is None else float(effect.ridge)
-
-            def build(values, dtd=dtd, projector=projector, ridge=ridge, parameter=parameter):
-                return csr_matrix(float(values[parameter]) * dtd + ridge * projector)
-
-            parametric[effect.name] = ((parameter,), build)
-        blocks.append(block)
-    return blocks, precisions, parametric
+def _effect_label(name: str) -> str:
+    """The effect's name in a compile error; the fixed effect is its formula."""
+    return f"{name!r} (fixed formula)" if name == "fixed" else repr(name)
 
 
 def _effect_failure_detail(error: Exception, frame) -> str:
@@ -277,14 +220,48 @@ def _validate_optimized_names(model: ModelConfig, optimized: tuple[str, ...]) ->
         raise CompilationError(f"unknown optimized parameter names: {unknown}")
 
 
-def compile_gaussian_family(
-    data: DataConfig,
-    model: ModelConfig,
-    panel: CanonicalPanel,
-    optimized: tuple[str, ...],
-) -> CompiledGaussianFamily:
-    optimized = tuple(optimized)
-    _validate_optimized_names(model, optimized)
+def _config_lgm(data: DataConfig, model: ModelConfig, optimized) -> "LGM":
+    """The ``LGM`` a Gaussian YAML config declares.
+
+    Each name in ``optimized`` becomes a ``Hyperparameter``: ``sigma`` on the
+    likelihood, ``<effect>.precision`` on the effect (on the wrapped effect for
+    ``Grouped``). ``optimized`` is either names -- started at the configured
+    value, default bounds -- or a mapping to ``ParameterBounds``.
+    """
+    from pylgm.model import LGM
+
+    def declared(name: str, configured: float):
+        if name not in optimized:
+            return configured
+        bounds = optimized[name] if isinstance(optimized, Mapping) else None
+        if bounds is None:
+            return Hyperparameter(name, initial=configured)
+        return Hyperparameter(name, initial=bounds.initial, lower=bounds.lower, upper=bounds.upper)
+
+    predictor = Fixed(model.fixed, prior_precision=model.fixed_prior_precision)
+    for effect in model.effects:
+        try:
+            built = build_effect(effect, Path("."))
+        except (ConfigurationError, ModelValidationError, KeyError, TypeError, ValueError) as error:
+            raise CompilationError(f"failed to compile effect {effect.name!r}: {error}") from error
+        precision = declared(f"{effect.name}.precision", _configured_precision(effect))
+        if isinstance(precision, Hyperparameter):
+            if isinstance(built, Grouped):
+                built = replace(built, effect=replace(built.effect, precision=precision))
+            else:
+                built = replace(built, precision=precision)
+        predictor = predictor + built
+    return LGM(
+        response=data.response,
+        likelihood=Gaussian(declared("sigma", float(model.sigma))),
+        predictor=predictor,
+        panel=tuple(data.panel),
+        time=data.time,
+    )
+
+
+def _checked_config_panel(data: DataConfig, model: ModelConfig, panel: CanonicalPanel) -> None:
+    """The YAML path's own contract checks, ahead of the shared compiler."""
     if panel.response != data.response:
         raise DataContractError(
             "panel response metadata does not match configuration: "
@@ -296,59 +273,26 @@ def compile_gaussian_family(
             "panel key metadata does not match configuration: "
             f"{panel.key_columns!r} != {expected_keys!r}"
         )
-    frame = panel.frame
-    _validate_required_columns(data, model, frame.columns)
-    try:
-        fixed = build_fixed(
-            frame,
-            model.fixed,
-            model.fixed_prior_precision,
-        )
-    except (
-        DataContractError,
-        FormulaicError,
-        ModelValidationError,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise CompilationError(f"failed to compile fixed formula: {error}") from error
-    structured_optimized = tuple(name for name in optimized if name.endswith(".precision"))
-    structured, precisions, parametric = _structured_blocks(
-        model, panel, optimized if structured_optimized else ()
-    )
-    blocks = [fixed, *structured]
-    wrong_rows = [block.name for block in blocks if block.design.shape[0] != len(frame)]
-    if wrong_rows:
-        raise CompilationError(
-            f"latent block design row count does not match the panel: {wrong_rows}"
-        )
-    _qualified_labels(blocks)
-    try:
-        y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
-        scalable_blocks = tuple(
-            ParametricBlock(block, *parametric[block.name])
-            if block.name in parametric
-            else ScalableBlock(
-                block,
-                f"{block.name}.precision" if f"{block.name}.precision" in optimized else None,
-                1.0,
-            )
-            for block in blocks
-        )
-        return CompiledGaussianFamily(
-            y=y,
-            observed=panel.observed,
-            offset=np.zeros(len(frame)),
-            blocks=scalable_blocks,
-            parameter_names=optimized,
-            initial=Hyperparameters(sigma=float(model.sigma), precisions=precisions),
-        )
-    except (TypeError, ValueError) as error:
-        raise CompilationError(f"compiled Gaussian family is invalid: {error}") from error
+    _validate_required_columns(data, model, panel.frame.columns)
+
+
+def compile_gaussian_family(
+    data: DataConfig,
+    model: ModelConfig,
+    panel: CanonicalPanel,
+    optimized,
+) -> CompiledFamily:
+    """The optimisable family of a Gaussian YAML config (see ``_config_lgm``)."""
+    _validate_optimized_names(model, tuple(optimized))
+    if not optimized:
+        raise CompilationError("a Gaussian family needs at least one optimized parameter")
+    _checked_config_panel(data, model, panel)
+    return compile_family(_config_lgm(data, model, optimized), panel)
 
 
 def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
-    return compile_gaussian_family(config.data, config.model, panel, optimized=()).materialize({})
+    _checked_config_panel(config.data, config.model, panel)
+    return compile_lgm(_config_lgm(config.data, config.model, ()), panel)
 
 
 def _resolved_precision(value: float | Hyperparameter) -> float:
@@ -527,7 +471,7 @@ def _scaled_design_block(block: LatentBlock, weights: np.ndarray) -> LatentBlock
 
     The two-site invariant a ``Weighted`` effect relies on: weighting scales
     the design and leaves name, labels, precision and constraints untouched.
-    Shared by the compile-side (``_build_effect_block``) and family-side
+    Shared by every effect build (``_append_family_blocks``) and the family-side
     (``_weighted_family_block``) weighted-block construction so the two never
     drift apart.
     """
@@ -538,168 +482,6 @@ def _scaled_design_block(block: LatentBlock, weights: np.ndarray) -> LatentBlock
         block.precision,
         block.constraints,
     )
-
-
-def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
-    """Build one latent block from an effect spec. Shared by compile_lgm and compile_joint.
-
-    Returns ``(block, precision)`` where ``precision`` is the resolved precision
-    value to record under the effect's own name, or ``None`` for effects that
-    do not carry one (Fixed, MIDASParametric).
-    """
-    try:
-        if isinstance(effect, Weighted):
-            block, precision = _build_effect_block(effect.effect, frame)
-            weights = _weight_vector(frame, effect)
-            return (_scaled_design_block(block, weights), precision)
-        elif isinstance(effect, Replicated):
-            inner_spec = effect.effect
-            # Resolve the index THROUGH a Weighted wrapper rather than off
-            # inner_spec directly: Weighted carries no `index` of its own (see
-            # effects/spec.py), same unwrap used there and at line ~290. The
-            # structural build below also uses `target` rather than
-            # `inner_spec`: a Weighted's `by` column lives on the real frame,
-            # not on the one-row-per-level frame, so building Weighted itself
-            # against that fabricated frame would raise a spurious "weight
-            # column not found". Weighting is applied afterwards instead, over
-            # the real frame, exactly as the top-level Weighted branch does.
-            target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
-            index = target.index
-            # Keep the column's OWN dtype: stringifying here and then passing the
-            # real dtype to _levels_frame is contradictory, and it is exactly the
-            # slice-1 bug -- an integer `year` would be ordered 1, 10, 11, 2 by
-            # RW1/RW2/Seasonal/AR1. The builder sorts, so order here is irrelevant;
-            # only the dtype matters.
-            levels = tuple(frame[index].dropna().unique())
-            replicates = replicate_levels(frame, effect.name, effect.over)
-            structural, precision = _build_effect_block(
-                target, _levels_frame(index, levels, frame[index].dtype)
-            )
-            block = replicated_block(structural, frame, index, effect.over, replicates)
-            if isinstance(inner_spec, Weighted):
-                weights = _weight_vector(frame, inner_spec)
-                block = _scaled_design_block(block, weights)
-            return (block, precision)
-        elif isinstance(effect, Grouped):
-            inner_spec = effect.effect
-            # Same Weighted unwrap as the Replicated branch: a Weighted carries
-            # no `index` of its own, and its `by` column lives on the real
-            # frame, not on the one-row-per-level frame that the inner effect
-            # is built against.
-            target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
-            index = target.index
-            # Keep the column's OWN dtype: an integer `year` would otherwise be
-            # ordered 1, 10, 11, 2 by RW1/RW2/Seasonal/AR1.
-            levels = tuple(frame[index].dropna().unique())
-            groups = group_levels(frame, effect.name, effect.over, effect.structure)
-            structural, precision = _build_effect_block(
-                target, _levels_frame(index, levels, frame[index].dtype)
-            )
-            block = grouped_block(
-                structural, frame, index, effect.over, groups, effect.structure
-            )
-            if isinstance(inner_spec, Weighted):
-                block = _scaled_design_block(block, _weight_vector(frame, inner_spec))
-            return (block, precision)
-        elif isinstance(effect, Fixed):
-            if isinstance(effect.prior_precision, Hyperparameter):
-                block = build_fixed(
-                    frame, effect.formula, effect.prior_precision.initial,
-                    exempt_intercept=True,
-                )
-            else:
-                block = build_fixed(frame, effect.formula, effect.prior_precision)
-            precision = None
-        elif isinstance(effect, IID):
-            precision = _resolved_precision(effect.precision)
-            block = build_iid(frame, effect.name, effect.index, precision)
-        elif isinstance(effect, Besag):
-            precision = _resolved_precision(effect.precision)
-            block = build_besag(
-                frame, effect.name, effect.index, dict(effect.graph), precision, effect.scale
-            )
-        elif isinstance(effect, ProperCAR):
-            precision = _resolved_precision(effect.precision)
-            rho = _resolved_precision(effect.rho)
-            block = build_proper_car(
-                frame, effect.name, effect.index, dict(effect.graph), rho, precision
-            )
-        elif isinstance(effect, SAR):
-            precision = _resolved_precision(effect.precision)
-            rho = _resolved_precision(effect.rho)
-            block = build_sar(
-                frame, effect.name, effect.index, dict(effect.graph), rho, precision
-            )
-        elif isinstance(effect, DynamicSpatialPanel):
-            precision = _resolved_precision(effect.precision)
-            block = build_dynamic_spatial_panel(
-                frame, effect.name, effect.unit, effect.time,
-                {t: dict(g) for t, g in dict(effect.graphs).items()},
-                _resolved_precision(effect.rho),
-                _resolved_precision(effect.gamma),
-                _resolved_precision(effect.eta),
-                precision,
-            )
-        elif isinstance(effect, BYM2):
-            precision = _resolved_precision(effect.precision)
-            phi = _resolved_precision(effect.phi) if isinstance(effect.phi, Hyperparameter) else effect.phi
-            block = build_bym2(
-                frame, effect.name, effect.index, dict(effect.graph), precision, phi
-            )
-        elif isinstance(effect, AR1):
-            precision = _resolved_precision(effect.precision)
-            rho = _resolved_precision(effect.rho) if isinstance(effect.rho, Hyperparameter) else effect.rho
-            block = build_ar1(
-                frame, effect.name, effect.index, precision, rho, effect.replicate
-            )
-        elif isinstance(effect, (RW1, RW2)):
-            precision = _resolved_precision(effect.precision)
-            order = 1 if isinstance(effect, RW1) else 2
-            block = build_random_walk(
-                frame, effect.name, effect.index, precision, order, effect.scale
-            )
-        elif isinstance(effect, Seasonal):
-            precision = _resolved_precision(effect.precision)
-            block = build_seasonal(
-                frame, effect.name, effect.index, precision, effect.period, effect.ridge
-            )
-        elif isinstance(effect, MIDAS):
-            precision = _resolved_precision(effect.precision)
-            block = build_midas(
-                frame, effect.name, effect.columns, precision, effect.order, effect.ridge
-            )
-        elif isinstance(effect, MIDASParametric):
-            precision = None
-            theta = (_resolved_precision(effect.shape1), _resolved_precision(effect.shape2))
-            block = build_midas_parametric(
-                frame, effect.name, effect.columns, effect.kernel, theta, effect.prior_precision
-            )
-        elif isinstance(effect, SpaceTime):
-            precision = _resolved_precision(effect.precision)
-            block = build_spacetime(
-                frame, effect.name, effect.space, effect.time,
-                dict(effect.graph) if effect.graph is not None else None,
-                effect.interaction, effect.order, precision, effect.scale,
-            )
-        else:
-            # An unrecognized effect must not fall through to the random-walk
-            # builder: that silently mis-compiles it as an RW2.
-            raise CompilationError(
-                f"unsupported effect type: {type(effect).__name__}"
-            )
-    except (
-        DataContractError,
-        FormulaicError,
-        ModelValidationError,
-        KeyError,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise CompilationError(
-            f"failed to compile effect {effect.name!r}: "
-            f"{_effect_failure_detail(error, frame)}"
-        ) from error
-    return block, precision
 
 
 def _copy_incidence(frame, copy, labels: "tuple[str, ...]") -> csr_matrix:
@@ -729,35 +511,6 @@ def _copy_incidence(frame, copy, labels: "tuple[str, ...]") -> csr_matrix:
     )
 
 
-def _fold_copies(blocks, copies, frame, resolved) -> "list[LatentBlock]":
-    """Add each copy's scaled incidence to the columns of the block it names.
-
-    Copies produce no block of their own: ``design == hstack(blocks)`` gives each
-    block a disjoint column span, and a copy shares its target's columns by
-    definition. Folding here is what keeps that invariant true.
-    """
-    by_name = {block.name: index for index, block in enumerate(blocks)}
-    folded = list(blocks)
-    for copy in copies:
-        if copy.name not in by_name:
-            raise CompilationError(
-                f"copy targets block {copy.name!r}, which this model does not "
-                f"declare. Declared blocks: {sorted(by_name)!r}"
-            )
-        position = by_name[copy.name]
-        target = folded[position]
-        scale = _resolve_scale(copy.scale, resolved, default=1.0)
-        incidence = _copy_incidence(frame, copy, target.labels)
-        folded[position] = LatentBlock(
-            target.name,
-            target.labels,
-            csr_matrix(target.design + scale * incidence),
-            target.precision,
-            target.constraints,
-        )
-    return folded
-
-
 def _split_copies(effects) -> "tuple[list, list]":
     """Separate ordinary effects from copies, preserving declaration order.
 
@@ -780,15 +533,7 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
             f"{panel.response!r} != {model.response!r}"
         )
     frame = panel.frame
-    ordinary, copies = _split_copies(model.predictor.effects)
-    blocks: list[LatentBlock] = []
-    precisions: dict[str, float] = {}
-    for effect in ordinary:
-        block, precision = _build_effect_block(effect, frame)
-        if precision is not None:
-            precisions[effect.name] = precision
-        blocks.append(block)
-    blocks = _fold_copies(blocks, copies, frame, {})
+    blocks = _fixed_value_blocks(model.predictor.effects, frame)
 
     _warn_missing_spacetime_main_effects(model.predictor.effects)
 
@@ -812,23 +557,13 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
 
     if isinstance(model.likelihood, Gaussian):
-        sigma = (
-            model.likelihood.sigma.initial
-            if isinstance(model.likelihood.sigma, Hyperparameter)
-            else model.likelihood.sigma
-        )
+        sigma = model.likelihood.sigma
+        likelihood = CompiledGaussian(sigma.initial if isinstance(sigma, Hyperparameter) else sigma)
         try:
-            family = CompiledGaussianFamily(
-                y=y,
-                observed=panel.observed,
-                offset=offset,
-                blocks=tuple(ScalableBlock(block, None, 1.0) for block in blocks),
-                parameter_names=(),
-                initial=Hyperparameters(sigma=sigma, precisions=precisions),
-                extra_constraints=extra_constraints,
-                extra_constraint_rhs=extra_constraint_rhs,
+            return _assemble_compiled_model(
+                y, panel.observed, offset, tuple(blocks), likelihood,
+                extra_constraints=extra_constraints, extra_constraint_rhs=extra_constraint_rhs,
             )
-            return family.materialize({})
         except (TypeError, ValueError) as error:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
@@ -1065,9 +800,7 @@ def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> Laten
         entry, frames, starts, sizes, total, joint.outcomes
     )
     dtype = frames[0][entry.effect.index].dtype
-    template, _ = _build_effect_block(
-        entry.effect, _levels_frame(entry.effect.index, levels, dtype)
-    )
+    template = _effect_block(entry.effect, _levels_frame(entry.effect.index, levels, dtype))
     incidences = _realign_shared_incidences(entry, levels, template, incidences)
     scales = entry.scales_for(len(joint.submodels))
     default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
@@ -1112,7 +845,7 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
         before, after = starts[position], total - starts[position] - sizes[position]
         for effect in model.predictor.effects:
             try:
-                block, _precision = _build_effect_block(effect, frame)
+                block = _effect_block(effect, frame)
             except CompilationError as error:
                 raise CompilationError(f"{error} for outcome {outcome!r}") from error
             named = LatentBlock(
@@ -1278,7 +1011,10 @@ def _compiled_block(name: str, builder, *args) -> object:
         TypeError,
         ValueError,
     ) as error:
-        raise CompilationError(f"failed to compile effect {name!r}: {error}") from error
+        raise CompilationError(
+            f"failed to compile effect {_effect_label(name)}: "
+            f"{_effect_failure_detail(error, args[0] if args else None)}"
+        ) from error
 
 
 def _weighted_family_block(item, weights: np.ndarray):
@@ -1303,7 +1039,7 @@ def _weighted_family_block(item, weights: np.ndarray):
     return ScalableBlock(scaled, item.parameter, item.scale)
 
 
-def _replicated_family_block(item, frame, effect, replicates, index):
+def _replicated_family_block(item, frame, effect, replicates, index, level_positions=None):
     """Compose one family block into R independent replicates.
 
     A ScalableBlock's precision is a scalar multiple, which commutes with the
@@ -1323,7 +1059,7 @@ def _replicated_family_block(item, frame, effect, replicates, index):
     ``index`` is resolved by the caller rather than read off ``effect.effect``
     here: when the replicated target is a ``Weighted``, ``.index`` lives on its
     wrapped inner effect, not on the ``Weighted`` itself (see
-    ``_build_effect_block``'s Replicated branch).
+    ``_append_family_blocks``' Replicated branch).
     """
     # Rejected before composing: replicated_block on a design that spans the
     # level set can raise its own "level(s) absent" ValueError first, which
@@ -1335,7 +1071,9 @@ def _replicated_family_block(item, frame, effect, replicates, index):
             "because the rebuilt design spans the level set rather than the "
             "replicated row space"
         )
-    composed = replicated_block(item.block, frame, index, effect.over, replicates)
+    composed = replicated_block(
+        item.block, frame, index, effect.over, replicates, level_positions=level_positions
+    )
     count = len(replicates)
     if isinstance(item, ParametricBlock):
         def build(values, inner_build=item.build, count=count):
@@ -1395,19 +1133,32 @@ def _append_family_blocks(
     """
     if isinstance(effect, Replicated):
         inner_spec = effect.effect
-        # Same Weighted-unwrap as _build_effect_block's Replicated branch: a
+        # Weighted-unwrap: a
         # Weighted carries no `index` of its own, and building it against the
         # fabricated level frame would raise a spurious "weight column not
         # found" (the `by` column lives on the real frame). Recurse on the
         # unwrapped target over the level frame, then apply the weighting
         # afterwards over the real frame, same as the top-level Weighted branch.
         target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
+        replicates = _compiled_block(effect.name, replicate_levels, frame, effect.name, effect.over)
+        if isinstance(target, Grouped):
+            # group + replicate: the grouped family
+            # blocks over the real frame, replicated on their one-hot cells.
+            first = len(scalable)
+            _append_family_blocks(
+                target, frame, scalable, parameter_names, parameter_bounds, parameter_priors,
+            )
+            for position in range(first, len(scalable)):
+                scalable[position] = _replicated_family_block(
+                    scalable[position], frame, effect, replicates, None,
+                    level_positions=one_hot_columns(scalable[position].block.design),
+                )
+            return
         index = target.index
-        # Keep the column's own dtype -- see _build_effect_block's Replicated
+        # Keep the column's own dtype -- see _levels_frame and the Replicated
         # branch and _levels_frame: an integer index stringified here would be
         # ordered 1, 10, 11, 2 by RW1/RW2/Seasonal/AR1.
         levels = tuple(frame[index].dropna().unique())
-        replicates = replicate_levels(frame, effect.name, effect.over)
         level_frame = _levels_frame(index, levels, frame[index].dtype)
         first = len(scalable)
         _append_family_blocks(
@@ -1428,9 +1179,9 @@ def _append_family_blocks(
         # Same Weighted unwrap as the Replicated branch above.
         target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
         index = target.index
-        # Keep the column's own dtype -- see _build_effect_block's Grouped branch.
+        # Keep the column's own dtype -- see _levels_frame.
         levels = tuple(frame[index].dropna().unique())
-        groups = group_levels(frame, effect.name, effect.over, effect.structure)
+        groups = _compiled_block(effect.name, group_levels, frame, effect.name, effect.over, effect.structure)
         level_frame = _levels_frame(index, levels, frame[index].dtype)
         first = len(scalable)
         _append_family_blocks(
@@ -1448,7 +1199,7 @@ def _append_family_blocks(
         return
     if isinstance(effect, Weighted):
         # Routed through _compiled_block so a bad weight column raises the same
-        # CompilationError here as it does from _build_effect_block -- without
+        # CompilationError here as every other effect build does -- without
         # this, an otherwise-identical model raised CompilationError or a raw
         # DataContractError depending only on whether it declared a Hyperparameter.
         weights = _compiled_block(effect.name, _weight_vector, frame, effect)
@@ -1969,25 +1720,14 @@ def _copied_family_block(item, copy, incidence):
     return ParametricDesignBlock(baked, parameters, build, item.parameter, item.scale)
 
 
-def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
-    """Build an optimisable family, or None when no Hyperparameter is declared."""
-    if not _model_hyperparameters(model):
-        return None
-    frame = panel.frame
-    if model.offset is not None and model.offset not in frame.columns:
-        raise DataContractError(f"offset column not found: {model.offset!r}")
-    offset = (
-        frame[model.offset].to_numpy(dtype=float)
-        if model.offset is not None
-        else np.zeros(len(frame))
-    )
-    y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
-
+def _family_blocks(effects, frame):
+    """``(blocks, parameter_names, parameter_bounds, parameter_priors)`` of the
+    effects, copies folded into their targets -- the one per-effect build path."""
     scalable: list[ScalableBlock | ParametricBlock | ParametricDesignBlock] = []
     parameter_names: list[str] = []
     parameter_bounds: dict[str, OptimizationBounds] = {}
     parameter_priors: dict[str, object] = {}
-    ordinary, copies = _split_copies(model.predictor.effects)
+    ordinary, copies = _split_copies(effects)
     for effect in ordinary:
         _append_family_blocks(
             effect, frame, scalable, parameter_names, parameter_bounds, parameter_priors
@@ -2015,6 +1755,43 @@ def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None
             )
             if copy.scale.prior is not None:
                 parameter_priors[copy.scale.name] = copy.scale.prior
+
+    return scalable, parameter_names, parameter_bounds, parameter_priors
+
+
+def _fixed_value_blocks(effects, frame) -> list[LatentBlock]:
+    """The effects' blocks with every hyperparameter at its initial value."""
+    scalable, names, bounds, _ = _family_blocks(effects, frame)
+    return list(_materialize_blocks(tuple(scalable), {n: bounds[n].initial for n in names}))
+
+
+def _effect_block(effect, frame) -> LatentBlock:
+    """One effect's block at its initial hyperparameter values."""
+    if isinstance(effect, Copy):  # a copy folds into its target; alone it has no block
+        raise CompilationError("unsupported effect type: Copy")
+    blocks = _fixed_value_blocks([effect], frame)
+    if len(blocks) != 1:
+        raise CompilationError(f"effect {effect.name!r} compiled to {len(blocks)} blocks, expected 1")
+    return blocks[0]
+
+
+def compile_family(model: "LGM", panel: CanonicalPanel) -> CompiledFamily | None:
+    """Build an optimisable family, or None when no Hyperparameter is declared."""
+    if not _model_hyperparameters(model):
+        return None
+    frame = panel.frame
+    if model.offset is not None and model.offset not in frame.columns:
+        raise DataContractError(f"offset column not found: {model.offset!r}")
+    offset = (
+        frame[model.offset].to_numpy(dtype=float)
+        if model.offset is not None
+        else np.zeros(len(frame))
+    )
+    y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
+
+    scalable, parameter_names, parameter_bounds, parameter_priors = _family_blocks(
+        model.predictor.effects, frame
+    )
 
     if isinstance(model.likelihood, Gaussian):
         sigma = model.likelihood.sigma
@@ -2068,7 +1845,7 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
 
     Extracted out of ``build_prediction_context`` so ``build_joint_prediction_contexts``
     shares the exact same effect-to-entry dispatch -- the same de-duplication
-    Task 4 did for ``_build_effect_block``.
+    Task 4 did for the plain build.
     """
     if isinstance(effect, Weighted):
         # Nest rather than special-case: later modifier wrappers reuse this same
@@ -2130,6 +1907,11 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
         target = inner_spec.effect if isinstance(inner_spec, Weighted) else inner_spec
         replicate_labels = tuple(dict.fromkeys(la.split("@", 1)[0] for la in block.labels))
         level_labels = tuple(dict.fromkeys(la.split("@", 1)[1] for la in block.labels))
+        if isinstance(target, Grouped):
+            # replicate@group@level: the inner entry is the grouped one, built
+            # from the group@level labels the replicate prefix leaves behind.
+            inner = _prediction_entry(target, model, panel, SimpleNamespace(labels=level_labels))
+            return ("replicated_nested", (effect.name, effect.over, replicate_labels, inner))
         entry = (
             "replicated_structured",
             (effect.name, effect.over, target.index, replicate_labels, level_labels),
@@ -2375,7 +2157,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         sub_family = compile_family(model, panels[outcome])
         if sub_family is None:
             for effect in model.predictor.effects:
-                block, _ = _build_effect_block(effect, frame)
+                block = _effect_block(effect, frame)
                 named = LatentBlock(
                     f"{outcome}:{block.name}", block.labels, block.design,
                     block.precision, block.constraints,

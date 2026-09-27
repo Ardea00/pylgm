@@ -164,19 +164,19 @@ def test_family_path_applies_weighted_like_the_plain_path():
     compiles through ``_replicated_family_block`` and its own re-application of
     the weighting (compiler.py, guarded by ``if isinstance(inner_spec,
     Weighted):`` right after the family-block loop), not through the plain
-    ``_build_effect_block`` path that ``test_replicated_weighted_round_trips_on_
+    ``_effect_block`` path that ``test_replicated_weighted_round_trips_on_
     the_fit_rows`` above exercises. Guarding that re-application with
     ``if False and ...`` drops the weighting silently -- the hyperparameter
     stays estimated and the shape is unchanged, only the spatially-varying
     coefficient itself goes missing. There is no live defect today: this pins
     that the plain and family-path designs agree, weight column and all.
     """
-    from pylgm.compiler import _build_effect_block, compile_family
+    from pylgm.compiler import _effect_block, compile_family
     from pylgm.config.schema import DataConfig
     from pylgm.data.panel import CanonicalPanel
 
     frame = _weighted_data()
-    plain, _ = _build_effect_block(
+    plain = _effect_block(
         Replicated(Weighted(IID("u", index="t", precision=1.0), by="z"), over="firm"),
         frame,
     )

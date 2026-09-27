@@ -44,6 +44,8 @@ def canonical_graph(
     of bare labels, byte-identical to the historical output; otherwise they are
     a sorted tuple of ``(label, weight)`` pairs so weights survive the freeze.
     """
+    if isinstance(graph, tuple):  # already canonical: idempotent (dataclasses.replace)
+        graph = dict(graph)
     return freeze_adjacency(*normalize_graph(graph))
 
 
