@@ -163,3 +163,9 @@ More workers cost memory: a gradient batch keeps up to twice as many
 compiled models as there are hyperparameters, plus `num_workers` fits, alive
 at once. Choose `num_workers` from the machine's physical cores and the
 model's size, and measure rather than assume that more is better.
+
+BLAS threads are limited through `threadpoolctl`, which controls OpenBLAS,
+MKL and BLIS. It cannot control Apple Accelerate, which the macOS NumPy and
+SciPy wheels typically use. There `blas_threads` has no effect, and
+`VECLIB_MAXIMUM_THREADS`, set before Python starts, is the only control.
+The fits still run in parallel; only the BLAS thread cap is missing.

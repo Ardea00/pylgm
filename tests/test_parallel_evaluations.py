@@ -214,22 +214,25 @@ def test_num_workers_and_blas_threads_validation_through_fit():
         model.fit(frame, blas_threads=True)
 
 
-def test_blas_limit_pins_every_blas_entry_to_one_thread_and_restores_after():
-    before = {
-        entry["prefix"]: entry["num_threads"] for entry in threadpoolctl.threadpool_info()
+def _blas_threads() -> dict[str, int]:
+    return {
+        entry["filepath"]: entry["num_threads"]
+        for entry in threadpoolctl.threadpool_info()
+        if entry["user_api"] == "blas"
     }
-    assert before, "expected at least one BLAS entry on this machine"
+
+
+def test_blas_limit_pins_every_blas_entry_to_one_thread_and_restores_after():
+    before = _blas_threads()
+    if not before:
+        # e.g. macOS wheels linked against Accelerate, which threadpoolctl
+        # cannot control: blas_limit is then a no-op.
+        pytest.skip("no threadpoolctl-controllable BLAS loaded")
 
     with blas_limit(4, None):
-        during = threadpoolctl.threadpool_info()
-        assert during, "expected at least one BLAS entry on this machine"
-        for entry in during:
-            assert entry["num_threads"] == 1
+        assert set(_blas_threads().values()) == {1}
 
-    after = {
-        entry["prefix"]: entry["num_threads"] for entry in threadpoolctl.threadpool_info()
-    }
-    assert after == before
+    assert _blas_threads() == before
 
 
 def _scalar_family(y: float) -> CompiledFamily:
