@@ -192,13 +192,43 @@ after sparsity (INLA does the same).
 
 ```
 fit_laplace(model, allow_large_dense=False)
-    allow_large_dense                -> dense (explicit opt-in, as today)
-    _exceeds_dense_threshold(model)  -> _fit_laplace_sparse   (was: raise)
-    otherwise                        -> _fit_laplace_dense
+    allow_large_dense                                  -> dense (explicit opt-in)
+    _exceeds_dense_threshold(model) or latent > 1000   -> _fit_laplace_sparse
+    otherwise                                          -> _fit_laplace_dense
 ```
 
-`preflight_dense_reference` stays for the explicit dense request. Joint models
+*Revised during implementation.* The first draft routed by the Gaussian
+engine's memory guard (~4 096 latents). Measured on Poisson + Besag (both paths
+agree to ~3e-11):
+
+| latents | dense | sparse |
+|---|---|---|
+| 400 | 0.35 s | 0.70 s |
+| 900 | 2.44 s | 1.99 s |
+| 2 500 | 64.3 s | 4.14 s |
+
+Laplace refactors at every Newton step and grid point, so the crossover is far
+below the memory guard; routing at ~1 000 latents recovers the 15x. Consequence:
+a Laplace fit above 1 000 latents keeps no dense `covariance` (the property
+raises and names the sparse alternatives); marginals, `predict`,
+`linear_combinations` and `sample` are unchanged. Joint models
 (`joint.py:388, 419`) route through `fit_laplace` and inherit the switch.
+
+## Singular `A_ss`: confounded intrinsic effects (found in implementation)
+
+Two intrinsic blocks whose null spaces are confounded through the design
+(Besag + RW1: `v = (1_s, -1_t)` has `Q v = 0` and `Z v = 0`) make
+`A_ss = Q_ss + Z_s^T W Z_s` singular *before* the constraints. The dense
+engines reduce onto `null(C)` first and are fine; the sparse path is not. This
+predates the slice (the sparse Gaussian path raised a pivot `NumericalError`
+by round-off luck) and the weights refactor turned it silent -- a mean
+violating both sum-to-zero rows. Now: a structural check
+(`_require_identified_field`, from the blocks' null-space constraint rows)
+raises `UnsupportedEngineError`, with a post-kriging constraint-residual
+backstop. Supporting these models sparsely needs a grounded KKT solve (one
+anchor node per intrinsic block moved into the dense Schur block, constraint
+rows as multipliers) and a sampler that does not need `H^1/2`: a follow-up
+slice, **E-sparse-D2**. Until then they fit on the dense engines.
 
 ## Testing
 

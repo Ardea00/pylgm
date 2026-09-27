@@ -17,6 +17,11 @@ from pylgm.inference.sampling import GridSampler
 from pylgm.ir.model import CompiledLGM
 
 
+# Latent dimension above which the sparse engine beats the dense one (measured,
+# see fit_laplace); a sparse fit keeps no dense covariance.
+_SPARSE_LAPLACE_MIN_LATENT = 1000
+
+
 def _variational_mean_shift(reduced_design, reduced_covariance, factor, eta, y, likelihood):
     """The leading-order variational correction from the mode toward the mean.
 
@@ -483,6 +488,11 @@ def fit_laplace(
 ) -> LaplaceResult:
     """Fit a latent Gaussian model by a Laplace approximation at fixed hyperparameters.
 
+    Above ~1 000 latents (or the dense memory guard) the fit runs on the sparse
+    partitioned solver and keeps no dense ``covariance``; marginals, ``predict``,
+    ``linear_combinations`` and ``sample`` work unchanged. ``allow_large_dense=True``
+    forces the dense engine.
+
     Likelihood-agnostic: any compiled likelihood implementing the GLM protocol works,
     so a Gaussian likelihood is fit exactly and serves as the correctness anchor.
 
@@ -495,13 +505,16 @@ def fit_laplace(
     """
     if type(allow_large_dense) is not bool:
         raise TypeError("allow_large_dense must be a boolean")
-    # Past the dense threshold, route to the sparse engine (as the exact Gaussian
-    # engine does); allow_large_dense=True still forces the dense reference.
-    fit = (
-        _fit_laplace_sparse
-        if not allow_large_dense and _gaussian._exceeds_dense_threshold(model)
-        else _fit_laplace_dense
+    # Route to the sparse engine past the dense memory guard (as the exact
+    # Gaussian engine does) and, since Laplace refactors every Newton step and
+    # grid point, from the measured crossover on (Poisson + Besag: dense 64 s vs
+    # sparse 4 s at 2 500 latents, even at ~900). allow_large_dense=True still
+    # forces the dense reference.
+    sparse = (
+        _gaussian._exceeds_dense_threshold(model)
+        or model.precision.shape[0] > _SPARSE_LAPLACE_MIN_LATENT
     )
+    fit = _fit_laplace_sparse if sparse and not allow_large_dense else _fit_laplace_dense
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
             return fit(model, max_iterations, tolerance, mean_correction)
