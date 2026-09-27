@@ -56,15 +56,20 @@ In scope:
 - Newton **warm start** from a caller-supplied mode, used by the INLA grid and
   the empirical-Bayes search.
 
-Out of scope (sequenced after this slice):
+Out of scope (sequenced after this slice) -- *status after the follow-ups*:
 
-- Simplified-Laplace and full-Laplace latent strategies above the guard. They
-  need `cov(x_i, eta_j)` off-diagonals (`inla.py` already guards them with
-  `UnsupportedEngineError`); unchanged here.
-- Symbolic-factorisation reuse across Newton steps and grid points. SciPy's
-  `splu` exposes no analyse/factor split; see *Future work*.
-- Cross-block constraint rows (already `NotImplementedError` on the sparse
-  Gaussian path, `_block_column_confinement`).
+- Simplified-Laplace latent marginals above the guard: **done**
+  (`cov(x, eta)` in column batches from the sparse posterior; `n` solves per
+  grid point). Full-Laplace marginals above the guard: **not planned** -- a
+  refit per latent coordinate per grid point per node is millions of sparse
+  factorisations at the target sizes (and the dense engine already refuses
+  full Laplace on constrained effects).
+- Symbolic-factorisation reuse across Newton steps and grid points: open
+  (*Future work*, CHOLMOD).
+- Cross-block constraint rows: **done** (`_coupled_prior_logdet`).
+- `mean_correction` with data constraints above the guard: **done**
+  (structural-only eta variances from the capacitance's leading QR block).
+- Confounded intrinsic effects: **done** (E-sparse-D2, below).
 
 ## Approach
 
