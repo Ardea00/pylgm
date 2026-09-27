@@ -175,8 +175,8 @@ def test_sparse_laplace_estimates_hyperparameters_like_dense(hyperparameters, mo
             return result.hyperparameters["s_prec"]
         return float(result.hyperparameter_marginals()["s_prec"].mean[0])
 
-    # L-BFGS pins a flat optimum only to its finite-difference resolution (eps 1e-6
-    # on log tau), so the two argmaxes agree to ~1e-4, not to solver tolerance.
+    # The EB search stops on a plateau (objective_tolerance 1e-5) of a flat optimum,
+    # so the two argmaxes agree to ~1e-4, not to solver tolerance.
     assert estimate(sparse) == pytest.approx(estimate(dense), rel=1e-3)
     np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-4)
     # The reported lml is not stationary at the penalised optimum (the PC prior's
@@ -389,3 +389,31 @@ def test_coupled_prior_logdet_equals_the_block_separable_one():
     rows = compiled.constraints
     separable = _prior_logdet(compiled, rows, _block_column_confinement(compiled, rows))
     assert _coupled_prior_logdet(compiled, rows) == pytest.approx(separable, abs=1e-8)
+
+
+@pytest.mark.parametrize("latent_strategy", ["gaussian", "simplified_laplace"])
+def test_sparse_path_is_identical_under_parallel_workers(latent_strategy, monkeypatch):
+    """num_workers fans conditional fits out over threads (SuperLU and BLAS
+    release the GIL). On the sparse path -- Laplace engine, warm starts,
+    confounded-intrinsic grounding, sparse SLA -- the result must not depend
+    on the worker count."""
+    from pylgm import Hyperparameter
+
+    model = LGM(likelihood=Poisson(), predictor=Fixed("1 + x")
+                + Besag("s", index="region", graph=RING, precision=Hyperparameter("tau", initial=1.0))
+                + RW1("trend", index="t", precision=Hyperparameter("rho", initial=4.0)), **BASE)
+    frame = _frame()
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+
+    def fit(workers):
+        return model.fit(frame, engine="laplace", hyperparameters="integrate",
+                         latent_strategy=latent_strategy, num_workers=workers)
+
+    serial, threaded = fit(1), fit(4)
+    assert serial._covariance is None
+    np.testing.assert_array_equal(threaded.mean, serial.mean)
+    assert threaded.log_marginal_likelihood == serial.log_marginal_likelihood
+    np.testing.assert_array_equal(threaded.predictive_variance, serial.predictive_variance)
+    for block in ("fixed", "s", "trend"):
+        np.testing.assert_array_equal(threaded.latent_marginals(block).std,
+                                      serial.latent_marginals(block).std)
