@@ -8,7 +8,6 @@ from scipy.sparse import block_diag, csr_matrix, hstack
 
 from pylgm.exceptions import ModelValidationError, NumericalError
 from pylgm.ir.model import CompiledLGM, LatentBlock
-from pylgm.likelihoods import CompiledGaussian
 from pylgm._checks import readonly_array as _readonly_array
 
 
@@ -63,24 +62,6 @@ def _validate_parameter_mapping(
             )
         result[name] = value
     return result
-
-
-@dataclass(frozen=True, init=False)
-class Hyperparameters:
-    sigma: float
-    precisions: Mapping[str, float]
-
-    def __init__(self, sigma: float, precisions: Mapping[str, float]) -> None:
-        sigma_value = _ordinary_positive(sigma, "sigma")
-        if not isinstance(precisions, Mapping):
-            raise ModelValidationError("precisions must be a mapping")
-        isolated: dict[str, float] = {}
-        for name, precision in precisions.items():
-            if not isinstance(name, str) or not name:
-                raise ModelValidationError("precision names must be non-empty strings")
-            isolated[name] = _ordinary_positive(precision, f"precision {name!r}")
-        object.__setattr__(self, "sigma", sigma_value)
-        object.__setattr__(self, "precisions", MappingProxyType(isolated))
 
 
 @dataclass(frozen=True, init=False)
@@ -320,164 +301,6 @@ def _assemble_compiled_model(
 
 
 @dataclass(frozen=True, init=False)
-class CompiledGaussianFamily:
-    _y: np.ndarray = field(repr=False)
-    _observed: np.ndarray = field(repr=False)
-    _offset: np.ndarray = field(repr=False)
-    blocks: tuple[ScalableBlock | ParametricBlock, ...]
-    parameter_names: tuple[str, ...]
-    initial: Hyperparameters
-    parameter_bounds: Mapping[str, object]
-    parameter_priors: Mapping[str, object]
-    _extra_constraints: np.ndarray = field(repr=False)
-    _extra_constraint_rhs: np.ndarray = field(repr=False)
-
-    def __init__(
-        self,
-        y: np.ndarray,
-        observed: np.ndarray,
-        offset: np.ndarray,
-        blocks: tuple[ScalableBlock | ParametricBlock, ...],
-        parameter_names: tuple[str, ...],
-        initial: Hyperparameters,
-        parameter_bounds: Mapping[str, object] = MappingProxyType({}),
-        parameter_priors: Mapping[str, object] = MappingProxyType({}),
-        extra_constraints: np.ndarray | None = None,
-        extra_constraint_rhs: np.ndarray | None = None,
-    ) -> None:
-        y_value = np.asarray(y)
-        observed_value = np.asarray(observed)
-        offset_value = np.asarray(offset)
-        if (
-            y_value.ndim != 1
-            or not np.issubdtype(y_value.dtype, np.number)
-            or not np.isrealobj(y_value)
-        ):
-            raise ModelValidationError("family y must be a one-dimensional numeric array")
-        if observed_value.ndim != 1 or not np.issubdtype(observed_value.dtype, np.bool_):
-            raise ModelValidationError("family observed must be a one-dimensional boolean array")
-        if (
-            offset_value.ndim != 1
-            or not np.issubdtype(offset_value.dtype, np.number)
-            or not np.isrealobj(offset_value)
-            or not np.isfinite(offset_value).all()
-        ):
-            raise ModelValidationError("family offset must be a finite one-dimensional numeric array")
-        if not (y_value.size == observed_value.size == offset_value.size):
-            raise ModelValidationError("family arrays must have equal row counts")
-        if not np.isfinite(y_value[observed_value]).all():
-            raise ModelValidationError("family observed y values must be finite")
-        try:
-            block_values = tuple(blocks)
-            names = tuple(parameter_names)
-        except TypeError as error:
-            raise ModelValidationError("family blocks and parameter names must be iterable") from error
-        if any(not isinstance(item, (ScalableBlock, ParametricBlock, ParametricDesignBlock)) for item in block_values):
-            raise ModelValidationError("family blocks must be scalable or parametric blocks")
-        if any(item.block.design.shape[0] != y_value.size for item in block_values):
-            raise ModelValidationError("family block design rows must match the response")
-        block_names = [item.block.name for item in block_values]
-        if len(block_names) != len(set(block_names)):
-            raise ModelValidationError("family block names must be unique")
-        if any(not isinstance(name, str) or not name for name in names):
-            raise ModelValidationError("parameter names must be non-empty strings")
-        if len(names) != len(set(names)):
-            duplicates = sorted({n for n in names if names.count(n) > 1})
-            raise ModelValidationError(f"parameter names must be unique; repeated: {duplicates}")
-        if not isinstance(initial, Hyperparameters):
-            raise ModelValidationError("family initial values must be hyperparameters")
-        bindings = tuple(
-            item.parameter
-            for item in block_values
-            if isinstance(item, ScalableBlock) and item.parameter is not None
-        )
-        if len(bindings) != len(set(bindings)):
-            raise ModelValidationError("scalable block parameters must be unique")
-        parametric_names: set[str] = set()
-        for item in block_values:
-            if isinstance(item, (ParametricBlock, ParametricDesignBlock)):
-                if not set(item.parameters) <= set(names):
-                    raise ModelValidationError(
-                        "parametric block parameters must appear in parameter_names"
-                    )
-                parametric_names.update(item.parameters)
-                continue
-            if item.parameter is None:
-                continue
-            expected = f"{item.block.name}.precision"
-            if item.parameter != expected:
-                raise ModelValidationError(
-                    "scalable block parameter must match its block precision"
-                )
-            if item.block.name not in initial.precisions:
-                raise ModelValidationError(
-                    "bound scalable blocks require an initial configured precision"
-                )
-        expected_names = set(bindings) | parametric_names
-        if "sigma" in names:
-            expected_names.add("sigma")
-        if set(names) != expected_names:
-            raise ModelValidationError(
-                "parameter names must exactly match bound block precisions and sigma"
-            )
-        object.__setattr__(self, "_y", _readonly_array(y_value))
-        object.__setattr__(self, "_observed", _readonly_array(observed_value))
-        object.__setattr__(self, "_offset", _readonly_array(offset_value))
-        object.__setattr__(self, "blocks", block_values)
-        object.__setattr__(self, "parameter_names", names)
-        object.__setattr__(self, "initial", initial)
-        object.__setattr__(self, "parameter_bounds", MappingProxyType(dict(parameter_bounds)))
-        object.__setattr__(self, "parameter_priors", MappingProxyType(dict(parameter_priors)))
-        total_width = sum(item.block.design.shape[1] for item in block_values)
-        extra = _family_extra_constraints(extra_constraints, total_width)
-        object.__setattr__(self, "_extra_constraints", _readonly_array(extra))
-        object.__setattr__(
-            self,
-            "_extra_constraint_rhs",
-            _readonly_array(_family_extra_constraint_rhs(extra_constraint_rhs, extra.shape[0])),
-        )
-
-    @property
-    def y(self) -> np.ndarray:
-        result = self._y.copy()
-        result.setflags(write=False)
-        return result
-
-    @property
-    def observed(self) -> np.ndarray:
-        result = self._observed.copy()
-        result.setflags(write=False)
-        return result
-
-    @property
-    def offset(self) -> np.ndarray:
-        result = self._offset.copy()
-        result.setflags(write=False)
-        return result
-
-    def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
-        resolved = _validate_parameter_mapping(
-            values, self.parameter_names, self.parameter_bounds
-        )
-        blocks = _materialize_blocks(self.blocks, resolved)
-        likelihood = CompiledGaussian(resolved.get("sigma", self.initial.sigma))
-        return _assemble_compiled_model(
-            self._y, self._observed, self._offset, blocks, likelihood,
-            extra_constraints=self._extra_constraints,
-            extra_constraint_rhs=self._extra_constraint_rhs,
-        )
-
-    def block_slice(self, name: str) -> slice:
-        start = 0
-        for item in self.blocks:
-            stop = start + item.block.design.shape[1]
-            if item.block.name == name:
-                return slice(start, stop)
-            start = stop
-        raise KeyError(name)
-
-
-@dataclass(frozen=True, init=False)
 class CompiledFamily:
     """A likelihood-agnostic optimisable family for the declarative path."""
 
@@ -570,6 +393,27 @@ class CompiledFamily:
             "_extra_constraint_rhs",
             _readonly_array(_family_extra_constraint_rhs(extra_constraint_rhs, extra.shape[0])),
         )
+
+    @property
+    def y(self) -> np.ndarray:
+        return _readonly_array(self._y)
+
+    @property
+    def observed(self) -> np.ndarray:
+        return _readonly_array(self._observed)
+
+    @property
+    def offset(self) -> np.ndarray:
+        return _readonly_array(self._offset)
+
+    def block_slice(self, name: str) -> slice:
+        start = 0
+        for item in self.blocks:
+            stop = start + item.block.design.shape[1]
+            if item.block.name == name:
+                return slice(start, stop)
+            start = stop
+        raise KeyError(name)
 
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(

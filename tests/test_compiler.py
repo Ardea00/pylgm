@@ -6,6 +6,7 @@ from typing import cast
 
 from pylgm import AR1, Bernoulli, BYM2, Fixed, Gaussian, IID, LGM, Poisson, ProperCAR
 from pylgm.effects import Predictor
+import pylgm.compiler as compiler_module
 from pylgm.compiler import compile_family, compile_gaussian_family, compile_lgm, compile_model
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
 from pylgm.config.schema import DataConfig, RunConfig
@@ -188,7 +189,8 @@ def test_compiler_rejects_block_with_wrong_panel_row_count(
         {
             "schema_version": 1,
             "data": {"time": "month", "response": "y"},
-            "model": {"fixed": "1", "sigma": 1.0},
+            "model": {"fixed": "1", "sigma": 1.0,
+                      "effects": [{"name": "bad", "type": "iid", "index": "month"}]},
         }
     )
     panel = CanonicalPanel.from_frame(pd.DataFrame({"month": [1, 2], "y": [1.0, 2.0]}), config.data)
@@ -199,9 +201,10 @@ def test_compiler_rejects_block_with_wrong_panel_row_count(
         csr_matrix([[1.0]]),
         np.empty((0, 1)),
     )
+    real = compiler_module._build_effect_block
     monkeypatch.setattr(
-        "pylgm.compiler._structured_blocks",
-        lambda config, panel, optimized=(): ([bad_block], {}, {}),
+        "pylgm.compiler._build_effect_block",
+        lambda effect, frame: (bad_block, 1.0) if effect.name == "bad" else real(effect, frame),
     )
 
     with pytest.raises(CompilationError, match="row count"):
@@ -778,15 +781,22 @@ def test_grouped_precision_is_optimized_through_the_inner_effect() -> None:
 
     family = compile_gaussian_family(data, model, panel, optimized=("space.precision",))
 
-    # The configured 7.0 is the optimizer's starting point, and the block itself
-    # is built at unit precision so the parameter *is* the precision.
-    assert family.initial.precisions["space"] == 7.0
-    unit = compile_gaussian_family(data, model, panel, optimized=())
-    scaled = family.materialize({"space.precision": 1.0})
-    reference = unit.materialize({})
+    # The configured 7.0 is the optimizer's starting point, and the parameter
+    # *is* the precision: at 7.0 the family reproduces the configured model.
+    assert family.parameter_bounds["space.precision"].initial == 7.0
+    reference = compile_model(
+        RunConfig.model_validate({"schema_version": 1, "data": data.model_dump(),
+                                  "model": model.model_dump()}),
+        panel,
+    )
+    unit = family.materialize({"space.precision": 1.0})
     assert np.allclose(
         reference.blocks[1].precision.toarray(),
-        7.0 * scaled.blocks[1].precision.toarray(),
+        7.0 * unit.blocks[1].precision.toarray(),
+    )
+    assert np.allclose(
+        family.materialize({"space.precision": 7.0}).precision.toarray(),
+        reference.precision.toarray(),
     )
 
 

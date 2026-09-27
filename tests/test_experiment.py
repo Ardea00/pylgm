@@ -88,7 +88,7 @@ def test_reversed_explicit_origins_optimize_chronologically_and_warm_start(
     optimize = experiment_module.optimize_empirical_bayes
 
     def recording_optimizer(family, bounds, *, initial=None, allow_large_dense=False):
-        calls.append((family.y.size, None if initial is None else dict(initial)))
+        calls.append((_rows(family, bounds).size, None if initial is None else dict(initial)))
         return optimize(
             family,
             bounds,
@@ -107,6 +107,11 @@ def test_reversed_explicit_origins_optimize_chronologically_and_warm_start(
     assert calls[1][1] is not None
 
 
+def _rows(family, bounds):
+    """The training response the family was compiled on."""
+    return family.materialize({name: b.initial for name, b in bounds.items()}).y
+
+
 def test_persistence_is_reserved_for_the_benchmark(tmp_path: Path) -> None:
     path = _write_config(tmp_path / "experiment.yaml", "  - {name: persistence}")
 
@@ -123,8 +128,8 @@ def test_optimizer_runs_once_per_candidate_origin_and_warm_starts(
     def recording_optimizer(family, bounds, *, initial=None, allow_large_dense=False):
         calls.append(
             (
-                family.y.size,
-                float(family.y.max()),
+                _rows(family, bounds).size,
+                float(_rows(family, bounds).max()),
                 None if initial is None else dict(initial),
             )
         )

@@ -1,5 +1,7 @@
 import functools
 import warnings
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -82,14 +84,13 @@ from pylgm.exceptions import (
 )
 from pylgm.ir import (
     CompiledFamily,
-    CompiledGaussianFamily,
     CompiledLGM,
-    Hyperparameters,
     ParametricBlock,
     ParametricDesignBlock,
     ScalableBlock,
 )
 from pylgm.inference.prediction import JointPredictionContext, PredictionContext
+from pylgm.ir.family import _assemble_compiled_model
 from pylgm.ir.model import LatentBlock, _block_constraints
 from pylgm.joint import Joint, _pad_block_rows
 from pylgm.likelihoods import (
@@ -143,75 +144,14 @@ def resolve_constraints(
     return matrix, rhs
 
 
-def _unit_precision(effect: EffectConfig) -> EffectConfig:
-    """The same effect declared at precision 1.0, so a scale parameter *is* the precision.
-
-    A wrapper carries no precision of its own -- ``Grouped``'s lives on the effect
-    being copied -- so the override has to reach the inner spec.
-    """
-    if effect.effect is not None:
-        return effect.model_copy(update={"effect": _unit_precision(effect.effect)})
-    return effect.model_copy(update={"precision": 1.0})
-
-
 def _configured_precision(effect: EffectConfig) -> float:
     inner = effect.effect if effect.effect is not None else effect
     return 1.0 if inner.precision is None else float(inner.precision)
 
 
-def _structured_blocks(
-    model: ModelConfig,
-    panel: CanonicalPanel,
-    optimized: tuple[str, ...] = (),
-) -> tuple[list[LatentBlock], dict[str, float], dict[str, tuple[tuple[str, ...], object]]]:
-    """Compile configured effects through the same builders as the Python model path.
-
-    Returns the blocks, the precision to record under each effect's own name, and
-    the parametric-precision builders for effects that cannot simply be scaled.
-    An optimized effect is built at precision 1.0 and scaled by its
-    ``<name>.precision`` parameter downstream, so its configured value is only
-    the optimizer's starting point -- which is what goes into the mapping.
-    """
-    blocks: list[LatentBlock] = []
-    precisions: dict[str, float] = {}
-    # Effects whose precision is not a plain scale of the whole block. MIDAS is
-    # the only one: its precision multiplies the smoothness penalty alone --
-    # Q(tau) = tau*D'D + ridge*P0 -- so scaling the assembled block would shrink
-    # the lag curve's level and slope too, which is exactly what its design
-    # avoids. These get a ParametricBlock, as the model path already gives them.
-    parametric: dict[str, tuple[tuple[str, ...], object]] = {}
-    frame = panel.frame
-    for effect in model.effects:
-        estimated = f"{effect.name}.precision" in optimized
-        try:
-            built = build_effect(_unit_precision(effect) if estimated else effect, Path("."))
-            block, precision = _build_effect_block(built, frame)
-        except (
-            ConfigurationError,
-            DataContractError,
-            ModelValidationError,
-            KeyError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise CompilationError(
-                f"failed to compile effect {effect.name!r}: "
-                f"{_effect_failure_detail(error, frame)}"
-            ) from error
-        if precision is not None:
-            precisions[effect.name] = _configured_precision(effect) if estimated else precision
-        if estimated and effect.type == "midas":
-            parameter = f"{effect.name}.precision"
-            dtd, projector = midas_penalty(len(effect.columns or ()),
-                                           2 if effect.order is None else effect.order)
-            ridge = 1e-6 if effect.ridge is None else float(effect.ridge)
-
-            def build(values, dtd=dtd, projector=projector, ridge=ridge, parameter=parameter):
-                return csr_matrix(float(values[parameter]) * dtd + ridge * projector)
-
-            parametric[effect.name] = ((parameter,), build)
-        blocks.append(block)
-    return blocks, precisions, parametric
+def _effect_label(name: str) -> str:
+    """The effect's name in a compile error; the fixed effect is its formula."""
+    return f"{name!r} (fixed formula)" if name == "fixed" else repr(name)
 
 
 def _effect_failure_detail(error: Exception, frame) -> str:
@@ -280,14 +220,48 @@ def _validate_optimized_names(model: ModelConfig, optimized: tuple[str, ...]) ->
         raise CompilationError(f"unknown optimized parameter names: {unknown}")
 
 
-def compile_gaussian_family(
-    data: DataConfig,
-    model: ModelConfig,
-    panel: CanonicalPanel,
-    optimized: tuple[str, ...],
-) -> CompiledGaussianFamily:
-    optimized = tuple(optimized)
-    _validate_optimized_names(model, optimized)
+def _config_lgm(data: DataConfig, model: ModelConfig, optimized) -> "LGM":
+    """The ``LGM`` a Gaussian YAML config declares.
+
+    Each name in ``optimized`` becomes a ``Hyperparameter``: ``sigma`` on the
+    likelihood, ``<effect>.precision`` on the effect (on the wrapped effect for
+    ``Grouped``). ``optimized`` is either names -- started at the configured
+    value, default bounds -- or a mapping to ``ParameterBounds``.
+    """
+    from pylgm.model import LGM
+
+    def declared(name: str, configured: float):
+        if name not in optimized:
+            return configured
+        bounds = optimized[name] if isinstance(optimized, Mapping) else None
+        if bounds is None:
+            return Hyperparameter(name, initial=configured)
+        return Hyperparameter(name, initial=bounds.initial, lower=bounds.lower, upper=bounds.upper)
+
+    predictor = Fixed(model.fixed, prior_precision=model.fixed_prior_precision)
+    for effect in model.effects:
+        try:
+            built = build_effect(effect, Path("."))
+        except (ConfigurationError, ModelValidationError, KeyError, TypeError, ValueError) as error:
+            raise CompilationError(f"failed to compile effect {effect.name!r}: {error}") from error
+        precision = declared(f"{effect.name}.precision", _configured_precision(effect))
+        if isinstance(precision, Hyperparameter):
+            if isinstance(built, Grouped):
+                built = replace(built, effect=replace(built.effect, precision=precision))
+            else:
+                built = replace(built, precision=precision)
+        predictor = predictor + built
+    return LGM(
+        response=data.response,
+        likelihood=Gaussian(declared("sigma", float(model.sigma))),
+        predictor=predictor,
+        panel=tuple(data.panel),
+        time=data.time,
+    )
+
+
+def _checked_config_panel(data: DataConfig, model: ModelConfig, panel: CanonicalPanel) -> None:
+    """The YAML path's own contract checks, ahead of the shared compiler."""
     if panel.response != data.response:
         raise DataContractError(
             "panel response metadata does not match configuration: "
@@ -299,59 +273,26 @@ def compile_gaussian_family(
             "panel key metadata does not match configuration: "
             f"{panel.key_columns!r} != {expected_keys!r}"
         )
-    frame = panel.frame
-    _validate_required_columns(data, model, frame.columns)
-    try:
-        fixed = build_fixed(
-            frame,
-            model.fixed,
-            model.fixed_prior_precision,
-        )
-    except (
-        DataContractError,
-        FormulaicError,
-        ModelValidationError,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise CompilationError(f"failed to compile fixed formula: {error}") from error
-    structured_optimized = tuple(name for name in optimized if name.endswith(".precision"))
-    structured, precisions, parametric = _structured_blocks(
-        model, panel, optimized if structured_optimized else ()
-    )
-    blocks = [fixed, *structured]
-    wrong_rows = [block.name for block in blocks if block.design.shape[0] != len(frame)]
-    if wrong_rows:
-        raise CompilationError(
-            f"latent block design row count does not match the panel: {wrong_rows}"
-        )
-    _qualified_labels(blocks)
-    try:
-        y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
-        scalable_blocks = tuple(
-            ParametricBlock(block, *parametric[block.name])
-            if block.name in parametric
-            else ScalableBlock(
-                block,
-                f"{block.name}.precision" if f"{block.name}.precision" in optimized else None,
-                1.0,
-            )
-            for block in blocks
-        )
-        return CompiledGaussianFamily(
-            y=y,
-            observed=panel.observed,
-            offset=np.zeros(len(frame)),
-            blocks=scalable_blocks,
-            parameter_names=optimized,
-            initial=Hyperparameters(sigma=float(model.sigma), precisions=precisions),
-        )
-    except (TypeError, ValueError) as error:
-        raise CompilationError(f"compiled Gaussian family is invalid: {error}") from error
+    _validate_required_columns(data, model, panel.frame.columns)
+
+
+def compile_gaussian_family(
+    data: DataConfig,
+    model: ModelConfig,
+    panel: CanonicalPanel,
+    optimized,
+) -> CompiledFamily:
+    """The optimisable family of a Gaussian YAML config (see ``_config_lgm``)."""
+    _validate_optimized_names(model, tuple(optimized))
+    if not optimized:
+        raise CompilationError("a Gaussian family needs at least one optimized parameter")
+    _checked_config_panel(data, model, panel)
+    return compile_family(_config_lgm(data, model, optimized), panel)
 
 
 def compile_model(config: RunConfig, panel: CanonicalPanel) -> CompiledLGM:
-    return compile_gaussian_family(config.data, config.model, panel, optimized=()).materialize({})
+    _checked_config_panel(config.data, config.model, panel)
+    return compile_lgm(_config_lgm(config.data, config.model, ()), panel)
 
 
 def _resolved_precision(value: float | Hyperparameter) -> float:
@@ -709,7 +650,7 @@ def _build_effect_block(effect, frame) -> "tuple[LatentBlock, float | None]":
         ValueError,
     ) as error:
         raise CompilationError(
-            f"failed to compile effect {effect.name!r}: "
+            f"failed to compile effect {_effect_label(effect.name)}: "
             f"{_effect_failure_detail(error, frame)}"
         ) from error
     return block, precision
@@ -825,23 +766,13 @@ def compile_lgm(model: "LGM", panel: CanonicalPanel) -> CompiledLGM:
     y = frame[panel.response].fillna(0.0).to_numpy(dtype=float)
 
     if isinstance(model.likelihood, Gaussian):
-        sigma = (
-            model.likelihood.sigma.initial
-            if isinstance(model.likelihood.sigma, Hyperparameter)
-            else model.likelihood.sigma
-        )
+        sigma = model.likelihood.sigma
+        likelihood = CompiledGaussian(sigma.initial if isinstance(sigma, Hyperparameter) else sigma)
         try:
-            family = CompiledGaussianFamily(
-                y=y,
-                observed=panel.observed,
-                offset=offset,
-                blocks=tuple(ScalableBlock(block, None, 1.0) for block in blocks),
-                parameter_names=(),
-                initial=Hyperparameters(sigma=sigma, precisions=precisions),
-                extra_constraints=extra_constraints,
-                extra_constraint_rhs=extra_constraint_rhs,
+            return _assemble_compiled_model(
+                y, panel.observed, offset, tuple(blocks), likelihood,
+                extra_constraints=extra_constraints, extra_constraint_rhs=extra_constraint_rhs,
             )
-            return family.materialize({})
         except (TypeError, ValueError) as error:
             raise CompilationError(f"compiled declarative model is invalid: {error}") from error
 
@@ -1291,7 +1222,10 @@ def _compiled_block(name: str, builder, *args) -> object:
         TypeError,
         ValueError,
     ) as error:
-        raise CompilationError(f"failed to compile effect {name!r}: {error}") from error
+        raise CompilationError(
+            f"failed to compile effect {_effect_label(name)}: "
+            f"{_effect_failure_detail(error, args[0] if args else None)}"
+        ) from error
 
 
 def _weighted_family_block(item, weights: np.ndarray):
