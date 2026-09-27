@@ -8,6 +8,7 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from scipy.interpolate import CubicSpline
 from scipy.linalg import cho_factor
+from scipy.sparse import csr_matrix
 from scipy.special import logsumexp
 from scipy.stats import norm
 
@@ -908,7 +909,9 @@ def _row_scaled(compiled, observed):
 
 
 def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):
-    dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, dtype=float)
+    # Kept sparse: both the dense (quadratic_form_diagonal) and the sparse
+    # (selected-inverse) variance paths take a CSR design, and densifying is n x p.
+    dense = csr_matrix(design, dtype=float)
     offset = np.asarray(offset, dtype=float)
     y = np.asarray(y, dtype=float)
     nodes, gh = hermgauss(n_nodes)

@@ -1,9 +1,10 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 from scipy.linalg import cho_solve, null_space, solve_triangular
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve_triangular, splu
 
 from pylgm.exceptions import NumericalError
@@ -175,14 +176,31 @@ class SparsePosterior:
             out[d] = cho_solve(self.d_factor, rhs[d])
         return out
 
+    def covariance_apply(self, rhs: np.ndarray) -> np.ndarray:
+        """``Sigma_c @ rhs`` -- the constrained covariance, 1-D or 2-D ``rhs``."""
+        out = self.apply_inverse(rhs)
+        if self.w_constraint is not None:
+            out = out - self.w_constraint @ cho_solve(self.cap_factor, self.w_constraint.T @ rhs)
+        return out
+
+    @cached_property
+    def _selected_ss(self) -> csr_matrix:
+        """``A_ss⁻¹`` on its factor's fill pattern (one Takahashi sweep, cached)."""
+        return selected_inverse(self.a_ss_matrix)
+
+    @cached_property
+    def _w_dense(self) -> np.ndarray:
+        """``W = A_ss⁻¹ B`` (n_s x m): so ``Sigma_ss = A_ss⁻¹ + W S⁻¹ Wᵀ``, ``Sigma_sd = -W S⁻¹``."""
+        return self.a_ss.solve(self.b)
+
     def _unconstrained_marginal(self) -> np.ndarray:
         """diag(P_post^-1) -- the unconstrained posterior variance, full length."""
         diag = np.zeros(self.latent_size)
         s, d = self.sparse_index, self.dense_index
         if s.size:
-            diag_ss = selected_inverse_diagonal(self.a_ss_matrix)   # diag(A_ss^-1)
+            diag_ss = self._selected_ss.diagonal()                   # diag(A_ss^-1)
             if d.size:
-                w = self.a_ss.solve(self.b)                          # A_ss^-1 B  (n_s x m)
+                w = self._w_dense                                    # A_ss^-1 B  (n_s x m)
                 sinv_wt = cho_solve(self.schur_factor, w.T)          # S^-1 W^T   (m x n_s)
                 diag_ss = diag_ss + np.einsum("ij,ji->i", w, sinv_wt)
             diag[s] = diag_ss
@@ -202,15 +220,43 @@ class SparsePosterior:
         return np.clip(diag, 0.0, None)
 
     def predictive_variances(self, design) -> np.ndarray:
-        """diag(design Σ_c designᵀ) — one variance per row of ``design``."""
-        dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
-        # ponytail: apply_inverse densifies designᵀ to (latent x n_rows). At very
-        # large latent × request width this is the memory ceiling — batch the
-        # columns of designᵀ if it ever bites; fine at current network scale.
-        cov_dt = self.apply_inverse(dense.T)                        # Σ designᵀ (latent x n_rows)
-        var = np.einsum("ij,ji->i", dense, cov_dt)
+        """diag(design Σ_c designᵀ) — one variance per row of ``design``.
+
+        With ``a = (a_s, a_d)`` split over sparse/dense columns and ``u = Wᵀ a_s``,
+
+            var = a_sᵀ A_ss⁻¹ a_s + (u - a_d)ᵀ S⁻¹ (u - a_d) - constraint term.
+
+        The first term reads ``A_ss⁻¹`` from its selected inverse when every pair
+        of a row's sparse columns lies on the factor's fill pattern -- always so
+        for an observed row, since ``A_ss ⊇ Z_sᵀ Z_s`` -- and falls back to a
+        solve per row otherwise (unobserved or new rows touching unlinked levels).
+        """
+        design = csr_matrix(design, dtype=float)
+        s, d = self.sparse_index, self.dense_index
+        var = np.zeros(design.shape[0])
+        if s.size:
+            a_s = design[:, s]
+            selected = self._selected_ss
+            pattern = a_s.copy()
+            pattern.data[:] = 1.0
+            support = selected.copy()
+            support.data[:] = 1.0
+            covered = np.asarray((pattern @ support).multiply(pattern).sum(axis=1)).ravel()
+            fast = covered == pattern.getnnz(axis=1).astype(float) ** 2
+            var[fast] = np.asarray((a_s[fast] @ selected).multiply(a_s[fast]).sum(axis=1)).ravel()
+            if not fast.all():
+                # ponytail: one solve per uncovered row; batch the columns if a
+                # huge request of such rows ever makes this the memory ceiling.
+                slow = a_s[~fast].toarray()
+                var[~fast] = np.einsum("ij,ji->i", slow, self.a_ss.solve(slow.T))
+            if d.size:
+                diff = np.asarray(a_s @ self._w_dense) - design[:, d].toarray()
+                var += np.einsum("ij,ji->i", diff, cho_solve(self.schur_factor, diff.T))
+        elif d.size:
+            a_d = design[:, d].toarray()
+            var += np.einsum("ij,ji->i", a_d, cho_solve(self.d_factor, a_d.T))
         if self.w_constraint is not None:
-            mw = dense @ self.w_constraint                          # n_rows x c
+            mw = np.asarray(design @ self.w_constraint)             # n_rows x c
             cw = cho_solve(self.cap_factor, mw.T)                   # c x n_rows
             var = var - np.einsum("ij,ji->i", mw, cw)
         return np.clip(var, 0.0, None)
@@ -385,8 +431,15 @@ def _prior_logdet(
 
 
 def selected_inverse_diagonal(matrix) -> np.ndarray:
-    """Diagonal of ``matrix⁻¹`` for a sparse SPD matrix — the exact selected
-    inverse via Takahashi recursion on the SuperLU fill pattern.
+    """Diagonal of ``matrix⁻¹`` for a sparse SPD matrix (see ``selected_inverse``)."""
+    return selected_inverse(matrix).diagonal()
+
+
+def selected_inverse(matrix) -> csr_matrix:
+    """Entries of ``matrix⁻¹`` on the fill pattern of its factor (``L + Lᵀ``),
+    for a sparse SPD matrix — the exact selected inverse via Takahashi
+    recursion on the SuperLU fill pattern. Entries off that pattern are not
+    stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own.
 
     Symmetric-mode ``splu`` (``MMD_AT_PLUS_A`` + ``SymmetricMode`` +
     ``diag_pivot_thresh=0.0``) yields ``perm_r == perm_c`` and a unit-lower ``L``
@@ -435,7 +488,16 @@ def selected_inverse_diagonal(matrix) -> np.ndarray:
             sig[(i, i)] = 1.0 / diag_u[i] - below_vals @ sig_below
         else:
             sig[(i, i)] = 1.0 / diag_u[i]
-    return np.array([sig[(pc[i], pc[i])] for i in range(n)])
+    # Permuted index pc[i] is original index i.
+    original = np.argsort(pc)
+    keys = np.array(list(sig), dtype=int).reshape(-1, 2)
+    values = np.fromiter(sig.values(), dtype=float, count=len(sig))
+    rows, cols = original[keys[:, 0]], original[keys[:, 1]]
+    off = rows != cols
+    return coo_matrix(
+        (np.r_[values, values[off]], (np.r_[rows, cols[off]], np.r_[cols, rows[off]])),
+        shape=(n, n),
+    ).tocsr()
 
 
 def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:
