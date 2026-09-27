@@ -65,10 +65,6 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   [effects](effects.md#weighted-effects), and
   [research status](research-status.md) for what is and is not verified.
 
-- **Hybrid composition** — a mixed-frequency `MIDAS` term, a spatial `BYM2`
-  term, and a temporal `AR1` term sum through `+` into one latent field that
-  fits and predicts, demonstrated end to end in
-  [`examples/hybrid_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/hybrid_nowcast).
 - **Spatial (CAR) family** — `Besag` (ICAR), `ProperCAR` (with `ρ` fixed or
   estimated), and `BYM2` (with `φ` fixed or estimated), complete for the dense
   reference regime. Graphs may be **weighted** (`{node: {neighbour: weight}}`),
@@ -169,10 +165,6 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
 1. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
-2. **Hybrid HF/LF nowcasting frontend** — a higher-level mixed-frequency
-   nowcasting API that handles the HF→LF lag alignment (still the caller's job
-   today). The underlying effects ship both in the Python API and as the
-   declarative `midas` / `midas_parametric` YAML types.
 
 ## Deferred (not planned for the near term)
 

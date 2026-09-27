@@ -48,8 +48,6 @@ rather than remembered.
 
 | Example | Shows |
 |---|---|
-| [`midas_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/midas_nowcast) | `MIDAS` smooth-lag regression of a low-frequency target on high-frequency lags |
-| [`hybrid_nowcast`](https://github.com/Ardea00/pylgm/tree/main/examples/hybrid_nowcast) | `MIDAS` + `BYM2` + `AR1` composed into one latent field that fits and predicts |
 | [`synthetic_panel`](https://github.com/Ardea00/pylgm/tree/main/examples/synthetic_panel) | A panel with both unit and time structure |
 | [`nic_backtest`](https://github.com/Ardea00/pylgm/tree/main/examples/nic_backtest) | A rolling-origin backtest configuration with covariate-availability rules |
 
