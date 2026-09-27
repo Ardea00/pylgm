@@ -9,7 +9,7 @@ from scipy.sparse import csr_matrix, identity
 from scipy.sparse.csgraph import connected_components
 
 from pylgm.data.scalars import ordered_observed_levels, warn_if_unevenly_spaced
-from pylgm.effects.besag import _scaled_structure
+from pylgm.effects.besag import _sparse_structure
 from pylgm.effects.graph import normalize_graph
 from pylgm.effects.kronecker import kron_block
 from pylgm.effects.random_walk import rw_structure
@@ -82,7 +82,7 @@ def build_spacetime(
                 f"{name} type {interaction} has isolated area(s) with no neighbours "
                 f"(unsupported in space-structured interactions): {isolated!r}"
             )
-        k_s = csr_matrix(_scaled_structure(w, areas, scale))
+        k_s = _sparse_structure(w, scale)
     else:
         k_s = identity(S, format="csr")
     if interaction in _TIME_STRUCTURED:

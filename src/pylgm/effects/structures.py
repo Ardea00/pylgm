@@ -20,7 +20,7 @@ from scipy.sparse import csr_matrix, identity
 from scipy.sparse.csgraph import connected_components
 
 from pylgm.effects.ar1 import ar1_structure
-from pylgm.effects.besag import _scaled_structure
+from pylgm.effects.besag import _sparse_structure
 from pylgm.effects.graph import normalize_graph
 from pylgm.effects.random_walk import rw_structure
 
@@ -160,7 +160,7 @@ class BesagStructure:
 
     def precision(self, levels: tuple[str, ...]) -> csr_matrix:
         nodes, w = self._checked(levels)
-        return csr_matrix(_scaled_structure(w, nodes, scale=True))
+        return _sparse_structure(w, scale=True)
 
     def null_basis(self, levels: tuple[str, ...]) -> np.ndarray:
         """One constant column per connected component of size >= 2.

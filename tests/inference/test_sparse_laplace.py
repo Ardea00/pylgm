@@ -152,4 +152,6 @@ def test_sparse_laplace_estimates_hyperparameters_like_dense(hyperparameters, mo
     # on log tau), so the two argmaxes agree to ~1e-4, not to solver tolerance.
     assert estimate(sparse) == pytest.approx(estimate(dense), rel=1e-3)
     np.testing.assert_allclose(sparse.mean, dense.mean, atol=1e-4)
-    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, rtol=1e-6)
+    # The reported lml is not stationary at the penalised optimum (the PC prior's
+    # slope balances it there), so the argmax gap enters it at first order.
+    np.testing.assert_allclose(sparse.log_marginal_likelihood, dense.log_marginal_likelihood, rtol=1e-5)

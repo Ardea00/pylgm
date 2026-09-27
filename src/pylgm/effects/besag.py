@@ -76,6 +76,20 @@ def _sparse_scaled_structure(w: csr_matrix) -> csr_matrix:
     return coo_matrix((data, (rows, cols)), shape=w.shape).tocsr()
 
 
+def _sparse_structure(w: csr_matrix, scale: bool) -> csr_matrix:
+    """``_scaled_structure`` without densifying: the builders' path.
+
+    Same matrix (``tests/effects/test_besag.py`` pins the scaled case against
+    the dense reference), but the scaled case goes through the per-component
+    sparse Sørbye-Rue path instead of a dense ``eigh`` per component -- which
+    was O(n^3) and, at 4 900 areas, most of a Poisson + Besag fit.
+    """
+    if scale:
+        return _sparse_scaled_structure(w)
+    degree = np.asarray(w.sum(axis=1)).ravel()
+    return (diags(degree) - w + diags((degree == 0).astype(float))).tocsr()
+
+
 def _component_constraints(w: csr_matrix) -> np.ndarray:
     """One sum-to-zero row per connected component of size >= 2.
 
@@ -101,7 +115,6 @@ def build_besag(
 ) -> LatentBlock:
     nodes, w = normalize_graph(graph)
     design = design_from_graph(nodes, frame, index)
-    structure = _scaled_structure(w, nodes, scale)
-    precision_matrix = csr_matrix(precision * structure)
+    precision_matrix = csr_matrix(precision * _sparse_structure(w, scale))
     constraints = _component_constraints(w)
     return LatentBlock(name, nodes, design, precision_matrix, constraints)
