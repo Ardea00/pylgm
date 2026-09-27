@@ -236,7 +236,26 @@ class SparsePosterior:
         var = np.zeros(design.shape[0])
         if s.size:
             a_s = design[:, s]
-            value, fast = _pattern_quadratic(a_s, self._selected_ss)
+            value, fast, (row, j, k, weight) = _pattern_quadratic(a_s, self._selected_ss)
+            if row.size:
+                # Off-pattern pairs (rows pairing levels never observed together):
+                # solve for Sigma's columns at a vertex cover of those pairs --
+                # each pair's higher-degree end, so a whole unobserved period
+                # costs one solve -- unless that beats one solve per affected row.
+                degree = np.bincount(np.r_[j, k], minlength=s.size)
+                pick = np.where(degree[j] >= degree[k], j, k)
+                cover = np.unique(pick)
+                if cover.size <= np.unique(row).size:
+                    basis = np.zeros((s.size, cover.size))
+                    basis[cover, np.arange(cover.size)] = 1.0
+                    columns = self.a_ss.solve(basis)
+                    other = np.where(pick == j, k, j)
+                    value += np.bincount(
+                        row, weight * columns[other, np.searchsorted(cover, pick)],
+                        minlength=value.size,
+                    )
+                else:
+                    fast = fast & ~np.isin(np.arange(value.size), row)
             var[fast] = value[fast]
             if not fast.all():
                 # ponytail: one solve per uncovered row; batch the columns if a
@@ -521,11 +540,12 @@ def sparse_row_quadratic(a, dense: np.ndarray, max_row_nnz: int = 64) -> np.ndar
 
 
 def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64):
-    """``(a_iᵀ M a_i, covered_i)`` per row, reading ``M`` only where ``stored`` has it.
+    """``(a_iᵀ M a_i over stored pairs, small_i, missing)`` per row of ``a``.
 
-    ``covered_i`` is True when every pair of row ``i``'s nonzeros is stored (so the
-    value is exact); rows with more than ``max_row_nnz`` nonzeros are reported
-    uncovered.
+    Reads ``M`` only where ``stored`` has it. ``missing = (row, j, k, a_ij a_ik)``
+    lists the pairs it could not read, so a row's value is exact once those are
+    added. Rows with more than ``max_row_nnz`` nonzeros are not enumerated
+    (``small_i`` False).
     """
     width = a.shape[1]
     first, second, pair_row, small = _row_pairs(a, max_row_nnz)
@@ -537,8 +557,10 @@ def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64)
     found = keys[position] == wanted if keys.size else np.zeros(wanted.size, bool)
     contribution = a.data[first] * a.data[second] * np.where(found, stored.data[position], 0.0)
     value = np.bincount(pair_row, contribution, minlength=a.shape[0])
-    missing = np.bincount(pair_row, ~found, minlength=a.shape[0])
-    return value, small & (missing == 0)
+    lost = ~found
+    missing = (pair_row[lost], a.indices[first[lost]], a.indices[second[lost]],
+               a.data[first[lost]] * a.data[second[lost]])
+    return value, small, missing
 
 
 def _kriged(mean, w, factor, rows, rhs, *, max_passes: int = 30) -> np.ndarray:
