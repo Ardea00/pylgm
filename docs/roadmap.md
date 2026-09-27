@@ -16,7 +16,9 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   likelihood as `log p(e | y)`, so empirical Bayes and INLA learn from them.
   `Joint.fit` takes them per outcome; `scale="log"` ties a log-scale predictor to
   aggregates on levels (Gauss-Newton relinearization to the exact mode); and
-  `pylgm.operators` builds aggregation, difference and cumulation operators. See
+  `pylgm.operators` builds aggregation, difference and cumulation operators;
+  `pylgm.index_numbers` converts chain-linked volumes to additive
+  previous-year-price values (annual overlap). See
   [linear observations](linear-observations.md).
 - **Joint posterior draws** — `result.sample(n, rng)` for exact-Gaussian (dense
   and sparse), Laplace and integrated fits, every draw meeting the exact
