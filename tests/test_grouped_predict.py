@@ -84,7 +84,7 @@ def test_family_path_applies_weighted_like_the_plain_path():
     compiles through ``_grouped_family_block`` and its own re-application of
     the weighting (compiler.py, guarded by ``if isinstance(inner_spec,
     Weighted):`` right after the family-block loop), not through the plain
-    ``_build_effect_block`` path that
+    ``_effect_block`` path that
     ``test_prediction_round_trips_with_weights_inside_the_group`` above
     exercises. Guarding that re-application with ``if False and ...`` drops
     the weighting silently -- the hyperparameter stays estimated and the
@@ -92,13 +92,13 @@ def test_family_path_applies_weighted_like_the_plain_path():
     missing. There is no live defect today: this pins that the plain and
     family-path designs agree, weight column and all.
     """
-    from pylgm.compiler import _build_effect_block, compile_family
+    from pylgm.compiler import _effect_block, compile_family
     from pylgm.config.schema import DataConfig
     from pylgm.data.panel import CanonicalPanel
 
     frame = _frame()
     frame["row"] = range(len(frame))
-    plain, _ = _build_effect_block(
+    plain = _effect_block(
         Grouped(Weighted(IID("u", index="t", precision=1.0), by="z"),
                 over="region", structure=BesagStructure(GRAPH)),
         frame,

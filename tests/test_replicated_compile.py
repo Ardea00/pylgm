@@ -5,7 +5,7 @@ from scipy.sparse import csr_matrix
 
 from pylgm import Besag, Fixed, IID, LGM, Poisson, Replicated, RW1, Weighted
 from pylgm.compiler import (
-    _build_effect_block,
+    _effect_block,
     _effect_hyperparameters,
     _replicated_family_block,
 )
@@ -27,8 +27,8 @@ def _frame():
 
 def test_precision_is_the_kronecker_product_of_identity_and_the_inner_structure():
     frame = _frame()
-    inner, _ = _build_effect_block(IID("u", index="t", precision=2.0), frame)
-    outer, _ = _build_effect_block(
+    inner = _effect_block(IID("u", index="t", precision=2.0), frame)
+    outer = _effect_block(
         Replicated(IID("u", index="t", precision=2.0), over="firm"), frame
     )
     expected = np.kron(np.eye(2), inner.precision.toarray())
@@ -36,7 +36,7 @@ def test_precision_is_the_kronecker_product_of_identity_and_the_inner_structure(
 
 
 def test_labels_are_replicate_major_pairs():
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Replicated(IID("u", index="t", precision=1.0), over="firm"), _frame()
     )
     assert outer.labels == ("f1@a", "f1@b", "f1@c", "f2@a", "f2@b", "f2@c")
@@ -44,7 +44,7 @@ def test_labels_are_replicate_major_pairs():
 
 def test_design_maps_each_row_to_its_own_replicate_cell():
     frame = _frame()
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Replicated(IID("u", index="t", precision=1.0), over="firm"), frame
     )
     dense = outer.design.toarray()
@@ -63,8 +63,8 @@ def test_a_constrained_inner_effect_gets_one_constraint_per_replicate():
     plausible numbers, and nothing else in the suite would catch it."""
     frame = _frame()
     graph = {"a": ["b"], "b": ["a", "c"], "c": ["b"]}
-    inner, _ = _build_effect_block(Besag("u", index="t", graph=graph, precision=1.0), frame)
-    outer, _ = _build_effect_block(
+    inner = _effect_block(Besag("u", index="t", graph=graph, precision=1.0), frame)
+    outer = _effect_block(
         Replicated(Besag("u", index="t", graph=graph, precision=1.0), over="firm"), frame
     )
 
@@ -78,7 +78,7 @@ def test_a_constrained_inner_effect_gets_one_constraint_per_replicate():
 
 
 def test_an_unconstrained_inner_effect_stays_unconstrained():
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Replicated(IID("u", index="t", precision=1.0), over="firm"), _frame()
     )
     assert outer.constraints.shape == (0, 6)
@@ -86,8 +86,8 @@ def test_an_unconstrained_inner_effect_stays_unconstrained():
 
 def test_a_single_replicate_reduces_to_the_inner_block():
     frame = _frame().assign(firm="only")
-    inner, _ = _build_effect_block(IID("u", index="t", precision=2.0), frame)
-    outer, _ = _build_effect_block(
+    inner = _effect_block(IID("u", index="t", precision=2.0), frame)
+    outer = _effect_block(
         Replicated(IID("u", index="t", precision=2.0), over="firm"), frame
     )
     assert np.allclose(outer.precision.toarray(), inner.precision.toarray())
@@ -106,10 +106,10 @@ def test_replicated_commutes_with_weighted():
     The spec asserts they commute, so this pins it rather than leaving it as a
     convention to remember."""
     frame = _frame()
-    a, _ = _build_effect_block(
+    a = _effect_block(
         Replicated(Weighted(IID("u", index="t", precision=1.0), by="z"), over="firm"), frame
     )
-    b, _ = _build_effect_block(
+    b = _effect_block(
         Weighted(Replicated(IID("u", index="t", precision=1.0), over="firm"), by="z"), frame
     )
     assert a.labels == b.labels
@@ -121,14 +121,14 @@ def test_replicated_commutes_with_weighted():
 def test_missing_replicate_column_is_rejected():
     frame = _frame().drop(columns=["firm"])
     with pytest.raises((CompilationError, DataContractError), match="firm"):
-        _build_effect_block(Replicated(IID("u", index="t"), over="firm"), frame)
+        _effect_block(Replicated(IID("u", index="t"), over="firm"), frame)
 
 
 def test_a_null_in_the_replicate_column_is_rejected():
     frame = _frame()
     frame.loc[0, "firm"] = None
     with pytest.raises((CompilationError, DataContractError), match="firm"):
-        _build_effect_block(Replicated(IID("u", index="t"), over="firm"), frame)
+        _effect_block(Replicated(IID("u", index="t"), over="firm"), frame)
 
 
 def test_a_replicated_model_fits():
@@ -264,7 +264,7 @@ def test_an_integer_index_keeps_its_numeric_level_order():
     the same wrong order.
     """
     frame = _integer_index_frame()
-    outer, _ = _build_effect_block(
+    outer = _effect_block(
         Replicated(RW1("u", index="year", precision=1.0), over="firm"), frame
     )
     expected = tuple(f"{firm}@{year}" for firm in ("f0", "f1") for year in range(1, 13))

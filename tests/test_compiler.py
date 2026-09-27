@@ -6,7 +6,6 @@ from typing import cast
 
 from pylgm import AR1, Bernoulli, BYM2, Fixed, Gaussian, IID, LGM, Poisson, ProperCAR
 from pylgm.effects import Predictor
-import pylgm.compiler as compiler_module
 from pylgm.compiler import compile_family, compile_gaussian_family, compile_lgm, compile_model
 from pylgm.config.experiment import EvaluationConfig, ExperimentDataConfig, OriginConfig
 from pylgm.config.schema import DataConfig, RunConfig
@@ -201,11 +200,7 @@ def test_compiler_rejects_block_with_wrong_panel_row_count(
         csr_matrix([[1.0]]),
         np.empty((0, 1)),
     )
-    real = compiler_module._build_effect_block
-    monkeypatch.setattr(
-        "pylgm.compiler._build_effect_block",
-        lambda effect, frame: (bad_block, 1.0) if effect.name == "bad" else real(effect, frame),
-    )
+    monkeypatch.setattr("pylgm.compiler.build_iid", lambda *args, **kwargs: bad_block)
 
     with pytest.raises(CompilationError, match="row count"):
         compile_model(config, panel)

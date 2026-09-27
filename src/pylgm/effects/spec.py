@@ -666,7 +666,7 @@ class Replicated(_ComposableEffect):
         # Weighted an `index` of its own: joint.Shared distinguishes "wrapper,
         # cannot be shared" from "no index at all" by hasattr(effect, "index"),
         # so an index on Weighted turns that guard into dead code. Same unwrap
-        # pattern as compiler._build_effect_block and data.spark._required_columns.
+        # pattern as compiler._append_family_blocks and data.spark._required_columns.
         target = self.effect.effect if isinstance(self.effect, Weighted) else self.effect
         # Replicated(Grouped(...)) is R-INLA's `group` + `replicate` on one term:
         # I_R (x) Q_S (x) Q_E, labels replicate@group@level.

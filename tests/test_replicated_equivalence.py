@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from pylgm import AR1, Fixed, LGM, Poisson, Replicated
-from pylgm.compiler import _build_effect_block
+from pylgm.compiler import _effect_block
 
 
 def _frame(n=72):
@@ -27,10 +27,10 @@ def _frame(n=72):
 def test_replicated_ar1_matches_the_shipped_grouped_ar1_bit_for_bit(rho):
     frame = _frame()
     with pytest.warns(DeprecationWarning):
-        legacy, _ = _build_effect_block(
+        legacy = _effect_block(
             AR1("u", index="year", precision=2.0, rho=rho, group="firm"), frame
         )
-    general, _ = _build_effect_block(
+    general = _effect_block(
         Replicated(AR1("u", index="year", precision=2.0, rho=rho), over="firm"), frame
     )
     assert general.labels == legacy.labels
@@ -60,11 +60,11 @@ def test_replicated_ar1_and_grouped_ar1_fit_identically():
 
 def test_ar1_replicate_is_the_supported_name_and_warns_for_group():
     frame = _frame()
-    modern, _ = _build_effect_block(
+    modern = _effect_block(
         AR1("u", index="year", precision=2.0, rho=0.4, replicate="firm"), frame
     )
     with pytest.warns(DeprecationWarning, match="replicate"):
-        legacy, _ = _build_effect_block(
+        legacy = _effect_block(
             AR1("u", index="year", precision=2.0, rho=0.4, group="firm"), frame
         )
     assert modern.labels == legacy.labels

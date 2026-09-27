@@ -29,7 +29,7 @@ import pytest
 from pylgm import (
     BesagStructure, Grouped, IID, IIDStructure, RW1, RW2,
 )
-from pylgm.compiler import _build_effect_block
+from pylgm.compiler import _effect_block
 from pylgm.effects.random_walk import rw_structure
 from pylgm.effects.spacetime import build_spacetime
 
@@ -90,7 +90,7 @@ def test_grouped_reproduces_the_knorr_held_interaction(interaction, order):
     reference = build_spacetime(
         frame, "st", "s", "t", GRAPH, interaction, order, precision=1.0
     )
-    grouped, _ = _build_effect_block(
+    grouped = _effect_block(
         Grouped(_inner(interaction, order), over="s", structure=_structure(interaction)),
         frame,
     )
@@ -111,7 +111,7 @@ def test_the_two_differ_only_in_their_label_separator():
     """SpaceTime's `|` is user-visible in result.labels and cannot change."""
     frame = _frame()
     reference = build_spacetime(frame, "st", "s", "t", GRAPH, "IV", 1, precision=1.0)
-    grouped, _ = _build_effect_block(
+    grouped = _effect_block(
         Grouped(RW1("st", index="t"), over="s", structure=BesagStructure(GRAPH)), frame
     )
     assert [la.replace("@", "|") for la in grouped.labels] == list(reference.labels)
@@ -138,7 +138,7 @@ def test_rw_scaling_is_explicit_and_consistent():
     from pylgm.effects.structures import RW1Structure
 
     frame = _frame()
-    grouped, _ = _build_effect_block(
+    grouped = _effect_block(
         Grouped(RW1("u", index="t"), over="s", structure=RW1Structure()), frame
     )
     groups = frame["s"].nunique()
@@ -147,10 +147,10 @@ def test_rw_scaling_is_explicit_and_consistent():
     assert np.allclose(grouped.precision.toarray(), expected)
 
     reference = build_spacetime(frame, "st", "s", "t", GRAPH, "II", 1, precision=1.0)
-    unscaled, _ = _build_effect_block(
+    unscaled = _effect_block(
         Grouped(RW1("st", index="t"), over="s", structure=IIDStructure()), frame
     )
-    scaled, _ = _build_effect_block(
+    scaled = _effect_block(
         Grouped(RW1("st", index="t", scale=True), over="s", structure=IIDStructure()), frame
     )
     assert not np.allclose(unscaled.precision.toarray(), reference.precision.toarray())
