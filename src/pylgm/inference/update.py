@@ -23,7 +23,7 @@ the base posterior minus a rank-k term, and draws use Matheron's rule, so
 repeated updates chain; a dense chain collapses to one factor once it holds
 more rows than latents.
 
-``update_integrated`` lifts this to an INLA result: each grid point's
+An INLA result lifts this: each grid point's
 conditional is updated and the grid is reweighted by its
 ``p(y_new | y_old, theta_k)`` -- Bayes' rule on the hyperparameter grid.
 """
@@ -65,7 +65,6 @@ class UpdatedPosterior:
     v: np.ndarray
     design: np.ndarray
     s_factor: tuple
-    noise_sd: float
 
     def covariance_apply(self, rhs: np.ndarray) -> np.ndarray:
         rhs = np.asarray(rhs, dtype=float)
@@ -84,9 +83,10 @@ class UpdatedPosterior:
         return self.predictive_variances(weights)
 
     def sample_deviations(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        # Matheron: x' = x - Sigma A^T S^-1 (A x + e) is exactly N(0, Sigma').
+        # Matheron: x' = x - Sigma A^T S^-1 (A x + e) is exactly N(0, Sigma'); the
+        # rows are whitened by W^1/2, so e has unit variance.
         base = self.base.sample_deviations(n, rng)
-        noise = self.noise_sd * rng.standard_normal((n, self.design.shape[0]))
+        noise = rng.standard_normal((n, self.design.shape[0]))
         residual = base @ self.design.T + noise
         return base - cho_solve(self.s_factor, residual.T).T @ self.v.T
 
@@ -107,7 +107,7 @@ def _psd_factor(covariance: np.ndarray) -> np.ndarray:
     return vectors[:, keep] * np.sqrt(values[keep])
 
 
-def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood, max_iterations=100):
+def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood):
     """Mode of ``p(y | eta) N(eta; m, S0)``: ``(a, W^1/2, cho(B), log p(y))`` (module doc)."""
     k = m.size
 
@@ -127,7 +127,7 @@ def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood, max_ite
     a = np.zeros(k)
     eta = m.copy()
     psi = likelihood.log_likelihood(eta, y)
-    for _ in range(max_iterations):
+    for _ in range(100):
         weights, root, b_factor = curvature(eta)
         b = weights * (eta - m) + likelihood.gradient(eta, y)
         step = b - root * cho_solve(b_factor, root * (s0 @ b)) - a
@@ -145,7 +145,7 @@ def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood, max_ite
         if done:
             break
     else:
-        raise InferenceConvergenceError(max_iterations, float(np.max(np.abs(step))))
+        raise InferenceConvergenceError(100, float(np.max(np.abs(step))))
     _, root, b_factor = curvature(eta)
     return a, root, b_factor, psi - float(np.sum(np.log(np.diag(b_factor[0]))))
 
@@ -181,6 +181,7 @@ class _Conditioning:
     """The k new rows' conditioning of a fitted posterior (module doc symbols)."""
 
     rows: object          # the observed new rows
+    likelihood: object    # scoring them, bound to their trials
     design: np.ndarray    # A
     m: np.ndarray         # prior mean of eta at the rows
     s0: np.ndarray        # A Sigma A^T
@@ -218,11 +219,15 @@ def _condition(result, new_data, caller="update"):
     m = _offset_for(context, rows) + design @ result.mean
     s0 = design @ v
     a, root, s_factor, log_evidence = _rows_mode(m, s0, y[observed], likelihood)
-    return _Conditioning(rows, design, m, s0, v, a, root, s_factor, log_evidence)
+    return _Conditioning(rows, likelihood, design, m, s0, v, a, root, s_factor, log_evidence)
 
 
-def condition_on_rows(result, new_data):
-    """Return ``result`` conditioned on ``new_data``'s observed rows (see module doc)."""
+def update(result, new_data):
+    """``result`` conditioned on ``new_data``'s observed rows (see module doc)."""
+    from pylgm.inference.result import INLAResult
+
+    if isinstance(result, INLAResult):
+        return _update_integrated(result, new_data)
     conditioning = _condition(result, new_data)
     return result if conditioning is None else _conditioned(result, conditioning)
 
@@ -240,7 +245,7 @@ def _conditioned(result, c: _Conditioning):
     v = c.v * root
     posterior = UpdatedPosterior(
         base=_DenseFactor(sampler.factor) if sampler.factor is not None else sampler.posterior,
-        v=v, design=design * root[:, None], s_factor=s_factor, noise_sd=1.0,
+        v=v, design=design * root[:, None], s_factor=s_factor,
     )
     # The fitted grid: canonical rows of the sampler's design, in caller order.
     grid = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
@@ -315,7 +320,7 @@ class IntegrationGrid:
     context: object = None
 
 
-def update_integrated(result, new_data):
+def _update_integrated(result, new_data):
     """Update every grid point's conditional and reweight the grid (module doc)."""
     grid = result._grid
     if grid is None:
@@ -326,7 +331,7 @@ def update_integrated(result, new_data):
         warnings.warn(
             "update() reports the Gaussian grid-mixture latent marginals; refit for "
             "the skewed latent_strategy on all rows.",
-            UserWarning, stacklevel=3,
+            UserWarning, stacklevel=4,   # user -> result.update -> update -> here
         )
     before = [conditional() for conditional in grid.conditionals]
     return _reweighted(result, before, [conditional.update(new_data) for conditional in before])
@@ -366,7 +371,7 @@ def _reweighted(result, before, after):
         warnings.warn(
             f"update() left {effective:.1f} effective integration points: the "
             "hyperparameter posterior has outgrown the fitted grid; refit to re-centre it.",
-            UserWarning, stacklevel=3,
+            UserWarning, stacklevel=5,   # user -> result.update/news -> ... -> here
         )
     diagnostics["inla_effective_weight"] = effective
     diagnostics["updated_rows"] = max(int(new.diagnostics.get("updated_rows", 0)) for new in after)
@@ -439,10 +444,6 @@ class _PointNews:
     latent: np.ndarray      # p x k
     by_block: dict          # block -> G[:, block] @ latent[block], n_targets x k
 
-    @property
-    def prediction(self) -> np.ndarray:
-        return sum(self.by_block.values())
-
 
 def _point_news(result, new_data, at) -> _PointNews:
     from pylgm.inference.prediction import _design_for
@@ -460,9 +461,7 @@ def _point_news(result, new_data, at) -> _PointNews:
         target = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
     else:
         target = _design_for(result.prediction_context, at)
-    expected = _rows_likelihood(result, result.prediction_context, c.rows).response_prediction(
-        c.m, np.diag(c.s0)
-    )
+    expected = c.likelihood.response_prediction(c.m, np.diag(c.s0))
     return _PointNews(
         updated=_conditioned(result, c),
         conditioning=c,

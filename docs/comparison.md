@@ -217,7 +217,7 @@ the same gap, so they cannot be combined.
 constant factor that now comes from re-analysing the sparse factorisation at
 every Newton step (SciPy exposes no symbolic/numeric split).
 
-**Where pyLGM is ahead: absorbing new data.** `GaussianResult.update` conditions
+**Where pyLGM is ahead: absorbing new data.** `result.update` conditions
 a fitted posterior on new rows exactly, with no refactorisation
 ([prediction](prediction.md#sequential-updates)); INLA refits. Per new period of
 a regional panel, at the same fixed hyperparameters:
