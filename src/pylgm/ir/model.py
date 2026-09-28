@@ -8,12 +8,16 @@ from pylgm.likelihoods import CompiledGaussian
 from pylgm._checks import readonly_array as _readonly_array
 
 
+def _freeze_csr(value: csr_matrix) -> csr_matrix:
+    """Mark ``value``'s arrays read-only in place; the caller must own them."""
+    value.data.setflags(write=False)
+    value.indices.setflags(write=False)
+    value.indptr.setflags(write=False)
+    return value
+
+
 def _readonly_csr_matrix(value: csr_matrix) -> csr_matrix:
-    result = value.copy()
-    result.data.setflags(write=False)
-    result.indices.setflags(write=False)
-    result.indptr.setflags(write=False)
-    return result
+    return _freeze_csr(value.copy())
 
 
 def _array(value: object, name: str) -> np.ndarray:
@@ -129,6 +133,17 @@ class LatentBlock:
     @property
     def constraints(self) -> np.ndarray:
         return _readonly_array(self._constraints)
+
+    def _rescaled(self, precision: csr_matrix) -> "LatentBlock":
+        """This block with ``precision`` swapped in, skipping re-validation.
+
+        ``precision`` must be a fresh, finite scalar multiple of this block's own
+        (already validated, symmetric) precision; its arrays are frozen in place.
+        The frozen design and constraints are shared, not copied.
+        """
+        result = object.__new__(LatentBlock)
+        result.__dict__.update(self.__dict__, _precision=_freeze_csr(precision))
+        return result
 
 
 @dataclass(frozen=True, init=False)
@@ -377,6 +392,29 @@ class CompiledLGM:
     @property
     def prediction_offset(self) -> np.ndarray:
         return _readonly_array(self._prediction_offset)
+
+    def _rebind(
+        self,
+        precision: csr_matrix,
+        likelihood: object,
+        blocks: tuple[LatentBlock, ...],
+    ) -> "CompiledLGM":
+        """This validated model with a new precision, likelihood and blocks.
+
+        Trusted fast path for ``CompiledFamily.materialize``: ``blocks`` must share
+        this model's designs, labels and constraints, and ``precision`` must be the
+        fresh block-diagonal of their (validated) precisions; it is frozen in place.
+        """
+        if likelihood is None:
+            raise ModelValidationError("likelihood must be present")
+        result = object.__new__(CompiledLGM)
+        result.__dict__.update(
+            self.__dict__,
+            _precision=_freeze_csr(precision),
+            likelihood=likelihood,
+            blocks=blocks,
+        )
+        return result
 
     @property
     def sigma(self) -> float:
