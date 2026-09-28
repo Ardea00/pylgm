@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     # helpers from gaussian.py, which imports GaussianResult from here, so a
     # top-level import of SparsePosterior would be circular.
     from pylgm.inference.sampling import GridSampler
+    from pylgm.inference.update import News
     from pylgm.inference.sparse import SparsePosterior
 
 
@@ -841,6 +842,50 @@ class _BaseResult:
             )
         return sample_mixture(components, n, rng)
 
+    def update(self, new_data):
+        """Condition this posterior on ``new_data``'s rows, without refactorising.
+
+        Rows with a NaN response are skipped, and every latent level they touch
+        must already be in the fit (put future periods on the grid at fit time
+        with a NaN response). ``log_marginal_likelihood`` gains
+        ``log p(y_new | y_old)``.
+
+        - Exact Gaussian fit: exact conditioning, equal to a refit on all rows
+          at the same hyperparameters.
+        - Laplace fit: the posterior becomes the prior for the new rows, whose
+          mode is found in their own k-dimensional predictor space. Not a
+          refit: the old rows' curvature stays at the old mode, an error second
+          order in the mode shift.
+        - Integrated fit: every retained grid point is updated so, and its
+          weight multiplied by its ``p(y_new | y_old, theta)`` -- Bayes' rule on
+          the fitted grid, so the hyperparameters move too. The grid stays put:
+          a warning fires under three effective points (refit to re-centre).
+          ``criteria`` are not carried through, and a skewed
+          ``latent_strategy`` falls back to the Gaussian grid mixture.
+
+        Hyperparameters of an empirical-Bayes fit stay fixed. See
+        docs/prediction.md#sequential-updates.
+        """
+        from pylgm.inference.update import update
+
+        return update(self, new_data)
+
+    def news(self, new_data, at=None) -> "News":
+        """Decompose the revision a release of ``new_data``'s rows causes.
+
+        Returns a ``pylgm.inference.update.News``: the news in each released
+        row (actual minus expected, on the linear-predictor scale) and the
+        revision each row causes in every latent effect and in the linear
+        predictor at ``at``'s rows (default: the fitted grid). The columns sum
+        to the total revision exactly; ``News.updated`` is the posterior after
+        the release, as ``update(new_data)`` returns it. On an integrated
+        result a ``hyperparameters`` column carries the revision due to the
+        release moving the hyperparameter posterior.
+        """
+        from pylgm.inference.update import news
+
+        return news(self, new_data, at)
+
     def predict(self, new_data, outcome: str | None = None):
         """Score new rows against this result's latent posterior.
 
@@ -951,21 +996,6 @@ class GaussianResult(_BaseResult):
 
     def _sampling_components(self) -> tuple:
         return () if self._sampler is None else ((1.0, self._sampler),)
-
-    def update(self, new_data) -> "GaussianResult":
-        """Condition this posterior on ``new_data``'s rows, hyperparameters held fixed.
-
-        Exact Gaussian conditioning with no refactorisation: the result equals a
-        refit on all rows seen so far at the same hyperparameters, and
-        ``log_marginal_likelihood`` gains ``log p(y_new | y_old)``. Rows with a
-        NaN response are skipped. Every latent level ``new_data`` touches must
-        already be in the fit -- put future periods on the grid at fit time with
-        a NaN response. Hyperparameters are not re-estimated: fit with
-        ``hyperparameters="integrate"`` to have ``update`` move them too.
-        """
-        from pylgm.inference.update import condition_on_rows
-
-        return condition_on_rows(self, new_data)
 
 
 @dataclass(frozen=True, init=False)
@@ -1098,20 +1128,6 @@ class LaplaceResult(_BaseResult):
     @property
     def fitted_mean(self) -> np.ndarray:
         return _readonly_array(self._fitted_mean)
-
-    def update(self, new_data) -> "LaplaceResult":
-        """Condition this posterior on ``new_data``'s rows, hyperparameters held fixed.
-
-        The Laplace posterior becomes the prior for the new rows, whose mode is
-        found in their own k-dimensional predictor space -- no refactorisation.
-        ``log_marginal_likelihood`` gains the Laplace ``log p(y_new | y_old)``.
-        Unlike the Gaussian case this is not identical to a refit: the old rows'
-        curvature stays at the old mode, an error second order in the mode shift.
-        Row and level rules are ``GaussianResult.update``'s.
-        """
-        from pylgm.inference.update import condition_on_rows
-
-        return condition_on_rows(self, new_data)
 
 
 def _readonly_hyperparameter_marginals(
@@ -1279,21 +1295,3 @@ class INLAResult(_BaseResult):
             (float(w), RefitSampler(conditional))
             for w, conditional in zip(self._grid.weights, self._grid.conditionals, strict=True)
         )
-
-    def update(self, new_data) -> "INLAResult":
-        """Condition on ``new_data``'s rows and update the hyperparameter posterior too.
-
-        Each retained grid point's conditional is updated as
-        ``GaussianResult.update``/``LaplaceResult.update`` do (exact for a
-        Gaussian likelihood), and its integration weight is multiplied by that
-        point's ``p(y_new | y_old, theta)`` -- Bayes' rule on the fitted grid, so
-        the hyperparameters move with the data without a new search. The first
-        update refits each grid point's conditional once; later ones reuse them.
-        The grid itself stays put: a warning fires when the reweighting leaves
-        fewer than three effective points, and a refit re-centres it.
-        ``criteria`` are not carried through (they score the fitted rows), and a
-        skewed ``latent_strategy`` falls back to the Gaussian grid mixture.
-        """
-        from pylgm.inference.update import update_integrated
-
-        return update_integrated(self, new_data)

@@ -89,7 +89,7 @@ def _point_estimates(result) -> dict[str, float]:
     return estimates
 
 
-def _fitted_context(context, model, estimates: Mapping[str, float], table: Mapping = {}):
+def _fitted_context(context, model, estimates: Mapping[str, float], table: Mapping = None):
     """Substitute estimated hyperparameters into a prediction context.
 
     ``build_prediction_context`` reads a ``compile_lgm`` result, which resolves
@@ -110,6 +110,7 @@ def _fitted_context(context, model, estimates: Mapping[str, float], table: Mappi
 
     if not estimates:
         return context
+    table = table or {}
     likelihood = model.likelihood
     if isinstance(likelihood, Gaussian):
         name = getattr(likelihood.sigma, "name", None)

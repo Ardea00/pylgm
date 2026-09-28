@@ -190,7 +190,7 @@ def test_integrate_inla_matches_fine_1d_quadrature():
 def test_integrate_inla_matches_fine_1d_quadrature_at_default_grid():
     # Same anchor as test_integrate_inla_matches_fine_1d_quadrature, but at
     # integrate_inla's shipped defaults (grid_step=1.0, radius=3) -- the
-    # settings LGM.fit's INLA path (_run_inla) actually uses. The fine-config
+    # settings LGM.fit's INLA path (model._fit_family) actually uses. The fine-config
     # anchor above measures accuracy at settings the shipped path never calls.
     family = _one_hyperparameter_family()
     bounds = {"p": OptimizationBounds(1.0, 1e-2, 1e2)}

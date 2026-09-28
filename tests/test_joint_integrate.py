@@ -1,7 +1,7 @@
 """INLA grid integration on joint models.
 
 `hyperparameters="integrate"` was reachable from the public API but had no test
-coverage at all: `Joint._run_inla` was never executed in CI. These tests close
+coverage at all: the joint INLA path was never executed in CI. These tests close
 that gap and pin the behaviour that was verified by hand.
 
 They matter beyond smoke-testing because the `simplified_laplace` and `laplace`
