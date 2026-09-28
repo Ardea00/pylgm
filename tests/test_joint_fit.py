@@ -111,7 +111,8 @@ def test_joint_fit_drops_each_submodels_nan_response_rows():
     it, because in the long-stacked layout joint models are normally given, a
     NaN means "this row belongs to another outcome" rather than "hold this
     observation out" -- keeping them would double the stacked design and fit
-    observations that do not exist. See docs/joint-models.md, Not supported yet.
+    observations that do not exist; `hold_out` keeps them explicitly. See
+    docs/joint-models.md, "Held-out rows".
     """
     frame = pd.DataFrame({
         "count_a": [1.0, 2.0, None, 4.0, 5.0],

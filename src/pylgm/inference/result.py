@@ -842,12 +842,13 @@ class _BaseResult:
             )
         return sample_mixture(components, n, rng)
 
-    def update(self, new_data):
+    def update(self, new_data, revisions=None):
         """Condition this posterior on ``new_data``'s rows, without refactorising.
 
         Rows with a NaN response are skipped, and every latent level they touch
         must already be in the fit (put future periods on the grid at fit time
-        with a NaN response). ``log_marginal_likelihood`` gains
+        with a NaN response). On a joint model each outcome's column is read
+        from ``new_data``. ``log_marginal_likelihood`` gains
         ``log p(y_new | y_old)``.
 
         - Exact Gaussian fit: exact conditioning, equal to a refit on all rows
@@ -863,28 +864,33 @@ class _BaseResult:
           ``criteria`` are not carried through, and a skewed
           ``latent_strategy`` falls back to the Gaussian grid mixture.
 
-        Hyperparameters of an empirical-Bayes fit stay fixed. See
-        docs/prediction.md#sequential-updates.
+        ``revisions = (previous, revised)`` first replaces already-fitted
+        Gaussian rows' values (two frames with the same rows): the mean moves by
+        ``Sigma A^T D^-1 dy`` and the log marginal likelihood is re-scored
+        exactly, with the covariance unchanged. Hyperparameters of an
+        empirical-Bayes fit stay fixed. See docs/prediction.md#sequential-updates.
         """
         from pylgm.inference.update import update
 
-        return update(self, new_data)
+        return update(self, new_data, revisions)
 
-    def news(self, new_data, at=None) -> "News":
-        """Decompose the revision a release of ``new_data``'s rows causes.
+    def news(self, new_data, at=None, *, weights=None, revisions=None) -> "News":
+        """Decompose the revision that ``new_data``'s rows and ``revisions`` cause.
 
         Returns a ``pylgm.inference.update.News``: the news in each released
-        row (actual minus expected, on the linear-predictor scale) and the
-        revision each row causes in every latent effect and in the linear
-        predictor at ``at``'s rows (default: the fitted grid). The columns sum
-        to the total revision exactly; ``News.updated`` is the posterior after
-        the release, as ``update(new_data)`` returns it. On an integrated
-        result a ``hyperparameters`` column carries the revision due to the
-        release moving the hyperparameter posterior.
+        row, and each row's (and each revision's) share of the revision of every
+        latent effect and of the linear predictor at the targets, adding up
+        exactly; the same split by latent block; and each release's share of
+        the drop in the targets' variances. ``at`` picks the target rows
+        (default: the fitted grid; on a joint model, a mapping from outcome to
+        rows); ``weights`` (aggregates x target rows) turns them into
+        aggregates, such as months summed into a quarter. ``News.updated`` is
+        ``update(new_data, revisions)``'s result. ``new_data`` may be ``None``
+        when only ``revisions`` are given.
         """
         from pylgm.inference.update import news
 
-        return news(self, new_data, at)
+        return news(self, new_data, at, weights=weights, revisions=revisions)
 
     def predict(self, new_data, outcome: str | None = None):
         """Score new rows against this result's latent posterior.

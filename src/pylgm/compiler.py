@@ -1995,8 +1995,11 @@ def build_prediction_context(
     )
 
 
-def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLGM, result):
+def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLGM, fitted):
     """One PredictionContext per outcome, each spanning the full stacked latent.
+
+    ``fitted`` maps hyperparameter names to their point estimates (the optimum,
+    or an integrated posterior mean); unlisted ones take their ``.initial``.
 
     Block order is fixed by compile_joint: every sub-model's private blocks in
     declaration order, then the shared blocks. The column span of each block is
@@ -2008,7 +2011,6 @@ def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLG
         spans[block.name] = (cursor, cursor + width)
         cursor += width
 
-    fitted = dict(result.hyperparameters or {})
     contexts = {}
     for outcome, model in zip(joint.outcomes, joint.submodels, strict=False):
         panel = panels[outcome]
@@ -2063,9 +2065,10 @@ def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLG
             trials=(_base_likelihood(model.likelihood).trials
                 if isinstance(_base_likelihood(model.likelihood), Binomial) else None),
             width=compiled.design.shape[1],
+            response=outcome,
             column_slices=tuple(slices),
         )
-    return JointPredictionContext(contexts)
+    return JointPredictionContext(contexts, compiled.likelihood)
 
 
 def _submodel_likelihood(model: "LGM", panel: CanonicalPanel, fitted: dict):

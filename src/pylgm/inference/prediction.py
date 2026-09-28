@@ -83,9 +83,14 @@ class PredictionContext:
 
 @dataclass(frozen=True)
 class JointPredictionContext:
-    """Per-outcome prediction contexts for a joint model."""
+    """Per-outcome prediction contexts for a joint model.
+
+    ``likelihood`` scores the stacked prediction grid (every outcome's rows in
+    order), which ``update`` needs to re-derive the response-scale means.
+    """
 
     contexts: Mapping[str, PredictionContext]
+    likelihood: object = None
 
     @property
     def outcomes(self) -> tuple[str, ...]:

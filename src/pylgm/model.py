@@ -89,7 +89,7 @@ def _point_estimates(result) -> dict[str, float]:
     return estimates
 
 
-def _fitted_context(context, model, estimates: Mapping[str, float], table: Mapping = None):
+def _fitted_context(context, model, estimates: Mapping[str, float], table: Mapping | None = None):
     """Substitute estimated hyperparameters into a prediction context.
 
     ``build_prediction_context`` reads a ``compile_lgm`` result, which resolves
@@ -232,15 +232,15 @@ def _rebuild_result(
     )
 
 
-def _finished(result, model, raw_context, *, caller_order=None, prediction_keys=None,
+def _finished(result, context_at, *, caller_order=None, prediction_keys=None,
               reorder_criteria=True):
     """Attach the fitted prediction context and put rows in caller order.
 
-    ``raw_context`` is the unsubstituted one ``build_prediction_context``
-    returns (its MIDAS shapes are still names). An INLA grid is bound too: each
-    point's conditional gets the context of its own theta, so ``update`` builds
-    the new rows' design and likelihood there, and the integrated context is
-    rebuilt from the updated hyperparameter marginals.
+    ``context_at(estimates, table)`` builds the prediction context at the given
+    hyperparameter point estimates (``table``: an integrated fit's marginals).
+    An INLA grid is bound too: each point's conditional gets the context of its
+    own theta, so ``update`` builds the new rows' design and likelihood there,
+    and the integrated context is rebuilt from the updated marginals.
     """
     from dataclasses import replace
 
@@ -249,7 +249,7 @@ def _finished(result, model, raw_context, *, caller_order=None, prediction_keys=
         def conditional_at(conditional, theta):
             return _rebuild_result(
                 conditional(), caller_order=caller_order, hyperparameters=theta,
-                prediction_context=_fitted_context(raw_context, model, theta),
+                prediction_context=context_at(theta, {}),
             )
 
         grid = replace(
@@ -258,16 +258,13 @@ def _finished(result, model, raw_context, *, caller_order=None, prediction_keys=
                 partial(conditional_at, conditional, theta)
                 for conditional, theta in zip(grid.conditionals, grid.thetas, strict=True)
             ),
-            context=lambda marginals: _fitted_context(
-                raw_context, model,
-                {name: float(entry.mean[0]) for name, entry in marginals.items()}, marginals,
+            context=lambda marginals: context_at(
+                {name: float(entry.mean[0]) for name, entry in marginals.items()}, marginals
             ),
         )
     return _rebuild_result(
         result, caller_order=caller_order, prediction_keys=prediction_keys,
-        prediction_context=_fitted_context(
-            raw_context, model, _point_estimates(result), _hyperparameter_table(result)
-        ),
+        prediction_context=context_at(_point_estimates(result), _hyperparameter_table(result)),
         reorder_criteria=reorder_criteria, grid=grid,
     )
 
@@ -693,7 +690,8 @@ class LGM:
                 return compiled
         result = self._fit_family(family, direct, engine, **options)
         return _finished(
-            result, self, build_prediction_context(self, panel, compiled, result),
+            result,
+            partial(_fitted_context, build_prediction_context(self, panel, compiled, result), self),
             caller_order=np.argsort(panel.source_positions),
             reorder_criteria=not (observations or constraints),
         )
@@ -712,7 +710,11 @@ class LGM:
             compile_family(self, canonical.panel), lambda: compiled, engine, **options
         )
         return _finished(
-            result, self, build_prediction_context(self, canonical.panel, compiled, result),
+            result,
+            partial(
+                _fitted_context, build_prediction_context(self, canonical.panel, compiled, result),
+                self,
+            ),
             prediction_keys=canonical.prediction_keys,
         )
 

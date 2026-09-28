@@ -150,17 +150,99 @@ def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood):
     return a, root, b_factor, psi - float(np.sum(np.log(np.diag(b_factor[0]))))
 
 
-def _rows_likelihood(result, context, rows):
-    """The likelihood the new rows are scored under, bound to their own trials."""
-    from pylgm.inference.prediction import _prediction_likelihood
+@dataclass(frozen=True)
+class _StackedLikelihood:
+    """Several outcomes' rows scored together, each part under its own likelihood."""
+
+    parts: tuple   # (slice, likelihood)
+
+    def _each(self, method, *arrays):
+        return np.concatenate([
+            np.asarray(getattr(likelihood, method)(*(a[rows] for a in arrays)), dtype=float)
+            for rows, likelihood in self.parts
+        ])
+
+    def log_likelihood(self, eta, y):
+        return float(sum(lk.log_likelihood(eta[rows], y[rows]) for rows, lk in self.parts))
+
+    def gradient(self, eta, y):
+        return self._each("gradient", eta, y)
+
+    def working_weights(self, eta, y):
+        return self._each("working_weights", eta, y)
+
+    def response_prediction(self, eta, variance):
+        return self._each("response_prediction", eta, variance)
+
+
+@dataclass(frozen=True)
+class _Rows:
+    """Observed new rows, stacked across a joint model's outcomes."""
+
+    labels: object        # new_data's index; (outcome, index) on a joint model
+    y: np.ndarray
+    design: np.ndarray    # A
+    offset: np.ndarray
+    likelihood: object    # scoring them, bound to their own trials
+
+
+def _observed_rows(result, frame, caller="update"):
+    """``frame``'s rows with an observed response, or ``None`` if there are none."""
+    import pandas as pd
+
+    from pylgm.inference.prediction import (
+        JointPredictionContext,
+        PredictionContext,
+        _design_for,
+        _offset_for,
+        _prediction_likelihood,
+    )
     from pylgm.inference.result import GaussianResult
     from pylgm.likelihoods import CompiledGaussian, CompiledWeibullSurv
 
-    if isinstance(result, GaussianResult):
-        return CompiledGaussian(float(np.sqrt(result.observation_variance)))
-    if isinstance(context.likelihood, CompiledWeibullSurv):
-        raise UnsupportedEngineError("update() does not support survival likelihoods; refit instead")
-    return _prediction_likelihood(context, rows)
+    context = result.prediction_context
+    joint = isinstance(context, JointPredictionContext)
+    contexts = list(context.contexts.values()) if joint else [context]
+    if (result._sampler is None or not all(
+            isinstance(c, PredictionContext) and c.response for c in contexts)):
+        raise ValueError(f"{caller}() is available on results produced by LGM.fit or Joint.fit")
+    present = [c for c in contexts if c.response in frame.columns]
+    if not present:
+        names = ", ".join(repr(c.response) for c in contexts)
+        raise ValueError(f"{caller}() new_data has no response column ({names})")
+    labels, ys, designs, offsets, parts, start = [], [], [], [], [], 0
+    for c in present:
+        y = np.asarray(frame[c.response], dtype=float)
+        observed = np.isfinite(y)
+        if not observed.any():
+            continue
+        rows = frame[observed]
+        if isinstance(result, GaussianResult):
+            likelihood = CompiledGaussian(float(np.sqrt(result.observation_variance)))
+        elif isinstance(c.likelihood, CompiledWeibullSurv):
+            raise UnsupportedEngineError(
+                f"{caller}() does not support survival likelihoods; refit instead"
+            )
+        else:
+            likelihood = _prediction_likelihood(c, rows)
+        likelihood.validate_response(y[observed])
+        labels.append([(c.response, label) for label in rows.index] if joint else list(rows.index))
+        ys.append(y[observed])
+        designs.append(_design_for(c, rows))
+        offsets.append(_offset_for(c, rows))
+        parts.append((slice(start, start + len(rows)), likelihood))
+        start += len(rows)
+    if not parts:
+        return None
+    labels = sum(labels, [])
+    return _Rows(
+        labels=pd.MultiIndex.from_tuples(labels, names=["outcome", None]) if joint
+        else pd.Index(labels, name=frame.index.name),
+        y=np.concatenate(ys),
+        design=np.vstack(designs),
+        offset=np.concatenate(offsets),
+        likelihood=parts[0][1] if len(parts) == 1 else _StackedLikelihood(tuple(parts)),
+    )
 
 
 def _fitted_mean(likelihood, predictive_mean, predictive_variance, row_order):
@@ -180,9 +262,7 @@ def _fitted_mean(likelihood, predictive_mean, predictive_variance, row_order):
 class _Conditioning:
     """The k new rows' conditioning of a fitted posterior (module doc symbols)."""
 
-    rows: object          # the observed new rows
-    likelihood: object    # scoring them, bound to their trials
-    design: np.ndarray    # A
+    rows: _Rows
     m: np.ndarray         # prior mean of eta at the rows
     s0: np.ndarray        # A Sigma A^T
     v: np.ndarray         # Sigma A^T
@@ -194,91 +274,159 @@ class _Conditioning:
 
 def _condition(result, new_data, caller="update"):
     """``_Conditioning`` for ``new_data``'s observed rows, or ``None`` if there are none."""
-    from pylgm.inference.prediction import PredictionContext, _design_for, _offset_for
-
-    context = result.prediction_context
-    if (not isinstance(context, PredictionContext) or context.response is None
-            or result._sampler is None):
-        raise ValueError(f"{caller}() is available on single-response results produced by LGM.fit")
-    if context.response not in new_data.columns:
-        raise ValueError(
-            f"{caller}() new_data is missing the response column {context.response!r}"
-        )
-    y = np.asarray(new_data[context.response], dtype=float)
-    observed = np.isfinite(y)
-    if not observed.any():
+    rows = _observed_rows(result, new_data, caller)
+    if rows is None:
         return None
-    rows = new_data[observed]
-    likelihood = _rows_likelihood(result, context, rows)
-    likelihood.validate_response(y[observed])
-    design = _design_for(context, rows)
+    v = _covariance_apply(result, rows.design.T)
+    m = rows.offset + rows.design @ result.mean
+    s0 = rows.design @ v
+    a, root, s_factor, log_evidence = _rows_mode(m, s0, rows.y, rows.likelihood)
+    return _Conditioning(rows, m, s0, v, a, root, s_factor, log_evidence)
+
+
+def _covariance_apply(result, rhs):
     if result._covariance is not None:
-        v = result._covariance @ design.T
-    else:
-        v = result._sparse_posterior.covariance_apply(design.T)
-    m = _offset_for(context, rows) + design @ result.mean
-    s0 = design @ v
-    a, root, s_factor, log_evidence = _rows_mode(m, s0, y[observed], likelihood)
-    return _Conditioning(rows, likelihood, design, m, s0, v, a, root, s_factor, log_evidence)
+        return result._covariance @ rhs
+    return result._sparse_posterior.covariance_apply(rhs)
 
 
-def update(result, new_data):
+@dataclass(frozen=True)
+class _Revision:
+    """Already-fitted Gaussian rows whose values were revised (``previous -> revised``)."""
+
+    rows: _Rows           # the revised values
+    previous: np.ndarray
+    latent: np.ndarray    # p x r: each row's shift of the latent mean
+    log_evidence: float   # change in the log marginal likelihood
+
+
+def _revision(result, revisions, caller):
+    """``_Revision`` for ``revisions = (previous_rows, revised_rows)``, or ``None``.
+
+    Revising Gaussian rows moves the mean linearly and leaves the covariance
+    alone: ``dmu = Sigma A^T D^-1 dy``, ``D`` their noise variances. The log
+    marginal likelihood swaps ``log p(y_prev | rest)`` for ``log p(y_new | rest)``;
+    with ``P = A Sigma A^T`` the leave-these-out predictive is
+    ``N(y_prev - D (D - P)^-1 e, D (D - P)^-1 D)``, ``e = y_prev - A mu``.
+    Exact for a Gaussian fit; in a Laplace fit (a joint model's Gaussian
+    outcomes) the other rows' curvature stays where it was.
+    """
+    from pylgm.likelihoods import CompiledGaussian
+
+    if revisions is None:
+        return None
+    try:
+        before, after = revisions
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{caller}() revisions must be a (previous, revised) pair of frames") from error
+    previous = _observed_rows(result, before, caller)
+    revised = _observed_rows(result, after, caller)
+    if previous is None or revised is None or not previous.labels.equals(revised.labels):
+        raise ValueError(
+            f"{caller}() revisions must give the same observed rows before and after"
+        )
+    parts = getattr(revised.likelihood, "parts", ((slice(None), revised.likelihood),))
+    noise = np.empty(revised.y.size)
+    for rows, likelihood in parts:
+        if not isinstance(likelihood, CompiledGaussian):
+            raise UnsupportedEngineError(f"{caller}() revises Gaussian rows only")
+        noise[rows] = likelihood.variance
+    v = _covariance_apply(result, revised.design.T)
+    change = revised.y - previous.y
+    residual = previous.y - previous.offset - previous.design @ result.mean
+    try:
+        loo = cho_factor(np.diag(noise) - revised.design @ v, lower=True)
+    except np.linalg.LinAlgError as error:
+        raise NumericalError(
+            f"{caller}() cannot leave the revised rows out: the rest does not identify them"
+        ) from error
+    old = noise * cho_solve(loo, residual)      # y_prev minus its leave-out mean
+    new = old + change
+
+    def quadratic(r):                           # r^T C^-1 r, C^-1 = D^-1 (D - P) D^-1
+        scaled = r / noise
+        return scaled @ (np.diag(noise) - revised.design @ v) @ scaled
+
+    return _Revision(
+        rows=revised, previous=previous.y, latent=v * (change / noise),
+        log_evidence=-0.5 * (quadratic(new) - quadratic(old)),
+    )
+
+
+def update(result, new_data, revisions=None):
     """``result`` conditioned on ``new_data``'s observed rows (see module doc)."""
     from pylgm.inference.result import INLAResult
 
     if isinstance(result, INLAResult):
-        return _update_integrated(result, new_data)
-    conditioning = _condition(result, new_data)
-    return result if conditioning is None else _conditioned(result, conditioning)
+        return _update_integrated(result, new_data, revisions)
+    return _step(result, new_data, revisions, "update")[0]
 
 
-def _conditioned(result, c: _Conditioning):
+def _step(result, new_data, revisions, caller):
+    """``(updated, revision, conditioning)`` at fixed hyperparameters."""
+    revision = _revision(result, revisions, caller)
+    if revision is not None:
+        result = _assembled(result, revision.latent.sum(axis=1), revision.log_evidence, 0)
+    c = None if new_data is None else _condition(result, new_data, caller)
+    if c is not None:
+        # Whitening the rows by W^1/2 turns S into B with unit noise.
+        result = _assembled(
+            result, c.v @ c.a, c.log_evidence, c.rows.y.size,
+            low_rank=(c.v * c.root, c.rows.design * c.root[:, None], c.s_factor),
+        )
+    return result, revision, c
+
+
+def _assembled(result, shift, log_evidence, added_rows, low_rank=None):
+    """``result`` with its mean moved by ``shift`` and, given ``low_rank = (V, A, cho(S))``,
+    ``V S^-1 V^T`` taken off its covariance (``UpdatedPosterior``)."""
     from pylgm.inference.result import GaussianResult, LaplaceResult, quadratic_form_diagonal
     from pylgm.inference.sampling import GridSampler
 
     context = result.prediction_context
     sampler = result._sampler
-    design, s_factor, root = c.design, c.s_factor, c.root
     dense = result._covariance is not None
-    shift = c.v @ c.a
-    # Whitening the rows by W^1/2 turns S into B with unit noise.
-    v = c.v * root
-    posterior = UpdatedPosterior(
-        base=_DenseFactor(sampler.factor) if sampler.factor is not None else sampler.posterior,
-        v=v, design=design * root[:, None], s_factor=s_factor,
-    )
+    covariance = result._covariance
+    predictive_variance = result._predictive_variance
+    posterior = result._sparse_posterior
+    factor = sampler.factor
     # The fitted grid: canonical rows of the sampler's design, in caller order.
     grid = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
-    # diag(G S^-1 G^T), G = P V: through the p x p Delta = V S^-1 V^T when that is
-    # cheaper (O(p^2 k + nnz(P) p)) than the n x k route (O(n k^2)); the dense
-    # path needs Delta for the covariance anyway.
-    covariance = None
-    (p, k), n = v.shape, grid.shape[0]
-    via_delta = dense or p * p * k + grid.nnz * p < n * k * k
-    delta = v @ cho_solve(s_factor, v.T) if via_delta else None
-    if dense:
-        covariance = result._covariance - delta
-        covariance = 0.5 * (covariance + covariance.T)
-        if _chain_rank(posterior) >= p:
-            # Past p accumulated rows the low-rank chain costs more than a dense
-            # factor of Sigma' itself: collapse it (O(p^3) once per ~p rows).
-            posterior = _DenseFactor(_psd_factor(covariance))
-    predictive_variance = result._predictive_variance
-    if predictive_variance is not None:
-        shrink = (
-            quadratic_form_diagonal(grid, delta) if delta is not None
-            else _quadratic_diagonal(np.asarray(grid @ v), s_factor)
+    if low_rank is not None:
+        v, design, s_factor = low_rank
+        posterior = UpdatedPosterior(
+            base=_DenseFactor(factor) if factor is not None else sampler.posterior,
+            v=v, design=design, s_factor=s_factor,
         )
-        predictive_variance = np.clip(predictive_variance - shrink, 0.0, None)
+        factor = None
+        # diag(G S^-1 G^T), G = P V: through the p x p Delta = V S^-1 V^T when that
+        # is cheaper (O(p^2 k + nnz(P) p)) than the n x k route (O(n k^2)); the
+        # dense path needs Delta for the covariance anyway.
+        (p, k), n = v.shape, grid.shape[0]
+        via_delta = dense or p * p * k + grid.nnz * p < n * k * k
+        delta = v @ cho_solve(s_factor, v.T) if via_delta else None
+        if dense:
+            covariance = result._covariance - delta
+            covariance = 0.5 * (covariance + covariance.T)
+            if _chain_rank(posterior) >= p:
+                # Past p accumulated rows the low-rank chain costs more than a
+                # dense factor of Sigma' itself: collapse it (O(p^3) per ~p rows).
+                posterior = _DenseFactor(_psd_factor(covariance))
+        if predictive_variance is not None:
+            shrink = (
+                quadratic_form_diagonal(grid, delta) if delta is not None
+                else _quadratic_diagonal(np.asarray(grid @ v), s_factor)
+            )
+            predictive_variance = np.clip(predictive_variance - shrink, 0.0, None)
     mean = result.mean + shift
     predictive_mean = result.predictive_mean + np.asarray(grid @ shift).ravel()
     diagnostics = dict(result.diagnostics)
-    diagnostics["updated_rows"] = int(diagnostics.get("updated_rows", 0)) + len(c.rows)
+    diagnostics["updated_rows"] = int(diagnostics.get("updated_rows", 0)) + added_rows
     common = dict(
         labels=result.labels,
         mean=mean,
         covariance=covariance,
-        log_marginal_likelihood=result.log_marginal_likelihood + c.log_evidence,
+        log_marginal_likelihood=result.log_marginal_likelihood + log_evidence,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
         block_slices=result.block_slices,
@@ -287,8 +435,11 @@ def _conditioned(result, c: _Conditioning):
         hyperparameters=result.hyperparameters,
         prediction_context=context,
         sparse_posterior=None if dense else posterior,
-        sampler=GridSampler(mean, sampler.design, sampler.offset, posterior=posterior,
-                            row_order=sampler.row_order),
+        sampler=GridSampler(
+            mean, sampler.design, sampler.offset, factor=factor,
+            posterior=None if factor is not None else (posterior if low_rank else sampler.posterior),
+            row_order=sampler.row_order,
+        ),
     )
     if isinstance(result, GaussianResult):
         return GaussianResult(observation_variance=result.observation_variance, **common)
@@ -320,7 +471,7 @@ class IntegrationGrid:
     context: object = None
 
 
-def _update_integrated(result, new_data):
+def _update_integrated(result, new_data, revisions):
     """Update every grid point's conditional and reweight the grid (module doc)."""
     grid = result._grid
     if grid is None:
@@ -334,7 +485,9 @@ def _update_integrated(result, new_data):
             UserWarning, stacklevel=4,   # user -> result.update -> update -> here
         )
     before = [conditional() for conditional in grid.conditionals]
-    return _reweighted(result, before, [conditional.update(new_data) for conditional in before])
+    return _reweighted(
+        result, before, [_step(cond, new_data, revisions, "update")[0] for cond in before]
+    )
 
 
 def _reweighted(result, before, after):
@@ -405,115 +558,180 @@ def _reweighted(result, before, after):
 
 @dataclass(frozen=True)
 class News:
-    """How a release of new rows revises a fitted posterior, row by row.
+    """How a release of new rows, and revisions of old ones, move a fitted posterior.
 
     ``releases`` has one row per observed new row: its ``actual`` response, the
     response ``expected`` before the release, and the ``news`` on the
     linear-predictor scale, where the decomposition is additive: ``y - E[eta]``
     for a Gaussian row, and for any other the working response at the new mode
-    minus ``E[eta]`` -- the linearisation the Laplace update makes, so the
-    revisions still add up exactly. ``latent`` (indexed by
-    ``(block, label)``) and ``prediction`` (indexed by the target rows) hold the
-    revision each release causes, one column per released row, so every row of
-    them sums to that target's total revision -- exactly. ``by_block`` splits
-    each target's revision further by latent block, ``G[:, block] @ dmu[block]``
-    (indexed by ``(target, block)``), so its blocks add up to ``prediction``;
-    summing a block's own latent revisions is not that (an RW1 or Besag block
-    is constrained to sum to zero). An integrated result
-    adds a ``hyperparameters`` column: the part of the revision that comes from
-    the release moving the hyperparameter posterior. ``updated`` is the result
-    after the release, the same as ``result.update(new_data)``.
+    minus ``E[eta]`` -- the linearisation the Laplace update makes. ``revisions``
+    lists the revised rows (``previous``, ``revised``), or is ``None``.
+
+    ``latent`` (indexed by ``(block, label)``) and ``prediction`` (indexed by the
+    targets) hold each released row's revision of every latent effect and
+    target, then one ``revision <label>`` column per revised row; every row of
+    them sums to that target's total revision exactly. ``by_block`` splits each
+    target's revision by the latent block it passes through,
+    ``G[:, block] @ dmu[block]`` (indexed by ``(target, block)``); its blocks add
+    up to ``prediction``. Summing a block's own rows of ``latent`` is not that:
+    an RW1 or Besag block is constrained to sum to zero.
+
+    ``uncertainty`` is each release's reduction of the target variances, taking
+    the rows in ``new_data``'s order (the sequential attribution: row j's share
+    given the rows before it); it adds up to the total reduction. Revisions of
+    Gaussian rows leave the variances alone. An integrated result adds a
+    ``hyperparameters`` column to all three: what the release changes by moving
+    the hyperparameter posterior. ``updated`` is the result after it all, as
+    ``result.update(new_data, revisions)`` returns it.
     """
 
     releases: object
+    revisions: object
     latent: object
     prediction: object
     by_block: object
+    uncertainty: object
     updated: object
+
+
+def _targets(result, at, weights):
+    """``(G, index)``: the target design and its labels (``news`` docstring)."""
+    from collections.abc import Mapping
+
+    import pandas as pd
+
+    from pylgm.inference.prediction import JointPredictionContext, _design_for
+
+    context = result.prediction_context
+    if at is None:
+        sampler = result._sampler
+        design = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
+        index = (pd.MultiIndex.from_frame(result.prediction_keys)
+                 if result.prediction_keys is not None else pd.RangeIndex(design.shape[0]))
+    elif isinstance(context, JointPredictionContext):
+        if not isinstance(at, Mapping) or not set(at) <= set(context.contexts):
+            raise ValueError(
+                f"news() at= on a joint model maps outcomes {context.outcomes} to rows"
+            )
+        design = np.vstack([_design_for(context.contexts[o], rows) for o, rows in at.items()])
+        index = pd.MultiIndex.from_tuples(
+            [(o, label) for o, rows in at.items() for label in rows.index], names=["outcome", None]
+        )
+    else:
+        design, index = _design_for(context, at), at.index
+    if weights is None:
+        return design, index
+    missing = [label for label in weights.columns if label not in index]
+    if missing:
+        raise ValueError(f"news() weights name target rows that are not in at=: {missing[:3]}")
+    matrix = weights.reindex(columns=index, fill_value=0.0).to_numpy(dtype=float)
+    return np.asarray(matrix @ design), weights.index
 
 
 @dataclass(frozen=True)
 class _PointNews:
-    """One fixed-theta decomposition: arrays are targets/latents x released rows."""
+    """One fixed-theta decomposition; arrays are targets or latents x columns."""
 
     updated: object
-    conditioning: _Conditioning
+    releases: _Rows | None
+    revision: _Revision | None
     news: np.ndarray
     expected: np.ndarray
     target: object          # the target design G
-    latent: np.ndarray      # p x k
-    by_block: dict          # block -> G[:, block] @ latent[block], n_targets x k
+    latent: np.ndarray      # p x (releases + revisions)
+    by_block: dict          # block -> G[:, block] @ latent[block]
+    reduction: np.ndarray   # targets x releases: sequential variance reductions
 
 
-def _point_news(result, new_data, at) -> _PointNews:
-    from pylgm.inference.prediction import _design_for
+def _point_news(result, new_data, revisions, targets) -> _PointNews:
+    from scipy.linalg import solve_triangular
 
-    c = _condition(result, new_data, caller="news")
-    if c is None:
-        raise ValueError("news() new_data has no row with an observed response")
-    positive = c.root > 0
-    # W^1/2 (z - m), z the working response: the news in the whitened metric.
-    # At the mode a = W^1/2 B^-1 W^1/2 (z - m), so V a splits over the rows.
-    whitened = c.root * (c.s0 @ c.a) + np.divide(c.a, c.root, out=np.zeros_like(c.a), where=positive)
-    latent = ((c.v * c.root) @ cho_solve(c.s_factor, np.eye(c.a.size))) * whitened
-    if at is None:
-        sampler = result._sampler
-        target = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
-    else:
-        target = _design_for(result.prediction_context, at)
-    expected = c.likelihood.response_prediction(c.m, np.diag(c.s0))
+    target, _ = targets(result)
+    updated, revision, c = _step(result, new_data, revisions, "news")
+    if c is None and revision is None:
+        raise ValueError("news() needs a released row with an observed response, or revisions")
+    columns, news, expected = [], np.empty(0), np.empty(0)
+    reduction = np.zeros((target.shape[0], 0))
+    if c is not None:
+        positive = c.root > 0
+        # W^1/2 (z - m), z the working response: the news in the whitened metric.
+        # At the mode a = W^1/2 B^-1 W^1/2 (z - m), so V a splits over the rows.
+        whitened = c.root * (c.s0 @ c.a) + np.divide(
+            c.a, c.root, out=np.zeros_like(c.a), where=positive
+        )
+        gain = (c.v * c.root) @ cho_solve(c.s_factor, np.eye(c.a.size))
+        columns.append(gain * whitened)
+        news = np.divide(whitened, c.root, out=np.full_like(c.a, np.nan), where=positive)
+        expected = np.asarray(
+            c.rows.likelihood.response_prediction(c.m, np.diag(c.s0)), dtype=float
+        )
+        # Sigma' = Sigma - U U^T, U = V W^1/2 L^-T with B = L L^T: column j of U is
+        # row j's innovation given the rows before it, so the variance a target
+        # loses splits over the rows in order.
+        projected = np.asarray(target @ (c.v * c.root))
+        reduction = solve_triangular(c.s_factor[0], projected.T, lower=True).T ** 2
+    if revision is not None:
+        columns.append(revision.latent)
+    latent = np.column_stack(columns)
     return _PointNews(
-        updated=_conditioned(result, c),
-        conditioning=c,
-        news=np.divide(whitened, c.root, out=np.full_like(c.a, np.nan), where=positive),
-        expected=np.asarray(expected, dtype=float),
-        target=target,
-        latent=latent,
+        updated=updated, releases=None if c is None else c.rows, revision=revision,
+        news=news, expected=expected, target=target, latent=latent,
         by_block={
             block: np.asarray(target[:, where] @ latent[where])
             for block, where in result.block_slices.items()
         },
+        reduction=reduction,
     )
 
 
-def news(result, new_data, at=None) -> News:
-    """Decompose ``result``'s revision by ``new_data``'s rows (see ``News``)."""
+def news(result, new_data, at=None, *, weights=None, revisions=None) -> News:
+    """Decompose the revision of ``result`` by ``new_data``'s rows (see ``News``)."""
     import pandas as pd
 
     from pylgm.inference.result import INLAResult
 
-    if not isinstance(new_data, pd.DataFrame):
-        raise TypeError("news() new_data must be a pandas DataFrame")
-    if not new_data.index.is_unique:
-        raise ValueError("news() needs a unique new_data index: its labels name the releases")
+    if new_data is not None:
+        if not isinstance(new_data, pd.DataFrame):
+            raise TypeError("news() new_data must be a pandas DataFrame")
+        if not new_data.index.is_unique:
+            raise ValueError("news() needs a unique new_data index: its labels name the releases")
+    if weights is not None and not isinstance(weights, pd.DataFrame):
+        raise TypeError("news() weights must be a DataFrame: aggregates x target rows")
+
+    def targets(point):
+        return _targets(point, at, weights)
+
     if isinstance(result, INLAResult):
-        return _integrated_news(result, new_data, at)
-    point = _point_news(result, new_data, at)
-    return _news_frames(result, point.updated, point.conditioning.rows, point.expected,
-                        point.news, point.latent, point.by_block, at)
+        return _integrated_news(result, new_data, revisions, targets)
+    point = _point_news(result, new_data, revisions, targets)
+    return _news_frames(
+        result, point, targets(result)[1], point.news, point.expected, point.latent,
+        point.by_block, point.reduction,
+    )
 
 
-def _integrated_news(result, new_data, at):
+def _integrated_news(result, new_data, revisions, targets):
+    from pylgm.optimization.inla import _conditional_predictive_variances
+
     grid = result._grid
     if grid is None:
         raise ValueError("news() is available on integrated results produced by LGM.fit")
     before = [conditional() for conditional in grid.conditionals]
-    points = [_point_news(conditional, new_data, at) for conditional in before]
+    points = [_point_news(cond, new_data, revisions, targets) for cond in before]
     updated = _reweighted(result, before, [point.updated for point in points])
     old, new = grid.weights, updated._grid.weights
     # sum_k w'_k mu'_k - sum_k w_k mu_k = sum_k w'_k (mu'_k - mu_k) + sum_k (w'_k - w_k) mu_k:
     # the rows' part, then the hyperparameters' part as a last column.
     moved = new - old
 
-    def mixed(values):
-        return sum(w * value for w, value in zip(new, values, strict=True))
+    def mixed(values, weights=new):
+        return sum(w * value for w, value in zip(weights, values, strict=True))
 
     def theta_part(values):
         return sum(d * value for d, value in zip(moved, values, strict=True))
 
     latent = np.column_stack([
-        mixed([point.latent for point in points]),
-        theta_part([cond.mean for cond in before]),
+        mixed([point.latent for point in points]), theta_part([cond.mean for cond in before]),
     ])
     by_block = {
         block: np.column_stack([
@@ -525,47 +743,63 @@ def _integrated_news(result, new_data, at):
         ])
         for block, where in result.block_slices.items()
     }
+    # Var of the mixture before minus after; the rows' part is sum_k w'_k (row reductions).
+    dense_targets = [np.asarray(point.target.todense() if hasattr(point.target, "todense")
+                                else point.target) for point in points]
+
+    def mixture_variance(weights, conditionals):
+        means = [t @ cond.mean for t, cond in zip(dense_targets, conditionals, strict=True)]
+        variances = [_conditional_predictive_variances(cond, t)
+                     for t, cond in zip(dense_targets, conditionals, strict=True)]
+        first = mixed(means, weights)
+        return mixed([v + m * m for v, m in zip(variances, means, strict=True)], weights) - first ** 2
+
+    rows_part = mixed([point.reduction for point in points])
+    total = (mixture_variance(old, before)
+             - mixture_variance(new, [point.updated for point in points]))
+    reduction = np.column_stack([rows_part, total - rows_part.sum(axis=1)])
     return _news_frames(
-        result, updated, points[0].conditioning.rows,
-        sum(w * point.expected for w, point in zip(old, points, strict=True)),
-        sum(w * point.news for w, point in zip(old, points, strict=True)),
-        latent, by_block, at, extra="hyperparameters",
+        result, points[0], targets(result)[1],
+        mixed([point.news for point in points], old), mixed([point.expected for point in points], old),
+        latent, by_block, reduction, updated=updated, extra="hyperparameters",
     )
 
 
-def _news_frames(result, updated, rows, expected, row_news, latent, by_block, at, extra=None):
+def _news_frames(result, point, targets, row_news, expected, latent, by_block, reduction,
+                 updated=None, extra=None):
     import pandas as pd
 
-    columns = list(rows.index) + ([extra] if extra else [])
+    releases = [] if point.releases is None else list(point.releases.labels)
+    revised = [] if point.revision is None else [
+        f"revision {label}" for label in point.revision.rows.labels
+    ]
+    columns = releases + revised + ([extra] if extra else [])
+    uncertainty_columns = releases + ([extra] if extra else [])
     blocks = np.empty(len(result.labels), dtype=object)
     for block, where in result.block_slices.items():
         blocks[where] = block
     latent_index = pd.MultiIndex.from_arrays([blocks, list(result.labels)], names=["block", "label"])
-    n_targets = next(iter(by_block.values())).shape[0]
-    if at is not None:
-        targets = at.index
-    elif result.prediction_keys is not None:
-        targets = pd.MultiIndex.from_frame(result.prediction_keys)
-    else:
-        targets = pd.RangeIndex(n_targets)
-    # (target..., block): each target's blocks together, targets in the given order.
     names = list(by_block)
-    by_block_frame = pd.DataFrame(
-        np.stack([by_block[name] for name in names], axis=1).reshape(-1, len(columns)),
-        index=pd.MultiIndex.from_tuples(
-            [(*(t if isinstance(t, tuple) else (t,)), name) for t in targets for name in names],
-            names=[*targets.names, "block"],
-        ),
-        columns=columns,
-    )
     return News(
-        releases=pd.DataFrame(
-            {"actual": np.asarray(rows[result.prediction_context.response], dtype=float),
-             "expected": expected, "news": row_news},
-            index=rows.index,
+        releases=None if point.releases is None else pd.DataFrame(
+            {"actual": point.releases.y, "expected": expected, "news": row_news},
+            index=point.releases.labels,
+        ),
+        revisions=None if point.revision is None else pd.DataFrame(
+            {"previous": point.revision.previous, "revised": point.revision.rows.y},
+            index=point.revision.rows.labels,
         ),
         latent=pd.DataFrame(latent, index=latent_index, columns=columns),
         prediction=pd.DataFrame(sum(by_block.values()), index=targets, columns=columns),
-        by_block=by_block_frame,
-        updated=updated,
+        # (target..., block): each target's blocks together, targets in the given order.
+        by_block=pd.DataFrame(
+            np.stack([by_block[name] for name in names], axis=1).reshape(-1, len(columns)),
+            index=pd.MultiIndex.from_tuples(
+                [(*(t if isinstance(t, tuple) else (t,)), name) for t in targets for name in names],
+                names=[*targets.names, "block"],
+            ),
+            columns=columns,
+        ),
+        uncertainty=pd.DataFrame(reduction, index=targets, columns=uncertainty_columns),
+        updated=point.updated if updated is None else updated,
     )

@@ -351,6 +351,30 @@ higher-frequency sub-model; if sub-periods need different loadings, split
 them into separate sub-models (one per sub-period), each `Shared` against the
 same `period`-indexed latent with its own scale.
 
+## Held-out rows
+
+`LGM.fit` keeps NaN-response rows as *unobserved*: they are excluded from the
+likelihood but still assigned fitted values on the predictor. `Joint.fit` cannot
+read a NaN that way. In the long-stacked layout joint models are normally given,
+with one row per (outcome, unit) pair, every row is NaN for every *other*
+outcome, so a NaN means "this row belongs to another outcome".
+
+`Joint.fit` therefore drops each outcome's NaN rows, with two exceptions. It
+keeps a row that a nonzero entry of that outcome's `observations`/`constraints`
+operator references (see "Linear observations and constraints" above). It also
+keeps a row that `hold_out[outcome]` selects:
+
+```python
+future = frame["t"] >= 27
+result = joint.fit(frame, hold_out={"a": (future & is_a).to_numpy(),
+                                    "b": (future & is_b).to_numpy()})
+```
+
+`hold_out` maps outcomes to boolean masks over `frame`. The selected rows become
+unobserved-but-predicted rows of that outcome, so the latent field has their
+levels. That is what lets `result.update(release)` and `result.news(release)`
+absorb them later (see [prediction](prediction.md#joint-models)).
+
 ## Not supported yet
 
 - **`latent_strategy="laplace"` is not recommended on joint models.** Under
@@ -371,22 +395,6 @@ same `period`-indexed latent with its own scale.
   See `examples/joint_mcmc_crosscheck/` for the measurement setup. This is
   reported as a limitation rather than pinned by a test, because a test would
   cement behaviour we believe is wrong.
-
-- **NaN-response hold-out.** `LGM.fit` keeps NaN-response rows as *unobserved*
-  — excluded from the likelihood, but still assigned fitted values on the
-  predictor. `Joint.fit` instead drops each sub-model's NaN-response rows before
-  compiling, so that idiom does nothing on a `Joint` — except that a row
-  referenced by a nonzero entry of that outcome's `observations`/`constraints`
-  operator is kept as an unobserved-but-predicted row (see "Linear observations
-  and constraints" above).
-
-  This is deliberate, not an oversight. In the long-stacked layout joint models
-  are normally given — one row per (outcome, unit) pair — every row is NaN for
-  every *other* outcome, so a NaN means "this row belongs to another outcome",
-  not "hold this observation out". Keeping those rows would double the stacked
-  design and produce fitted values for observations that do not exist. To hold a
-  row out of a joint fit, drop it from the frame and score it afterwards with
-  `result.predict(new_data, outcome=...)`.
 
 - **Off-block-diagonal precision coupling** (coregionalization). Sharing is
   expressed entirely on the design side; `precision == block_diag(blocks)`
