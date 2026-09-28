@@ -177,6 +177,26 @@ def _linear_inputs(self: "Joint", argument, kind: type, name: str) -> dict:
     return result
 
 
+def _hold_out(self: "Joint", argument, rows: int) -> dict:
+    """Validate a ``hold_out`` mapping: outcome -> boolean mask over the frame's rows."""
+    if argument is None:
+        return {}
+    if not isinstance(argument, collections.abc.Mapping):
+        raise TypeError("hold_out must be a mapping from outcome name to a boolean row mask")
+    masks = {}
+    for outcome, mask in argument.items():
+        if outcome not in self.outcomes:
+            raise ModelValidationError(
+                f"hold_out names unknown outcome {outcome!r}; the joint's outcomes are "
+                f"{self.outcomes}"
+            )
+        mask = np.asarray(mask)
+        if mask.dtype != bool or mask.shape != (rows,):
+            raise ValueError(f"hold_out[{outcome!r}] must be a boolean mask of length {rows}")
+        masks[outcome] = mask
+    return masks
+
+
 @dataclass(frozen=True)
 class Joint:
     """Several `LGM` sub-models fitted as one stacked latent Gaussian model."""
@@ -217,7 +237,8 @@ class Joint:
     def fit(self, frame, engine: str = "laplace", *, hyperparameters: str = "optimize",
             latent_strategy: str = "gaussian", mean_correction: bool = False,
             observations=None, constraints=None,
-            num_workers: int = 1, blas_threads: int | None = None, warm_start=None):
+            num_workers: int = 1, blas_threads: int | None = None, warm_start=None,
+            hold_out=None):
         """Compile and fit this joint model. Only ``engine='laplace'`` is supported.
 
         ``observations`` and ``constraints`` are mappings from sub-model
@@ -234,9 +255,10 @@ class Joint:
         non-null, plus, if ``k`` is named in ``observations``/``constraints``,
         every row that a nonzero operator entry of ``k`` references -- these
         become unobserved-but-predicted rows of ``k`` (e.g. the quarters to
-        nowcast). Unreferenced NaN rows are still dropped, as today. If ``k``
-        is named and its response column is absent from ``frame``, it is
-        treated as all-NaN.
+        nowcast), and every row ``hold_out[k]`` (a boolean mask over ``frame``)
+        selects -- future periods, say, so the latent field has their levels
+        for ``update``. Other NaN rows are dropped. A response column absent
+        from ``frame`` is treated as all-NaN.
 
         See docs/joint-models.md for the full semantics, including
         ``LinearObservation`` pseudo-rows, ``LinearConstraint`` conditioning,
@@ -257,7 +279,7 @@ class Joint:
         from pylgm.data.panel import CanonicalPanel
         from pylgm.exceptions import DataContractError
         from pylgm.inference.laplace import fit_laplace
-        from pylgm.model import _fit_family, _rebuild_result
+        from pylgm.model import _finished, _fit_family
         from pylgm.observations import (
             observation_hyperparameters,
             project_gaussian_family,
@@ -277,6 +299,7 @@ class Joint:
         if not isinstance(frame, pd.DataFrame):
             raise DataContractError("frame must be a Pandas DataFrame")
 
+        hold_out = _hold_out(self, hold_out, len(frame))
         observations = _linear_inputs(self, observations, LinearObservation, "observations")
         constraints = _linear_inputs(self, constraints, LinearConstraint, "constraints")
         for mapping in (observations, constraints):
@@ -297,33 +320,27 @@ class Joint:
             # every row is NaN for every *other* outcome -- a NaN means "this row
             # belongs to another outcome", not "hold this observation out".
             # Keeping those rows would double the stacked design and produce
-            # fitted values for observations that do not exist. The cost is that
-            # the LGM.fit hold-out idiom does not carry over to a Joint; that is
-            # documented in docs/joint-models.md under "Not supported yet".
+            # fitted values for observations that do not exist (docs/joint-models.md,
+            # "Held-out rows").
             #
-            # An outcome named in observations/constraints is the exception: a
-            # NaN row it references through a nonzero operator entry becomes an
-            # unobserved-but-predicted row of that outcome (e.g. the quarters a
-            # nowcast observation aggregates), rather than being dropped.
-            named = model.response in observations or model.response in constraints
-            if not named:
-                sub = frame[frame[model.response].notna()].reset_index(drop=True)
-                positions[model.response] = np.flatnonzero(
-                    frame[model.response].notna().to_numpy()
-                )
-            else:
-                if model.response in frame.columns:
-                    keep = frame[model.response].notna().to_numpy().copy()
-                else:
-                    keep = np.zeros(len(frame), dtype=bool)
-                for item in (*observations.get(model.response, ()), *constraints.get(model.response, ())):
-                    operator = item.operator.copy()
-                    operator.eliminate_zeros()
-                    keep[np.unique(operator.indices)] = True
-                positions[model.response] = np.flatnonzero(keep)
-                sub = frame.iloc[positions[model.response]].reset_index(drop=True)
-                if model.response not in sub.columns:
-                    sub = sub.assign(**{model.response: np.nan})
+            # Two exceptions keep a NaN row as an unobserved-but-predicted row of
+            # its outcome: a row that outcome's observations/constraints operator
+            # references (e.g. the months a quarterly observation aggregates),
+            # and a row its `hold_out` mask selects (e.g. future periods, so the
+            # latent field has their levels for update()).
+            response = model.response
+            named = response in observations or response in constraints
+            keep = (frame[response].notna().to_numpy(copy=True) if response in frame.columns
+                    else np.zeros(len(frame), dtype=bool))
+            for item in (*observations.get(response, ()), *constraints.get(response, ())):
+                operator = item.operator.copy()
+                operator.eliminate_zeros()
+                keep[np.unique(operator.indices)] = True
+            keep |= hold_out.get(response, False)
+            positions[response] = np.flatnonzero(keep)
+            sub = frame.iloc[positions[response]].reset_index(drop=True)
+            if response not in sub.columns:
+                sub = sub.assign(**{response: np.nan})
             time = model.time or "__pylgm_row__"
             if model.time is None:
                 sub = sub.assign(**{time: range(len(sub))})
@@ -422,8 +439,11 @@ class Joint:
             stacklevel=3,
         )
 
-        contexts = build_joint_prediction_contexts(self, panels, compiled, result)
-        return _rebuild_result(result, prediction_context=contexts)
+        return _finished(
+            result, lambda estimates, table: build_joint_prediction_contexts(
+                self, panels, compiled, estimates
+            ),
+        )
 
     def _declared_hyperparameters(self) -> list:
         """Every sub-model's Hyperparameters plus the shared scales."""

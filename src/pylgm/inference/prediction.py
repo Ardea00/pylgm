@@ -28,6 +28,7 @@ empirical-Bayes fits.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 import warnings
 
 import numpy as np
@@ -83,9 +84,14 @@ class PredictionContext:
 
 @dataclass(frozen=True)
 class JointPredictionContext:
-    """Per-outcome prediction contexts for a joint model."""
+    """Per-outcome prediction contexts for a joint model.
+
+    ``likelihood`` scores the stacked prediction grid (every outcome's rows in
+    order), which ``update`` needs to re-derive the response-scale means.
+    """
 
     contexts: Mapping[str, PredictionContext]
+    likelihood: object = None
 
     @property
     def outcomes(self) -> tuple[str, ...]:
@@ -131,6 +137,19 @@ def _fixed_block(spec: ModelSpec, new_data: pd.DataFrame) -> np.ndarray:
     return np.asarray(matrix, dtype=float)
 
 
+@lru_cache(maxsize=64)
+def _label_index(labels: tuple[str, ...]) -> pd.Index:
+    return pd.Index(labels)
+
+
+def _positions(new_data: pd.DataFrame, column: str, labels) -> tuple[np.ndarray, list]:
+    """Each row's position in ``labels`` (by ``str`` of its ``column`` value) and
+    the sorted levels ``labels`` lacks; a lacking row's position is -1."""
+    keys = new_data[column].map(str)
+    codes = _label_index(tuple(labels)).get_indexer(keys)
+    return codes, sorted(set(keys[codes < 0]))
+
+
 def _structured_block(entry: tuple[str, str, tuple[str, ...]], new_data: pd.DataFrame) -> np.ndarray:
     name, index_column, labels = entry
     if index_column not in new_data.columns:
@@ -138,11 +157,8 @@ def _structured_block(entry: tuple[str, str, tuple[str, ...]], new_data: pd.Data
             f"predict() new_data is missing column {index_column!r} required by the "
             f"{name!r} block"
         )
-    positions = {label: column for column, label in enumerate(labels)}
-    keys = new_data[index_column].map(str)
-    known = keys.isin(positions)
-    if not known.all():
-        missing = sorted(set(keys[~known].tolist()))
+    codes, missing = _positions(new_data, index_column, labels)
+    if missing:
         raise ValueError(
             f"predict() cannot score rows whose {name!r} level was not in the fitted "
             f"model: {missing!r}. predict reuses the fitted latent posterior, so it "
@@ -150,7 +166,7 @@ def _structured_block(entry: tuple[str, str, tuple[str, ...]], new_data: pd.Data
             "those rows at fit time with a NaN response instead."
         )
     design = np.zeros((len(new_data), len(labels)))
-    design[np.arange(len(new_data)), keys.map(positions).to_numpy()] = 1.0
+    design[np.arange(len(new_data)), codes] = 1.0
     return design
 
 
@@ -213,18 +229,16 @@ def _paired_cell_block(
                 f"predict() new_data is missing column {column!r} required by the "
                 f"{name!r} {block_label} block"
             )
-    outer_pos = {label: i for i, label in enumerate(outer_labels)}
-    inner_pos = {label: j for j, label in enumerate(inner_labels)}
-    outer = new_data[outer_column].map(str)
-    inner = new_data[inner_column].map(str)
-    unseen = sorted(set(outer[~outer.isin(outer_pos)]) | set(inner[~inner.isin(inner_pos)]))
+    outer, outer_unseen = _positions(new_data, outer_column, outer_labels)
+    inner, inner_unseen = _positions(new_data, inner_column, inner_labels)
+    unseen = sorted(set(outer_unseen) | set(inner_unseen))
     if unseen:
         raise ValueError(
             f"predict() cannot score rows whose {name!r} {pair_label} was not in the "
             f"fitted model: {unseen!r}. predict reuses the fitted latent posterior, so it "
             f"cannot create a new latent cell. {hint}"
         )
-    cells = outer.map(outer_pos).to_numpy() * len(inner_labels) + inner.map(inner_pos).to_numpy()
+    cells = outer * len(inner_labels) + inner
     design = np.zeros((len(new_data), len(outer_labels) * len(inner_labels)))
     design[np.arange(len(new_data)), cells] = 1.0
     return design
@@ -305,9 +319,7 @@ def _replicated_nested_block(entry, new_data: pd.DataFrame) -> np.ndarray:
         raise ValueError(
             f"predict() new_data is missing column {over!r} required by the {name!r} block"
         )
-    position = {label: row for row, label in enumerate(replicate_labels)}
-    keys = new_data[over].map(str)
-    unknown = sorted(set(keys[~keys.isin(position)]))
+    codes, unknown = _positions(new_data, over, replicate_labels)
     if unknown:
         raise ValueError(
             f"predict() cannot score rows whose {name!r} replicate was not in the fitted "
@@ -317,7 +329,7 @@ def _replicated_nested_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     inner = _design_block_for(inner_entry, new_data)
     width = inner.shape[1]
     design = np.zeros((len(new_data), len(replicate_labels), width))
-    design[np.arange(len(new_data)), keys.map(position).to_numpy()] = inner
+    design[np.arange(len(new_data)), codes] = inner
     return design.reshape(len(new_data), -1)
 
 
@@ -330,16 +342,14 @@ def _shared_design_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     name, index, labels, scale_spec, fitted = entry
     if index not in new_data.columns:
         raise ValueError(f"predict() new_data is missing the index column {index!r}")
-    position_of = {label: i for i, label in enumerate(labels)}
+    codes, unseen = _positions(new_data, index, labels)
+    if unseen:
+        raise ValueError(
+            f"predict() new_data has an unseen level {unseen[0]!r} in {index!r} "
+            f"for shared effect {name!r}"
+        )
     block = np.zeros((len(new_data), len(labels)))
-    scale = fitted if isinstance(scale_spec, str) else float(scale_spec)
-    for row, value in enumerate(new_data[index].astype(str)):
-        if value not in position_of:
-            raise ValueError(
-                f"predict() new_data has an unseen level {value!r} in {index!r} "
-                f"for shared effect {name!r}"
-            )
-        block[row, position_of[value]] = scale
+    block[np.arange(len(new_data)), codes] = fitted if isinstance(scale_spec, str) else float(scale_spec)
     return block
 
 
@@ -382,9 +392,7 @@ def _copied_block(entry, new_data: pd.DataFrame) -> np.ndarray:
             raise ValueError(
                 f"predict() new_data is missing the copy index column {index_column!r}"
             )
-        position = {label: k for k, label in enumerate(labels)}
-        values = new_data[index_column].map(str)
-        unknown = sorted({value for value in values if value not in position})
+        codes, unknown = _positions(new_data, index_column, labels)
         if unknown:
             raise ValueError(
                 f"predict() cannot score rows whose copy level was not in the fitted "
@@ -393,7 +401,7 @@ def _copied_block(entry, new_data: pd.DataFrame) -> np.ndarray:
         # _design_block_for returns a freshly allocated array from every branch,
         # so mutating it in place is safe; each row appears exactly once, so
         # += has no duplicate-index hazard.
-        design[np.arange(len(new_data)), values.map(position).to_numpy()] += fitted
+        design[np.arange(len(new_data)), codes] += fitted
     return design
 
 

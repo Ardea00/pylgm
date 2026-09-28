@@ -260,3 +260,29 @@ def test_integrated_update_falls_back_to_gaussian_marginals_and_drops_criteria()
     assert np.all(updated.latent_marginals().std > 0)
     with pytest.raises(ValueError, match="update"):
         updated.criteria
+
+
+def test_a_long_sparse_chain_is_refactored_to_the_refit(monkeypatch):
+    """Past _SPARSE_CHAIN_ROWS accumulated rows the chain of low-rank terms is
+    replaced by a fresh factor of H + sum A^T W A: no chain, same posterior."""
+    import pylgm.inference.update as update_module
+    from pylgm.inference.sparse import SparsePosterior
+
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    monkeypatch.setattr(update_module, "_SPARSE_CHAIN_ROWS", 10)
+    full = _panel()
+    first = full.assign(y=np.where(full["t"] < 8, full["y"], np.nan))
+    later = full[full["t"] >= 8]
+    result = MODEL.fit(first)
+    for period in range(8, PERIODS):
+        result = result.update(later[later["t"] == period])
+    base, rows = update_module._chain(result._sparse_posterior)
+    assert isinstance(base, SparsePosterior)
+    assert sum(len(row) for row in rows) < 10          # 28 rows added, the chain was cut
+    refit = MODEL.fit(full)
+    np.testing.assert_allclose(result.mean, refit.mean, atol=1e-9)
+    np.testing.assert_allclose(result.latent_marginals().std, refit.latent_marginals().std,
+                               rtol=1e-8)
+    np.testing.assert_allclose(result.predictive_variance, refit.predictive_variance, atol=1e-9)
+    draws = result.sample(20_000, rng=0)
+    np.testing.assert_allclose(draws.std(axis=0), np.sqrt(refit.predictive_variance), rtol=0.03)

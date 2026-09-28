@@ -254,10 +254,15 @@ are fine.
 Limits: an empirical-Bayes result keeps its hyperparameters fixed (fit with
 `"integrate"` to have them move); every latent level the new rows touch must
 already be on the grid (a new level raises, as in `predict()`); rows with a NaN
-response are skipped; joint models do not support `update` yet. On a dense fit
-the accumulated low-rank terms collapse into one factor once they hold more
-rows than latents. On a sparse fit they grow by `k` columns per update, so
-refit after many large updates.
+response are skipped.
+
+Each update adds a rank-`k` term to the covariance rather than refactorising,
+and the terms are compacted as they accumulate. On a dense fit they collapse
+into one factor once they hold more rows than there are latents. On a sparse
+fit, past 500 accumulated rows, \(H + \sum A^\top W A\) is factored afresh with
+the fit's own sparse solver: the same posterior, with no chain behind it. A
+long stream of small releases therefore costs a refactorisation every few
+hundred rows instead of a growing chain.
 
 ### News decomposition
 
@@ -275,6 +280,7 @@ news.prediction.sum(axis=1)                    # = the total revision of each ta
 news.by_block     # each target's revision split by latent block (target, block) x released row
 news.latent.loc["trend"]                       # each trend level's revision, by release
 news.prediction.T.groupby(release["series"]).sum().T   # per series, or any other grouping
+news.uncertainty  # each release's share of the drop in the targets' variances
 ```
 
 The **news** of a Gaussian row is its forecast error: the actual value minus
@@ -308,3 +314,77 @@ results are mixed with the post-release weights. A final `hyperparameters`
 column holds what the release changes by moving the hyperparameter posterior
 itself, \(\sum_k (w_k' - w_k)\,\mu_k\). Impacts are on the linear predictor;
 for a nonlinear link the response-scale revision does not split additively.
+
+#### Aggregate targets
+
+The quantity of interest is often an aggregate of target rows, such as a
+quarter as the mean of its months. `weights` (a frame of aggregates × target
+rows, its columns labelled like `at`'s index) makes the targets those
+aggregates:
+
+```python
+quarter = pd.DataFrame([[1/3, 1/3, 1/3]], index=["Q3"], columns=months.index)
+news = result.news(release, at=months, weights=quarter)
+```
+
+#### Uncertainty
+
+`news.uncertainty` splits the drop in each target's variance over the releases.
+Unlike the mean, the variance does not split additively, so the shares are
+sequential: each row's share is what it removes given the rows before it in
+`release`'s order. With \(B = I + W^{1/2} S_0 W^{1/2} = LL^\top\),
+
+\[
+\Sigma' = \Sigma - UU^\top,\qquad U = \Sigma A^\top W^{1/2} L^{-\top},
+\]
+
+and column \(j\) of \(U\) is row \(j\)'s innovation given rows \(1,\dots,j-1\).
+The shares add up to the total drop exactly. Reorder the rows to ask a
+different question, for example which release, arriving first, removes the
+most. On an integrated result the `hyperparameters` column carries the rest of
+the change in the mixture variance.
+
+#### Revisions of released data
+
+A value that was already fitted may be revised. `revisions=(previous, revised)`
+takes two frames with the same rows, before and after:
+
+```python
+news = result.news(release, at=targets, revisions=(as_first_published, as_revised))
+news.revisions        # previous and revised values
+news.prediction       # ... then one "revision <row>" column per revised row
+updated = result.update(release, revisions=(as_first_published, as_revised))
+```
+
+For Gaussian rows the mean is linear in the data and the covariance does not
+depend on it, so a revision moves the mean by
+\(\Delta\mu = \Sigma A_R^\top D^{-1}\Delta y\) (\(D\) the rows' noise variances)
+and leaves the covariance alone. The log marginal likelihood swaps the old
+values' leave-these-out density for the new ones', and that density is
+available exactly:
+
+\[
+y_R \mid y_{-R} \sim \mathcal N\!\big(y_R^\text{prev} - D(D-P)^{-1}e,\; D(D-P)^{-1}D\big),
+\qquad P = A_R\Sigma A_R^\top,\; e = y_R^\text{prev} - A_R\mu .
+\]
+
+A revision followed by a release equals a refit on the revised data. Revisions
+are applied before the release and decomposed by row, so the three sources of a
+revision sit side by side: news, data revisions and, on an integrated fit, the
+hyperparameters. Only Gaussian rows can be revised. In a joint model's Laplace
+fit, the other outcomes' curvature stays at the old mode, as in `update`.
+
+#### Joint models
+
+`update` and `news` read every outcome's column from the new rows. A
+long-stacked release carries each outcome's rows, and the releases are indexed
+by `(outcome, row)`. `at` maps outcomes to target rows. For the latent field to
+have the future periods' levels, the fit must keep those rows: pass
+`Joint.fit(..., hold_out={"gdp": future_gdp_rows, ...})`, a boolean mask over
+the frame per outcome (see [joint models](joint-models.md)).
+
+```python
+result = joint.fit(frame, hold_out={"a": future & is_a, "b": future & is_b})
+news = result.news(release, at={"a": frame[future & is_a]})
+news.prediction.T.groupby(level="outcome").sum().T     # revision per indicator
+```
