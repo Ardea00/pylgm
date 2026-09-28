@@ -209,8 +209,12 @@ panel with eight windows of 40 periods gave these results:
 | Gaussian, `"integrate"` | sliding | 19.8 s | 18.9 s | — |
 | Poisson, `"integrate"` | sliding | 7.2 s | 6.8 s | — |
 
-Integration gains little from a warm start: the search it shortens is a small
-part of the work, and exploring the grid is most of it.
+These timings come from macOS. The saving is typical but not guaranteed: the
+search path depends on floating-point details of the platform's BLAS, and on
+single windows run on Linux and Windows, the warm search took more evaluations
+than the cold one. Measure it on your own experiment. Integration gains little
+either way: the search a warm start shortens is a small part of the work, and
+exploring the grid is most of it.
 
 `result.update(new_rows)` (see [prediction](prediction.md#sequential-updates))
 is the other tool. It absorbs new rows without refitting and needs no old data.

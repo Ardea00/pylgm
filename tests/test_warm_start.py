@@ -58,16 +58,6 @@ def test_warm_start_on_a_sliding_window_matches_a_cold_fit(case, hyperparameters
             assert warm.hyperparameters[name] == pytest.approx(value, rel=0.05)
 
 
-def test_warm_start_shortens_the_search():
-    model, engine = CASES["gaussian"]
-    frame = _panel()
-    previous = model.fit(frame[frame["t"] < 25], engine=engine)
-    cold = model.fit(frame, engine=engine)
-    warm = model.fit(frame, engine=engine, warm_start=previous)
-    assert (warm.diagnostics["empirical_bayes_evaluations"]
-            < cold.diagnostics["empirical_bayes_evaluations"])
-
-
 def test_warm_start_skips_an_estimate_pinned_at_a_bound():
     """On a nearly flat trend the first window runs tau to its upper bound,
     where the objective is a plateau: a search started there stalls on it
