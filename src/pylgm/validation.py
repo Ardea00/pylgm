@@ -340,11 +340,13 @@ def _resolve_hyperprior(model, family):
     data. That failure is silent: it still looks roughly calibrated.
     """
     declared = {hp.name: hp for _, hp in _model_hyperparameters(model)}
-    # Same precedence the fitting path uses in LGM._family_optimization_inputs:
+    # Same precedence the fitting path uses in model._optimization_inputs:
     # a family-level prior wins, because it is the one already bound to the
     # graph-dependent quantities a PCBYM2Phi needs.
     family_priors = dict(getattr(family, "parameter_priors", {}) or {})
-    bounds, _, _ = model._family_optimization_inputs(family)
+    from pylgm.model import _optimization_inputs
+
+    bounds, _, _ = _optimization_inputs(family, model._declared_hyperparameters())
     resolved = {}
     missing = []
     for name in family.parameter_names:

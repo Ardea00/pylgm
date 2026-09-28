@@ -74,109 +74,73 @@ def _normalize_constraints(constraints: object) -> tuple[tuple[dict[str, float],
     return tuple(normalized)
 
 
-def _context_with_fitted_likelihood(context, result, model):
-    """Replace the context's plug-in likelihood with the fitted one.
+def _hyperparameter_table(result) -> Mapping:
+    """An integrated result's hyperparameter marginals; empty for any other result."""
+    marginals = getattr(result, "hyperparameter_marginals", None)
+    return (marginals() if callable(marginals) else None) or {}
 
-    ``build_prediction_context`` reads the likelihood off a ``compile_lgm``
-    result, which resolves a ``Hyperparameter`` sigma to its ``.initial``. On
-    the optimise and integrate paths that is only the starting guess, so
-    ``predict`` would add the wrong observation variance -- silently, and by
-    orders of magnitude. Substitute what was actually estimated.
+
+def _point_estimates(result) -> dict[str, float]:
+    """Hyperparameter point estimates: the optimum, or the integrated posterior mean."""
+    estimates = {name: float(value) for name, value in (result.hyperparameters or {}).items()}
+    estimates.update(
+        {name: float(entry.mean[0]) for name, entry in _hyperparameter_table(result).items()}
+    )
+    return estimates
+
+
+def _fitted_context(context, model, estimates: Mapping[str, float], table: Mapping = {}):
+    """Substitute estimated hyperparameters into a prediction context.
+
+    ``build_prediction_context`` reads a ``compile_lgm`` result, which resolves
+    every ``Hyperparameter`` to its ``.initial`` -- only the starting guess on
+    the optimise and integrate paths. Swap in the estimates:
+
+    - the likelihood: a Gaussian sigma sets ``predict``'s observation variance
+      (from ``table``, the integrated plug-in is ``sqrt(E[sigma^2])``, matching
+      the grid-mixed fit-row variance); any other likelihood's parameters (a
+      NegativeBinomial size, a ZeroInflated pi, a Weibull shape) score the rows
+      ``update()`` absorbs, with the fitted rows' trials rebound;
+    - parametric-MIDAS shapes and ``Copy`` scales, whose designs are functions
+      of the value.
     """
     from dataclasses import replace
 
-    from pylgm.likelihoods import CompiledGaussian, ExponentialSurv, Gaussian, WeibullSurv
-    from pylgm.parameters import Hyperparameter
+    from pylgm.likelihoods import CompiledGaussian
 
-    if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
-        name = model.likelihood.sigma.name
-
-        marginals = getattr(result, "hyperparameter_marginals", None)
-        if callable(marginals):
-            table = marginals() or {}
-            if name in table:
-                # The integrated fit-row variance mixes per-theta sigma^2, so the
-                # matching plug-in is sqrt(E[sigma^2]) = sqrt(mean^2 + variance).
-                entry = table[name]
-                second = float(entry.mean[0]) ** 2 + float(entry.variance[0])
-                return replace(context, likelihood=CompiledGaussian(float(np.sqrt(second))))
-
-        fitted = result.hyperparameters
-        if fitted and name in fitted:
-            return replace(context, likelihood=CompiledGaussian(float(fitted[name])))
+    if not estimates:
         return context
-
-    if isinstance(model.likelihood, WeibullSurv) and isinstance(model.likelihood.shape, Hyperparameter):
-        name = model.likelihood.shape.name
-        marginals = getattr(result, "hyperparameter_marginals", None)
-        if callable(marginals):
-            table = marginals() or {}
-            if name in table:
-                fitted_shape = float(table[name].mean[0])
-                return replace(context, likelihood=model.likelihood.materialize({name: fitted_shape}))
-        fitted = getattr(result, "hyperparameters", None) or {}
-        if name in fitted:
-            return replace(context, likelihood=model.likelihood.materialize({name: float(fitted[name])}))
-        return context
-
-    # Any other likelihood (a NegativeBinomial size, a ZeroInflated pi, ...):
-    # predict's response mean ignores these, but update() scores new rows with
-    # them. Rebind the fitted rows' trials, which the materialized copy lacks.
-    fitted = getattr(result, "hyperparameters", None)
-    if fitted and not isinstance(model.likelihood, (Gaussian, WeibullSurv, ExponentialSurv)):
-        likelihood = model.likelihood.materialize(dict(fitted))
+    likelihood = model.likelihood
+    if isinstance(likelihood, Gaussian):
+        name = getattr(likelihood.sigma, "name", None)
+        if name in table:
+            sigma = float(np.sqrt(table[name].mean[0] ** 2 + table[name].variance[0]))
+            context = replace(context, likelihood=CompiledGaussian(sigma))
+        elif name in estimates:
+            context = replace(context, likelihood=CompiledGaussian(estimates[name]))
+    else:
+        materialized = likelihood.materialize(dict(estimates))
         trials = getattr(context.likelihood, "trials", None)
         if trials is not None:
-            likelihood = likelihood.for_observations({"trials": trials})
-        return replace(context, likelihood=likelihood)
-    return context
+            materialized = materialized.for_observations({"trials": trials})
+        context = replace(context, likelihood=materialized)
 
+    def resolve(spec, value):
+        return float(estimates[spec]) if isinstance(spec, str) else value
 
-def _context_with_fitted_weights(context, result):
-    """Substitute fitted estimates into parametric-MIDAS and copy-scale entries.
-
-    ``build_prediction_context`` runs on a ``compile_lgm`` result, which resolves
-    an estimated Hyperparameter (a MIDAS shape, or a ``Copy`` scale) to its
-    ``.initial`` (the starting guess). A parametric-MIDAS design and a copy's
-    folded incidence are both functions of that value, so predict() would
-    otherwise aggregate new rows with the initial value, not the fitted one.
-    Mirror ``_context_with_fitted_likelihood`` and swap in the estimates. Under
-    ``hyperparameters="integrate"`` the point estimate lives in the INLA
-    marginal table (``result.hyperparameters`` is ``None`` there), so check that
-    first, exactly as the likelihood fixup does for sigma.
-    """
-    from dataclasses import replace
-
-    marginals = getattr(result, "hyperparameter_marginals", None)
-    table = marginals() if callable(marginals) else None
-    fitted = getattr(result, "hyperparameters", None) or {}
-
-    def _resolve(name):
-        if table and name in table:
-            return float(table[name].mean[0])
-        return float(fitted[name])
-
-    new_entries = []
-    changed = False
+    entries = []
     for kind, payload in context.entries:
         if kind == "midas_parametric":
             name, columns, kernel, theta_spec = payload
-            theta = tuple(s if not isinstance(s, str) else _resolve(s) for s in theta_spec)
-            new_entries.append((kind, (name, columns, kernel, theta)))
-            changed = True
+            payload = (name, columns, kernel, tuple(resolve(t, t) for t in theta_spec))
         elif kind == "copied":
             base_entry, copies = payload
-            new_copies = tuple(
-                (index, labels, spec, _resolve(spec) if isinstance(spec, str) else value)
+            payload = (base_entry, tuple(
+                (index, labels, spec, resolve(spec, value))
                 for index, labels, spec, value in copies
-            )
-            new_entries.append((kind, (base_entry, new_copies)))
-            changed = True
-        else:
-            new_entries.append((kind, payload))
-    if not changed:
-        return context
-    return replace(context, entries=tuple(new_entries))
+            ))
+        entries.append((kind, payload))
+    return replace(context, entries=tuple(entries))
 
 
 def _rebuild_result(
@@ -267,58 +231,43 @@ def _rebuild_result(
     )
 
 
-def _with_grid_context(result, model, context, caller_order=None):
-    """Bind an INLA grid to this model: per-point contexts, caller row order.
+def _finished(result, model, raw_context, *, caller_order=None, prediction_keys=None,
+              reorder_criteria=True):
+    """Attach the fitted prediction context and put rows in caller order.
 
-    ``context`` is the unsubstituted one ``build_prediction_context`` returns,
-    whose MIDAS shapes are still names to resolve.
-
-    Each grid point's conditional gets the prediction context of its own theta
-    (sigma, copy scales, MIDAS shapes), so ``update`` builds the new rows'
-    design and likelihood at that point; the integrated result's context is
+    ``raw_context`` is the unsubstituted one ``build_prediction_context``
+    returns (its MIDAS shapes are still names). An INLA grid is bound too: each
+    point's conditional gets the context of its own theta, so ``update`` builds
+    the new rows' design and likelihood there, and the integrated context is
     rebuilt from the updated hyperparameter marginals.
     """
     from dataclasses import replace
-    from types import SimpleNamespace
 
     grid = getattr(result, "_grid", None)
-    if grid is None:
-        return result
+    if grid is not None:
+        def conditional_at(conditional, theta):
+            return _rebuild_result(
+                conditional(), caller_order=caller_order, hyperparameters=theta,
+                prediction_context=_fitted_context(raw_context, model, theta),
+            )
 
-    def fitted_context(estimates):
-        return _context_with_fitted_weights(
-            _context_with_fitted_likelihood(context, estimates, model), estimates
+        grid = replace(
+            grid,
+            conditionals=tuple(
+                partial(conditional_at, conditional, theta)
+                for conditional, theta in zip(grid.conditionals, grid.thetas, strict=True)
+            ),
+            context=lambda marginals: _fitted_context(
+                raw_context, model,
+                {name: float(entry.mean[0]) for name, entry in marginals.items()}, marginals,
+            ),
         )
-
-    def finished(conditional, theta):
-        return _rebuild_result(
-            conditional(), caller_order=caller_order, hyperparameters=theta,
-            prediction_context=fitted_context(SimpleNamespace(hyperparameters=theta)),
-        )
-
-    grid = replace(
-        grid,
-        conditionals=tuple(
-            partial(finished, conditional, theta)
-            for conditional, theta in zip(grid.conditionals, grid.thetas, strict=True)
-        ),
-        context=lambda marginals: fitted_context(
-            SimpleNamespace(hyperparameters=None, hyperparameter_marginals=lambda: marginals)
-        ),
-    )
-    return _rebuild_result(result, grid=grid)
-
-
-def _align_predictions_with_source_rows(
-    result: GaussianResult | LaplaceResult | INLAResult,
-    source_positions: np.ndarray,
-    *,
-    reorder_criteria: bool = True,
-) -> GaussianResult | LaplaceResult | INLAResult:
     return _rebuild_result(
-        result,
-        caller_order=np.argsort(source_positions),
-        reorder_criteria=reorder_criteria,
+        result, caller_order=caller_order, prediction_keys=prediction_keys,
+        prediction_context=_fitted_context(
+            raw_context, model, _point_estimates(result), _hyperparameter_table(result)
+        ),
+        reorder_criteria=reorder_criteria, grid=grid,
     )
 
 
@@ -356,12 +305,126 @@ def _parameters_at_bound(
     return tuple(sorted(pinned))
 
 
-def _attach_estimates(
-    result: GaussianResult | LaplaceResult,
-    hyperparameters: Mapping[str, float],
-    diagnostics: Mapping[str, object],
-) -> GaussianResult | LaplaceResult:
-    return _rebuild_result(result, hyperparameters=hyperparameters, diagnostics=diagnostics)
+def _warm_fit(fit, previous):
+    """``fit``, starting a Laplace mode at ``previous``'s latent mean, matched by label.
+
+    Only the dict is kept, never ``previous``: holding a result would chain
+    every earlier window's result into the next one's memory.
+    """
+    from functools import wraps
+    import inspect
+
+    if previous is None or "initial_mode" not in inspect.signature(fit).parameters:
+        return fit
+    by_label = dict(zip(previous.labels, np.asarray(previous.mean, dtype=float).tolist()))
+
+    @wraps(fit)
+    def warm(model, *args, initial_mode=None, **kwargs):
+        if initial_mode is None:   # a search's own warm start takes precedence
+            initial_mode = np.array([by_label.get(label, 0.0) for label in model.labels])
+        return fit(model, *args, initial_mode=initial_mode, **kwargs)
+
+    return warm
+
+
+def _warm_estimates(previous) -> dict[str, float]:
+    """Hyperparameter starting point from ``previous``: its optimum, or its INLA mode.
+
+    An estimate pinned at a bound is left out: the objective is flat out there
+    (a precision running to infinity), so a search started on the bound stalls
+    on the plateau instead of coming back to an interior optimum.
+    """
+    if previous is None:
+        return {}
+    diagnostics = previous.diagnostics
+    estimates = {name: float(value) for name, value in (previous.hyperparameters or {}).items()}
+    prefix = "inla_mode_"
+    estimates.update({
+        key[len(prefix):]: float(value)
+        for key, value in diagnostics.items() if key.startswith(prefix)
+    })
+    pinned = ",".join(str(diagnostics.get(key, "")) for key in
+                      ("hyperparameters_at_bound", "inla_active_bounds"))
+    pinned = {name.strip() for name in pinned.split(",")}
+    return {name: value for name, value in estimates.items() if name not in pinned}
+
+
+def _optimization_inputs(family, declared, warm_start=None):
+    """``(bounds, initial, penalty)`` for a family's hyperparameter search.
+
+    A family-bound prior (e.g. a graph-bound PC prior) wins over the one the
+    Hyperparameter declares; ``warm_start`` moves the initial values.
+    """
+    declared = list(declared) + list(getattr(family, "hyperparameters", ()))
+    bounds = (
+        dict(family.parameter_bounds) if family.parameter_bounds
+        else {hp.name: OptimizationBounds(hp.initial, hp.lower, hp.upper) for hp in declared}
+    )
+    initial = {hp.name: hp.initial for hp in declared if hp.name in bounds}
+    for name, value in _warm_estimates(warm_start).items():
+        if name in bounds:
+            initial[name] = min(max(value, bounds[name].lower), bounds[name].upper)
+    family_priors = dict(getattr(family, "parameter_priors", {}) or {})
+    priored = [hp for hp in declared if hp.prior is not None and hp.name not in family_priors]
+    penalty = None
+    if family_priors or priored:
+        def penalty(values):
+            total = 0.0
+            for name, prior in family_priors.items():
+                total += float(prior.logpdf(values[name]))
+            for hp in priored:
+                total += float(hp.prior.logpdf(values[hp.name]))
+            return total
+
+    return bounds, initial, penalty
+
+
+def _fit_family(family, direct, fit, declared, *, hyperparameters, latent_strategy,
+                warm_start, num_workers, blas_threads, stacklevel=5):
+    """Fit a compiled family: directly, by empirical Bayes, or by INLA integration.
+
+    ``direct()`` is the model fitted when nothing is estimated; ``declared`` are
+    the model's Hyperparameter declarations (bounds, initial values, priors).
+    ``stacklevel`` points a bound warning at the caller's ``fit`` line.
+    """
+    if warm_start is not None and not isinstance(
+        warm_start, (GaussianResult, LaplaceResult, INLAResult)
+    ):
+        raise TypeError("warm_start must be a result returned by fit()")
+    fit = _warm_fit(fit, warm_start)
+    if family is None or not family.parameter_names:
+        if hyperparameters == "integrate":
+            raise ValueError("hyperparameters='integrate' requires a declared Hyperparameter")
+        with blas_limit(1, blas_threads):
+            return fit(direct())
+
+    bounds, initial, penalty = _optimization_inputs(family, declared, warm_start)
+    if hyperparameters == "integrate":
+        return integrate_inla(
+            family, bounds, initial=initial, fit=fit, penalty=penalty,
+            latent_strategy=latent_strategy, num_workers=num_workers, blas_threads=blas_threads,
+        )
+    eb = optimize_empirical_bayes(
+        family, bounds, initial=initial, fit=fit, penalty=penalty,
+        num_workers=num_workers, blas_threads=blas_threads,
+    )
+    diagnostics = dict(eb.fit.diagnostics)
+    diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
+    diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
+    diagnostics["hyperparameter_penalized"] = penalty is not None
+    pinned = _parameters_at_bound(dict(eb.parameters), bounds)
+    # Stored as a string: diagnostics values must be immutable scalars.
+    diagnostics["hyperparameters_at_bound"] = ", ".join(pinned)
+    if pinned:
+        warnings.warn(
+            f"empirical-Bayes estimate(s) {list(pinned)} landed on the edge of "
+            "the declared interval, so the bound rather than the data is "
+            "setting the value. Widen lower/upper on those Hyperparameters "
+            "(the defaults are initial*1e-3 to initial*1e3) and refit.",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+    return _rebuild_result(eb.fit, hyperparameters=dict(eb.parameters), diagnostics=diagnostics)
 
 
 @dataclass(frozen=True)
@@ -427,6 +490,7 @@ class LGM:
         constraints: object = (),
         num_workers: int = 1,
         blas_threads: int | None = None,
+        warm_start: object = None,
     ):
         """Compile and fit this model with an explicitly selected engine.
 
@@ -459,6 +523,14 @@ class LGM:
         worker; results are bit-identical to ``num_workers=1, blas_threads=1``.
         ``blas_threads`` alone caps BLAS threads for the whole fit. See
         docs/empirical-bayes.md.
+
+        ``warm_start`` takes an earlier result of this model -- the previous
+        window of a rolling or expanding experiment -- and starts the
+        hyperparameter search at its estimates (the INLA mode for an integrated
+        result) and a Laplace mode at its latent mean, matched by label, with
+        new levels at zero. The rows may differ freely. It changes where the
+        search starts, not what it converges to: results match a cold fit to
+        the optimizer's tolerance.
         """
         try:
             observations = tuple(observations)
@@ -489,12 +561,14 @@ class LGM:
                 f"latent_strategy={latent_strategy!r} requires hyperparameters='integrate'"
             )
         require_single_mean_shift(latent_strategy, mean_correction)
+        options = dict(
+            hyperparameters=hyperparameters, latent_strategy=latent_strategy,
+            mean_correction=mean_correction, warm_start=warm_start,
+            num_workers=num_workers, blas_threads=blas_threads,
+        )
         if isinstance(frame, pd.DataFrame):
             return self._fit_pandas(
-                frame, engine, hyperparameters=hyperparameters, latent_strategy=latent_strategy,
-                mean_correction=mean_correction,
-                observations=observations, constraints=constraints,
-                num_workers=num_workers, blas_threads=blas_threads,
+                frame, engine, observations=observations, constraints=constraints, **options,
             )
 
         from pylgm.data.spark import is_spark_dataframe
@@ -504,12 +578,7 @@ class LGM:
                 raise UnsupportedEngineError(
                     "linear observations and predictor constraints currently require pandas input"
                 )
-            return self._fit_spark(
-                frame, engine, max_driver_rows=max_driver_rows,
-                hyperparameters=hyperparameters, latent_strategy=latent_strategy,
-                mean_correction=mean_correction,
-                num_workers=num_workers, blas_threads=blas_threads,
-            )
+            return self._fit_spark(frame, engine, max_driver_rows=max_driver_rows, **options)
         raise DataContractError("frame must be a Pandas DataFrame")
 
     def _engine(self, engine: str, mean_correction: bool = False):
@@ -536,79 +605,22 @@ class LGM:
         # flag there is the honest reading, not a silent omission.
         return fit
 
-    def _family_optimization_inputs(self, family):
+    def _declared_hyperparameters(self) -> list:
         from pylgm.compiler import _model_hyperparameters
 
-        hyperparameters = list(_model_hyperparameters(self)) + [
-            ("observation", hp) for hp in getattr(family, "hyperparameters", ())
-        ]
-        if family.parameter_bounds:
-            bounds = dict(family.parameter_bounds)
-        else:
-            bounds = {hp.name: OptimizationBounds(hp.initial, hp.lower, hp.upper) for _, hp in hyperparameters}
-        initial = {hp.name: hp.initial for _, hp in hyperparameters}
-        family_priors = dict(getattr(family, "parameter_priors", {}) or {})
-        priored = [hp for _, hp in hyperparameters if hp.prior is not None]
-        penalty = None
-        if family_priors or priored:
-            def penalty(values, family_priors=family_priors, priored=priored):
-                total = 0.0
-                for name, prior in family_priors.items():
-                    total += float(prior.logpdf(values[name]))
-                for hp in priored:
-                    if hp.name not in family_priors:
-                        total += float(hp.prior.logpdf(values[hp.name]))
-                return total
-        return bounds, initial, penalty
+        return [hp for _, hp in _model_hyperparameters(self)]
 
-    def _run_empirical_bayes(
-        self, family, engine: str, mean_correction: bool = False,
-        num_workers: int = 1, blas_threads: int | None = None,
-    ) -> GaussianResult | LaplaceResult:
-        fit = self._engine(engine, mean_correction)
-        bounds, initial, penalty = self._family_optimization_inputs(family)
-        eb = optimize_empirical_bayes(
-            family, bounds, initial=initial, fit=fit, penalty=penalty,
-            num_workers=num_workers, blas_threads=blas_threads,
-        )
-        diagnostics = dict(eb.fit.diagnostics)
-        diagnostics["empirical_bayes_converged"] = eb.diagnostics.converged
-        diagnostics["empirical_bayes_evaluations"] = eb.diagnostics.evaluations
-        diagnostics["hyperparameter_penalized"] = penalty is not None
-        pinned = _parameters_at_bound(dict(eb.parameters), bounds)
-        # Stored as a string: diagnostics values must be immutable scalars.
-        diagnostics["hyperparameters_at_bound"] = ", ".join(pinned)
-        if pinned:
-            warnings.warn(
-                f"empirical-Bayes estimate(s) {list(pinned)} landed on the edge of "
-                "the declared interval, so the bound rather than the data is "
-                "setting the value. Widen lower/upper on those Hyperparameters "
-                "(the defaults are initial*1e-3 to initial*1e3) and refit.",
-                UserWarning,
-                stacklevel=3,
-            )
-        return _attach_estimates(eb.fit, dict(eb.parameters), diagnostics)
-
-    def _run_inla(
-        self, family, engine: str, latent_strategy: str = "gaussian",
-        mean_correction: bool = False,
-        num_workers: int = 1, blas_threads: int | None = None,
-    ) -> INLAResult:
-        fit = self._engine(engine, mean_correction)
-        bounds, initial, penalty = self._family_optimization_inputs(family)
-        return integrate_inla(
-            family, bounds, initial=initial, fit=fit, penalty=penalty,
-            latent_strategy=latent_strategy,
-            num_workers=num_workers, blas_threads=blas_threads,
+    def _fit_family(self, family, direct, engine, *, mean_correction, **options):
+        return _fit_family(
+            family, direct, self._engine(engine, mean_correction),
+            self._declared_hyperparameters(), **options,
         )
 
     def _fit_pandas(
         self, frame: pd.DataFrame, engine: str, *,
-        hyperparameters: str = "optimize", latent_strategy: str = "gaussian",
-        mean_correction: bool = False,
         observations: tuple[LinearObservation, ...] = (),
         constraints: tuple[LinearConstraint, ...] = (),
-        num_workers: int = 1, blas_threads: int | None = None,
+        **options,
     ) -> GaussianResult | LaplaceResult | INLAResult:
         prepared = frame.copy(deep=True)
         if (observations or constraints) and self.response not in prepared.columns:
@@ -651,9 +663,8 @@ class LGM:
                 "give it a fixed value, or estimate a LinearObservation sigma instead"
             )
 
-        nonlinear = any(item.scale == "log" for item in (*observations, *constraints))
-        if nonlinear:
-            compiled = compile_lgm(self, panel)
+        compiled = compile_lgm(self, panel)
+        if any(item.scale == "log" for item in (*observations, *constraints)):
             family = project_gaussian_family(
                 compile_family(self, panel), observations, constraints,
                 base_model=compiled,
@@ -662,75 +673,32 @@ class LGM:
                     inner_fit=partial(fit_gaussian, predictive_variances=False),
                 ),
             )
-            if not family.parameter_names:
-                if hyperparameters == "integrate":
-                    raise ValueError(
-                        "hyperparameters='integrate' requires a declared Hyperparameter"
-                    )
-                with blas_limit(1, blas_threads):
-                    result = self._engine(engine, mean_correction)(family.materialize({}))
-            elif hyperparameters == "integrate":
-                result = self._run_inla(
-                    family, engine, latent_strategy, mean_correction,
-                    num_workers, blas_threads,
-                )
-            else:
-                result = self._run_empirical_bayes(
-                    family, engine, mean_correction, num_workers, blas_threads,
-                )
+
+            def direct():
+                return family.materialize({})
         else:
             family = compile_family(self, panel)
             if observation_hyperparameters(observations):
                 family = project_gaussian_family(
                     family, observations, constraints,
-                    base_model=compile_lgm(self, panel) if family is None else None,
+                    base_model=compiled if family is None else None,
                 )
             elif family is not None and (observations or constraints):
                 family = project_gaussian_family(family, observations, constraints)
-            if hyperparameters == "integrate":
-                if family is None:
-                    raise ValueError(
-                        "hyperparameters='integrate' requires a declared Hyperparameter"
-                    )
-                result = self._run_inla(
-                    family, engine, latent_strategy, mean_correction,
-                    num_workers, blas_threads,
-                )
-                compiled = compile_lgm(self, panel)
-            elif family is None:
-                compiled = compile_lgm(self, panel)
-                fitted = (
-                    project_gaussian_model(compiled, observations, constraints)
-                    if observations or constraints else compiled
-                )
-                with blas_limit(1, blas_threads):
-                    result = self._engine(engine, mean_correction)(fitted)
-            else:
-                result = self._run_empirical_bayes(
-                    family, engine, mean_correction, num_workers, blas_threads,
-                )
-                compiled = compile_lgm(self, panel)
-        raw_context = build_prediction_context(self, panel, compiled, result)
-        context = _context_with_fitted_likelihood(raw_context, result, self)
-        context = _context_with_fitted_weights(context, result)
-        result = _rebuild_result(result, prediction_context=context)
-        result = _with_grid_context(result, self, raw_context, np.argsort(panel.source_positions))
-        return _align_predictions_with_source_rows(
-            result,
-            panel.source_positions,
+
+            def direct():
+                if observations or constraints:
+                    return project_gaussian_model(compiled, observations, constraints)
+                return compiled
+        result = self._fit_family(family, direct, engine, **options)
+        return _finished(
+            result, self, build_prediction_context(self, panel, compiled, result),
+            caller_order=np.argsort(panel.source_positions),
             reorder_criteria=not (observations or constraints),
         )
 
     def _fit_spark(
-        self,
-        frame: object,
-        engine: str,
-        *,
-        max_driver_rows: int | None,
-        hyperparameters: str = "optimize",
-        latent_strategy: str = "gaussian",
-        mean_correction: bool = False,
-        num_workers: int = 1, blas_threads: int | None = None,
+        self, frame: object, engine: str, *, max_driver_rows: int | None, **options,
     ) -> GaussianResult | LaplaceResult | INLAResult:
         from pylgm.data.spark import canonicalize_spark_frame
 
@@ -738,33 +706,14 @@ class LGM:
 
         from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
 
-        family = compile_family(self, canonical.panel)
-        if hyperparameters == "integrate":
-            if family is None:
-                raise ValueError(
-                    "hyperparameters='integrate' requires a declared Hyperparameter"
-                )
-            result = self._run_inla(
-                family, engine, latent_strategy, mean_correction,
-                num_workers, blas_threads,
-            )
-            compiled = compile_lgm(self, canonical.panel)
-        elif family is None:
-            compiled = compile_lgm(self, canonical.panel)
-            with blas_limit(1, blas_threads):
-                result = self._engine(engine, mean_correction)(compiled)
-        else:
-            result = self._run_empirical_bayes(
-                family, engine, mean_correction, num_workers, blas_threads,
-            )
-            compiled = compile_lgm(self, canonical.panel)
-        raw_context = build_prediction_context(self, canonical.panel, compiled, result)
-        context = _context_with_fitted_likelihood(raw_context, result, self)
-        context = _context_with_fitted_weights(context, result)
-        result = _rebuild_result(
-            result, prediction_keys=canonical.prediction_keys, prediction_context=context
+        compiled = compile_lgm(self, canonical.panel)
+        result = self._fit_family(
+            compile_family(self, canonical.panel), lambda: compiled, engine, **options
         )
-        return _with_grid_context(result, self, raw_context)
+        return _finished(
+            result, self, build_prediction_context(self, canonical.panel, compiled, result),
+            prediction_keys=canonical.prediction_keys,
+        )
 
 
 __all__ = ["LGM"]

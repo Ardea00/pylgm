@@ -169,3 +169,51 @@ MKL and BLIS. It cannot control Apple Accelerate, which the macOS NumPy and
 SciPy wheels typically use. There `blas_threads` has no effect, and
 `VECLIB_MAXIMUM_THREADS`, set before Python starts, is the only control.
 The fits still run in parallel; only the BLAS thread cap is missing.
+
+## Rolling and expanding windows
+
+A backtest fits the same model on a sequence of windows. It can grow the window
+(expanding) or move it (sliding: old periods leave, new ones arrive). Each
+window's fit is a good starting point for the next one:
+
+```python
+previous = None
+for window in windows:
+    result = model.fit(window, hyperparameters="optimize", warm_start=previous)
+    previous = result
+```
+
+`warm_start` works with both `"optimize"` and `"integrate"` (and in `Joint.fit`):
+
+- The hyperparameter search starts at the previous estimates. For an integrated
+  result that is its INLA mode.
+- A Laplace mode starts at the previous latent mean, matched by label. Levels new
+  to the window start at zero, and levels that left it are dropped.
+
+An estimate the previous window left pinned at a bound is not used as a start,
+because the objective is flat there and the search would stall. The warm fit
+keeps only a label-to-value map, never the previous result, so a long loop does
+not chain every window into memory.
+
+A warm start changes where the search begins, not the objective, so each
+window's result is a fresh fit of that window. It matches a cold fit to the
+optimizer's stopping tolerance, which is a relative plateau of `1e-5` in the
+objective (about 0.01 nats on a log marginal likelihood near -1000). A 20 × 80
+panel with eight windows of 40 periods gave these results:
+
+| model | windows | cold | warm | evaluations |
+|---|---|---|---|---|
+| Gaussian, `"optimize"` | expanding | 2.0 s | 1.3 s | 931 → 525 |
+| Gaussian, `"optimize"` | sliding | 2.1 s | 1.4 s | 1071 → 637 |
+| Poisson, `"optimize"` | sliding | 1.9 s | 1.4 s | 465 → 260 |
+| Gaussian, `"integrate"` | sliding | 19.8 s | 18.9 s | — |
+| Poisson, `"integrate"` | sliding | 7.2 s | 6.8 s | — |
+
+Integration gains little from a warm start: the search it shortens is a small
+part of the work, and exploring the grid is most of it.
+
+`result.update(new_rows)` (see [prediction](prediction.md#sequential-updates))
+is the other tool. It absorbs new rows without refitting and needs no old data.
+When the data are at hand, as in a backtest, a warm-started fit is the one to
+use: it is a real fit of the window, so it handles sliding windows, new levels
+and moving hyperparameters.

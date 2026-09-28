@@ -64,10 +64,10 @@ def test_rebuild_preserves_absent_covariance():
 
 
 def test_align_reorders_without_covariance():
-    from pylgm.model import _align_predictions_with_source_rows
+    from pylgm.model import _rebuild_result
 
     result = _covless_result()
-    aligned = _align_predictions_with_source_rows(result, np.array([1, 0]))
+    aligned = _rebuild_result(result, caller_order=np.argsort([1, 0]))
     assert aligned._covariance is None
     assert aligned._predictive_variance is None
 

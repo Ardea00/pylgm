@@ -10,7 +10,7 @@ from pylgm.exceptions import DataContractError, UnsupportedEngineError
 from pylgm.inference.result import INLAResult, LaplaceResult, ModelCriteria
 from pylgm.likelihoods import CompiledGaussian
 from pylgm.parameters import Hyperparameter
-from pylgm.model import _align_predictions_with_source_rows
+from pylgm.model import _optimization_inputs, _rebuild_result
 
 
 def _example():
@@ -85,7 +85,7 @@ def test_prediction_alignment_retains_prediction_keys():
         prediction_keys=keys,
     )
 
-    aligned = _align_predictions_with_source_rows(result, np.array([1, 0]))
+    aligned = _rebuild_result(result, caller_order=np.argsort([1, 0]))
 
     np.testing.assert_allclose(aligned.predictive_mean, [20.0, 10.0])
     pd.testing.assert_frame_equal(aligned.prediction_keys, keys)
@@ -721,7 +721,7 @@ def test_penalty_prefers_family_parameter_priors():
 
     object.__setattr__(family, "parameter_priors", {"p": _SentinelPrior()})
 
-    bounds, initial, penalty = model._family_optimization_inputs(family)
+    bounds, initial, penalty = _optimization_inputs(family, model._declared_hyperparameters())
     assert penalty is not None
     assert penalty({"p": 3.0}) == -7.0
     assert calls == [3.0]
@@ -756,7 +756,7 @@ def test_penalty_avoids_double_counting_family_and_hyperparameter_priors():
 
     object.__setattr__(family, "parameter_priors", {"p": _SentinelPrior()})
 
-    _, _, penalty = model._family_optimization_inputs(family)
+    _, _, penalty = _optimization_inputs(family, model._declared_hyperparameters())
     assert penalty is not None
     assert penalty({"p": 2.0}) == -1000.0
     assert family_calls == [2.0]

@@ -26,6 +26,10 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   step for non-Gaussian likelihoods, and with the hyperparameters reweighted on
   the INLA grid for `hyperparameters="integrate"`. See
   [prediction](prediction.md#sequential-updates).
+- **Warm starts** — `fit(..., warm_start=previous)` starts a rolling or
+  expanding backtest's fit at the previous window's hyperparameters and latent
+  mode (by label), for `"optimize"` and `"integrate"`, pandas, Spark and
+  `Joint`. See [empirical Bayes](empirical-bayes.md#rolling-and-expanding-windows).
 - **Joint posterior draws** — `result.sample(n, rng)` for exact-Gaussian (dense
   and sparse), Laplace and integrated fits, every draw meeting the exact
   constraints; `pylgm.evaluation.crps_from_draws` scores nonlinear targets built

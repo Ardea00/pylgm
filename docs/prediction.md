@@ -245,6 +245,12 @@ than report stale values. A skewed `latent_strategy` needs the old rows' data
 to refit its marginals, so `update` warns and reports the Gaussian grid-mixture
 marginals instead.
 
+With all the data at hand — a backtest over rolling or expanding windows —
+refit each window with `fit(..., warm_start=previous)` instead
+([empirical Bayes](empirical-bayes.md#rolling-and-expanding-windows)): each
+window is then a real fit, rows may leave as well as arrive, and new levels
+are fine.
+
 Limits: an empirical-Bayes result keeps its hyperparameters fixed (fit with
 `"integrate"` to have them move); every latent level the new rows touch must
 already be on the grid (a new level raises, as in `predict()`); rows with a NaN
