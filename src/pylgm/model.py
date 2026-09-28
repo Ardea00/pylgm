@@ -85,7 +85,7 @@ def _context_with_fitted_likelihood(context, result, model):
     """
     from dataclasses import replace
 
-    from pylgm.likelihoods import CompiledGaussian, Gaussian, WeibullSurv
+    from pylgm.likelihoods import CompiledGaussian, ExponentialSurv, Gaussian, WeibullSurv
     from pylgm.parameters import Hyperparameter
 
     if isinstance(model.likelihood, Gaussian) and isinstance(model.likelihood.sigma, Hyperparameter):
@@ -117,6 +117,18 @@ def _context_with_fitted_likelihood(context, result, model):
         fitted = getattr(result, "hyperparameters", None) or {}
         if name in fitted:
             return replace(context, likelihood=model.likelihood.materialize({name: float(fitted[name])}))
+        return context
+
+    # Any other likelihood (a NegativeBinomial size, a ZeroInflated pi, ...):
+    # predict's response mean ignores these, but update() scores new rows with
+    # them. Rebind the fitted rows' trials, which the materialized copy lacks.
+    fitted = getattr(result, "hyperparameters", None)
+    if fitted and not isinstance(model.likelihood, (Gaussian, WeibullSurv, ExponentialSurv)):
+        likelihood = model.likelihood.materialize(dict(fitted))
+        trials = getattr(context.likelihood, "trials", None)
+        if trials is not None:
+            likelihood = likelihood.for_observations({"trials": trials})
+        return replace(context, likelihood=likelihood)
     return context
 
 
@@ -176,6 +188,7 @@ def _rebuild_result(
     diagnostics: Mapping[str, object] | None = None,
     prediction_context: object | None = None,
     reorder_criteria: bool = True,
+    grid: object | None = None,
 ) -> GaussianResult | LaplaceResult | INLAResult:
     """Rebuild a result of the same type, optionally reordering rows or overriding metadata.
 
@@ -242,6 +255,7 @@ def _rebuild_result(
                 (weight, sampler if caller_order is None else sampler.reordered(caller_order))
                 for weight, sampler in result._mixture
             ),
+            grid=grid if grid is not None else result._grid,
             **common,
         )
     # ponytail: caller_order only permutes prediction rows (predictive_mean/
@@ -256,6 +270,48 @@ def _rebuild_result(
         ),
         **common,
     )
+
+
+def _with_grid_context(result, model, context, caller_order=None):
+    """Bind an INLA grid to this model: per-point contexts, caller row order.
+
+    ``context`` is the unsubstituted one ``build_prediction_context`` returns,
+    whose MIDAS shapes are still names to resolve.
+
+    Each grid point's conditional gets the prediction context of its own theta
+    (sigma, copy scales, MIDAS shapes), so ``update`` builds the new rows'
+    design and likelihood at that point; the integrated result's context is
+    rebuilt from the updated hyperparameter marginals.
+    """
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    grid = getattr(result, "_grid", None)
+    if grid is None:
+        return result
+
+    def fitted_context(estimates):
+        return _context_with_fitted_weights(
+            _context_with_fitted_likelihood(context, estimates, model), estimates
+        )
+
+    def finished(conditional, theta):
+        return _rebuild_result(
+            conditional(), caller_order=caller_order, hyperparameters=theta,
+            prediction_context=fitted_context(SimpleNamespace(hyperparameters=theta)),
+        )
+
+    grid = replace(
+        grid,
+        conditionals=tuple(
+            partial(finished, conditional, theta)
+            for conditional, theta in zip(grid.conditionals, grid.thetas, strict=True)
+        ),
+        context=lambda marginals: fitted_context(
+            SimpleNamespace(hyperparameters=None, hyperparameter_marginals=lambda: marginals)
+        ),
+    )
+    return _rebuild_result(result, grid=grid)
 
 
 def _align_predictions_with_source_rows(
@@ -659,10 +715,11 @@ class LGM:
                     family, engine, mean_correction, num_workers, blas_threads,
                 )
                 compiled = compile_lgm(self, panel)
-        context = build_prediction_context(self, panel, compiled, result)
-        context = _context_with_fitted_likelihood(context, result, self)
+        raw_context = build_prediction_context(self, panel, compiled, result)
+        context = _context_with_fitted_likelihood(raw_context, result, self)
         context = _context_with_fitted_weights(context, result)
         result = _rebuild_result(result, prediction_context=context)
+        result = _with_grid_context(result, self, raw_context, np.argsort(panel.source_positions))
         return _align_predictions_with_source_rows(
             result,
             panel.source_positions,
@@ -706,12 +763,13 @@ class LGM:
                 family, engine, mean_correction, num_workers, blas_threads,
             )
             compiled = compile_lgm(self, canonical.panel)
-        context = build_prediction_context(self, canonical.panel, compiled, result)
-        context = _context_with_fitted_likelihood(context, result, self)
+        raw_context = build_prediction_context(self, canonical.panel, compiled, result)
+        context = _context_with_fitted_likelihood(raw_context, result, self)
         context = _context_with_fitted_weights(context, result)
-        return _rebuild_result(
+        result = _rebuild_result(
             result, prediction_keys=canonical.prediction_keys, prediction_context=context
         )
+        return _with_grid_context(result, self, raw_context)
 
 
 __all__ = ["LGM"]

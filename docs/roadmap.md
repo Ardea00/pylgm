@@ -20,9 +20,11 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   `pylgm.index_numbers` converts chain-linked volumes to additive
   previous-year-price values (annual overlap). See
   [linear observations](linear-observations.md).
-- **Sequential updates** — `GaussianResult.update(new_rows)` conditions a fitted
-  exact-Gaussian posterior on new observations at fixed hyperparameters, with no
-  refactorisation, identical to a refit on all rows. See
+- **Sequential updates** — `result.update(new_rows)` conditions a fitted
+  posterior on new observations with no refactorisation: exactly for an
+  exact-Gaussian fit (identical to a refit), through a `k`-dimensional Laplace
+  step for non-Gaussian likelihoods, and with the hyperparameters reweighted on
+  the INLA grid for `hyperparameters="integrate"`. See
   [prediction](prediction.md#sequential-updates).
 - **Joint posterior draws** — `result.sample(n, rng)` for exact-Gaussian (dense
   and sparse), Laplace and integrated fits, every draw meeting the exact

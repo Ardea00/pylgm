@@ -171,8 +171,8 @@ posterior's skewness.
 
 ## Sequential updates
 
-When new observations arrive for rows already on the fitted grid, an
-exact-Gaussian result absorbs them without refitting:
+When new observations arrive for rows already on the fitted grid, a result
+absorbs them without refitting:
 
 ```python
 grid.loc[grid["t"] >= 12, "y"] = np.nan        # future periods on the grid, NaN response
@@ -198,9 +198,54 @@ term, so marginals, `predict()`, `linear_combinations()` and `sample()` (via
 Matheron's rule) all reflect the new rows, on dense and sparse fits alike. The
 result is identical to a refit on all rows at the same hyperparameters.
 
-Limits: hyperparameters are not re-estimated (refit when they should move);
-every latent level the new rows touch must already be on the grid (a new level
-raises, as in `predict()`); rows with a NaN response are skipped; results from
-`hyperparameters="integrate"`, Laplace fits and joint models do not support
-`update` yet. Accumulated low-rank terms grow by `k` columns per update, so
-refit after many large updates.
+### Non-Gaussian likelihoods
+
+A Laplace result updates the same way. The new rows see the latent field only
+through their predictor \(\eta = \text{offset} + A x\), whose prior under the
+fitted posterior is \(\mathcal N(m, S_0)\) with \(m = \text{offset} + A\mu\),
+\(S_0 = A\Sigma A^\top\). The mode is a `k`-dimensional Newton problem, and at
+it, with \(W = -\partial^2_\eta \log p(y\mid\eta)\) and \(a = \partial_\eta \log p(y\mid\eta)\),
+
+\[
+B = I + W^{1/2} S_0 W^{1/2},\quad
+\mu' = \mu + \Sigma A^\top a,\quad
+\Sigma' = \Sigma - \Sigma A^\top W^{1/2} B^{-1} W^{1/2} A \Sigma,
+\]
+
+with `log_marginal_likelihood` gaining the Laplace approximation of
+\(\log p(y_\text{new}\mid y_\text{old})\). Binomial rows bring their own trials
+column. This is not identical to a refit: a refit re-linearises the *old* rows
+around the new mode, while `update` keeps their curvature where the fit left it.
+The gap is second order in the mode shift (on a 180-row Poisson panel, 1e-3 on
+the latent mean and 1–2% on its standard deviations after two updates).
+Survival likelihoods do not support `update`.
+
+### Hyperparameters
+
+With `hyperparameters="integrate"`, `update` moves the hyperparameters too.
+Every retained grid point's conditional is updated as above, and its
+integration weight is multiplied by that point's
+\(p(y_\text{new}\mid y_\text{old}, \theta_k)\):
+
+\[
+w_k' \propto w_k\, p(y_\text{new}\mid y_\text{old}, \theta_k),\qquad
+\log p(y_\text{new}\mid y_\text{old}) = \log \textstyle\sum_k w_k\, p(y_\text{new}\mid y_\text{old}, \theta_k).
+\]
+
+This is Bayes' rule on the fitted grid, and it is exact there for a Gaussian
+likelihood. Latent moments, predictions, draws and the hyperparameter
+marginals are re-mixed with the new weights, and the prediction context's
+plug-in hyperparameters follow them. The first update refits each grid point's
+conditional once, which is cheaper than a new INLA search. Later updates reuse
+those conditionals. The grid itself does not move: a tighter posterior sheds
+effective points (`diagnostics["inla_effective_weight"]`), and `update` warns
+when fewer than three remain — refit then to re-centre it. `criteria` still
+describe the rows fitted originally, and `latent_strategy` must be
+`"gaussian"`.
+
+Limits: an empirical-Bayes result keeps its hyperparameters fixed (fit with
+`"integrate"` to have them move); every latent level the new rows touch must
+already be on the grid (a new level raises, as in `predict()`); rows with a NaN
+response are skipped; joint models do not support `update` yet. Accumulated
+low-rank terms grow by `k` columns per update, so refit after many large
+updates.
