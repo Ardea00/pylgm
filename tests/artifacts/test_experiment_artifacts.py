@@ -178,7 +178,7 @@ def test_experiment_environment_records_all_direct_dependencies(tmp_path: Path) 
         "pyarrow",
     }
     assert all(environment["dependencies"].values())
-    assert environment["dependencies"]["pylgm"] == "0.7.0rc5"
+    assert environment["dependencies"]["pylgm"] == "0.7.0rc6"
 
 
 @pytest.mark.parametrize(
