@@ -20,7 +20,8 @@ at second order in the mode shift (through the likelihood's third derivative).
 ``V`` costs k solves against the factor already held, so no new factorisation
 is made; the constraint projection is inside ``Sigma``. ``Sigma'`` is kept as
 the base posterior minus a rank-k term, and draws use Matheron's rule, so
-repeated updates chain.
+repeated updates chain; a dense chain collapses to one factor once it holds
+more rows than latents.
 
 ``update_integrated`` lifts this to an INLA result: each grid point's
 conditional is updated and the grid is reweighted by its
@@ -88,6 +89,22 @@ class UpdatedPosterior:
         noise = self.noise_sd * rng.standard_normal((n, self.design.shape[0]))
         residual = base @ self.design.T + noise
         return base - cho_solve(self.s_factor, residual.T).T @ self.v.T
+
+
+def _chain_rank(posterior) -> int:
+    """Rows accumulated in a chain of ``UpdatedPosterior`` terms."""
+    rank = 0
+    while isinstance(posterior, UpdatedPosterior):
+        rank += posterior.v.shape[1]
+        posterior = posterior.base
+    return rank
+
+
+def _psd_factor(covariance: np.ndarray) -> np.ndarray:
+    """``F`` with ``F F^T = covariance``, dropping its (constraint) null directions."""
+    values, vectors = np.linalg.eigh(covariance)
+    keep = values > 1e-12 * max(float(values[-1]), 0.0)
+    return vectors[:, keep] * np.sqrt(values[keep])
 
 
 def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood, max_iterations=100):
@@ -203,6 +220,10 @@ def condition_on_rows(result, new_data):
     if dense:
         covariance = result._covariance - delta
         covariance = 0.5 * (covariance + covariance.T)
+        if _chain_rank(posterior) >= p:
+            # Past p accumulated rows the low-rank chain costs more than a dense
+            # factor of Sigma' itself: collapse it (O(p^3) once per ~p rows).
+            posterior = _DenseFactor(_psd_factor(covariance))
     predictive_variance = result._predictive_variance
     if predictive_variance is not None:
         shrink = (
@@ -269,8 +290,12 @@ def update_integrated(result, new_data):
     if grid is None:
         raise ValueError("update() is available on integrated results produced by LGM.fit")
     if result.latent_marginal_table is not None:
-        raise UnsupportedEngineError(
-            "update() keeps Gaussian latent marginals; refit with latent_strategy='gaussian'"
+        # The skewed marginals are fitted on the old rows' data, which the result
+        # does not keep; the updated grid mixture is what remains exact.
+        warnings.warn(
+            "update() reports the Gaussian grid-mixture latent marginals; refit for "
+            "the skewed latent_strategy on all rows.",
+            UserWarning, stacklevel=3,
         )
     before = [conditional() for conditional in grid.conditionals]
     after = [conditional.update(new_data) for conditional in before]
@@ -313,7 +338,7 @@ def update_integrated(result, new_data):
         predictive_mean=moments["predictive_mean"],
         predictive_variance=moments["predictive_variance"],
         hyperparameter_marginals=marginals,
-        criteria=result.criteria,
+        criteria=None,
         fitted_mean=moments["fitted_mean"], link_name=result.link_name,
         block_slices=result.block_slices, diagnostics=diagnostics,
         prediction_keys=result.prediction_keys,
@@ -323,7 +348,6 @@ def update_integrated(result, new_data):
         ),
         observation_variance=moments["observation_variance"],
         latent_variances=moments["latent_variance"],
-        mixture=tuple((float(w), new._sampler) for w, new in zip(weights, after, strict=True)),
         grid=IntegrationGrid(
             thetas=grid.thetas, u=grid.u, s=s, weights=weights,
             conditionals=tuple((lambda new=new: new) for new in after),

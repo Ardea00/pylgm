@@ -42,21 +42,14 @@ class RefitSampler:
 
     An integrated result would otherwise keep every grid point's sampling factor
     alive -- ``O(points * p * d)`` memory -- for draws that may never be asked
-    for. ``refit`` re-runs that point's conditional fit and returns a
-    ``GridSampler``; its cost is one fit per point that receives draws.
+    for. ``conditional`` returns that point's fit (refitting it until an update
+    has made it concrete); its cost is one fit per point that receives draws.
     """
 
-    refit: Callable[[], GridSampler]
-    row_order: np.ndarray | None = None
-
-    def reordered(self, order: np.ndarray) -> "RefitSampler":
-        return replace(self, row_order=order if self.row_order is None else self.row_order[order])
+    conditional: Callable[[], object]
 
     def draw(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        sampler = self.refit()
-        if self.row_order is not None:
-            sampler = sampler.reordered(self.row_order)
-        return sampler.draw(n, rng)
+        return self.conditional()._sampler.draw(n, rng)
 
 
 def sample_mixture(components, n, rng) -> np.ndarray:

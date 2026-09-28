@@ -236,10 +236,9 @@ def _rebuild_result(
             if caller_order is not None and result.fitted_mean is not None
             else result.fitted_mean
         )
-        criteria = (
-            result.criteria.reordered(caller_order)
-            if caller_order is not None and reorder_criteria else result.criteria
-        )
+        criteria = result._criteria
+        if criteria is not None and caller_order is not None and reorder_criteria:
+            criteria = criteria.reordered(caller_order)
         return INLAResult(
             hyperparameter_marginals=result.hyperparameter_marginals(),
             criteria=criteria,
@@ -251,10 +250,6 @@ def _rebuild_result(
             # like predictive_mean/predictive_variance), so caller_order does not
             # permute it -- straight pass-through is correct.
             latent_variances=getattr(result, "_latent_variances", None),
-            mixture=tuple(
-                (weight, sampler if caller_order is None else sampler.reordered(caller_order))
-                for weight, sampler in result._mixture
-            ),
             grid=grid if grid is not None else result._grid,
             **common,
         )

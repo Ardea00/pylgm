@@ -239,13 +239,16 @@ plug-in hyperparameters follow them. The first update refits each grid point's
 conditional once, which is cheaper than a new INLA search. Later updates reuse
 those conditionals. The grid itself does not move: a tighter posterior sheds
 effective points (`diagnostics["inla_effective_weight"]`), and `update` warns
-when fewer than three remain — refit then to re-centre it. `criteria` still
-describe the rows fitted originally, and `latent_strategy` must be
-`"gaussian"`.
+when fewer than three remain — refit then to re-centre it. `criteria` score
+the originally fitted rows, so an updated result raises on `criteria` rather
+than report stale values. A skewed `latent_strategy` needs the old rows' data
+to refit its marginals, so `update` warns and reports the Gaussian grid-mixture
+marginals instead.
 
 Limits: an empirical-Bayes result keeps its hyperparameters fixed (fit with
 `"integrate"` to have them move); every latent level the new rows touch must
 already be on the grid (a new level raises, as in `predict()`); rows with a NaN
-response are skipped; joint models do not support `update` yet. Accumulated
-low-rank terms grow by `k` columns per update, so refit after many large
-updates.
+response are skipped; joint models do not support `update` yet. On a dense fit
+the accumulated low-rank terms collapse into one factor once they hold more
+rows than latents. On a sparse fit they grow by `k` columns per update, so
+refit after many large updates.

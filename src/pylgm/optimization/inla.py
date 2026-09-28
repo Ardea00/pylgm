@@ -24,7 +24,6 @@ from pylgm.inference.result import (
     TabulatedMarginals,
     quadratic_form_diagonal,
 )
-from pylgm.inference.sampling import RefitSampler
 from pylgm.inference.update import IntegrationGrid
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 from pylgm.parallel import blas_limit, map_ordered, validate_blas_threads, validate_workers
@@ -990,8 +989,7 @@ def _integrate_inla(
         observation_variance=observation_acc,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
         latent_marginal_table=latent_marginal_table, latent_variances=latent_variance,
-        mixture=_sampling_mixture(kept, weights, refit),
-        grid=IntegrationGrid(
+        grid=None if any(cond._sampler is None for (_, _, cond, _, _) in kept) else IntegrationGrid(
             thetas=tuple(dict(theta) for (_, _, _, theta, _) in kept),
             u=np.array([u for (u, _, _, _, _) in kept]),
             s=np.array([s for (_, s, _, _, _) in kept]),
@@ -1011,20 +1009,6 @@ def _refit_conditional(family, conditional_fit, allow_large_dense, theta):
     if allow_large_dense:
         return conditional_fit(compiled, allow_large_dense=True)
     return conditional_fit(compiled)
-
-
-def _sampling_mixture(kept, weights, refit) -> tuple:
-    """``(weight, RefitSampler)`` per kept grid point, or ``()`` if any lacks a sampler.
-
-    Keeps each point's theta, not its fitted factor: the conditional is refitted
-    at ``sample()`` time, and only for points that receive draws.
-    """
-    if any(getattr(cond, "_sampler", None) is None for (_, _, cond, _, _) in kept):
-        return ()
-    return tuple(
-        (float(w), RefitSampler(lambda theta=dict(theta): refit(theta)._sampler))
-        for (_, _, _, theta, _), w in zip(kept, weights, strict=True)
-    )
 
 
 @dataclass(frozen=True)

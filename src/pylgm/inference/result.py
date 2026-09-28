@@ -1145,12 +1145,11 @@ class INLAResult(_BaseResult):
     _ENGINE = "inla"
 
     _hyperparameter_marginals: Mapping[str, LatentMarginals] = field(repr=False)
-    _criteria: ModelCriteria = field(repr=False)
+    _criteria: ModelCriteria | None = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
     _latent_variances: np.ndarray | None = field(repr=False)
-    _mixture: tuple = field(repr=False)
     _grid: object = field(repr=False)
 
     def __init__(
@@ -1163,7 +1162,7 @@ class INLAResult(_BaseResult):
         predictive_variance: np.ndarray,
         hyperparameter_marginals: Mapping[str, LatentMarginals],
         *,
-        criteria: ModelCriteria,
+        criteria: ModelCriteria | None,
         fitted_mean: np.ndarray | None = None,
         link_name: str | None = None,
         block_slices: Mapping[str, slice] | None = None,
@@ -1174,11 +1173,10 @@ class INLAResult(_BaseResult):
         prediction_context: object | None = None,
         observation_variance: float | None = None,
         latent_variances: np.ndarray | None = None,
-        mixture: tuple = (),
         grid: object = None,
     ) -> None:
         def _validate_inla_extras() -> None:
-            if not isinstance(criteria, ModelCriteria):
+            if criteria is not None and not isinstance(criteria, ModelCriteria):
                 raise TypeError("criteria must be a ModelCriteria")
             if latent_marginal_table is not None and not isinstance(
                 latent_marginal_table, (SkewNormalMarginals, TabulatedMarginals)
@@ -1213,7 +1211,6 @@ class INLAResult(_BaseResult):
                 "_latent_variances",
                 latent_variances if latent_variances is None else _readonly_array(latent_variances),
             )
-            object.__setattr__(self, "_mixture", tuple(mixture))
             object.__setattr__(self, "_grid", grid)
 
         self._init_common(
@@ -1265,10 +1262,23 @@ class INLAResult(_BaseResult):
 
     @property
     def criteria(self) -> ModelCriteria:
+        if self._criteria is None:
+            raise ValueError(
+                "criteria score the originally fitted rows and are not carried through "
+                "update(); refit on all rows to compare models"
+            )
         return self._criteria
 
     def _sampling_components(self) -> tuple:
-        return self._mixture
+        # Each grid point's conditional is refitted only if it receives draws.
+        from pylgm.inference.sampling import RefitSampler
+
+        if self._grid is None:
+            return ()
+        return tuple(
+            (float(w), RefitSampler(conditional))
+            for w, conditional in zip(self._grid.weights, self._grid.conditionals, strict=True)
+        )
 
     def update(self, new_data) -> "INLAResult":
         """Condition on ``new_data``'s rows and update the hyperparameter posterior too.
@@ -1281,7 +1291,8 @@ class INLAResult(_BaseResult):
         update refits each grid point's conditional once; later ones reuse them.
         The grid itself stays put: a warning fires when the reweighting leaves
         fewer than three effective points, and a refit re-centres it.
-        ``criteria`` still describe the rows fitted originally.
+        ``criteria`` are not carried through (they score the fitted rows), and a
+        skewed ``latent_strategy`` falls back to the Gaussian grid mixture.
         """
         from pylgm.inference.update import update_integrated
 

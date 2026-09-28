@@ -12,8 +12,7 @@ from scipy.special import logsumexp
 
 import pylgm.inference.gaussian as gaussian_engine
 from pylgm import IID, RW1, Binomial, Fixed, Gaussian, Hyperparameter, LGM, Poisson
-from pylgm.exceptions import UnsupportedEngineError
-from pylgm.inference.update import _rows_mode
+from pylgm.inference.update import _DenseFactor, _rows_mode
 from pylgm.likelihoods import CompiledPoisson
 
 REGIONS, PERIODS = 4, 15
@@ -126,6 +125,10 @@ def test_one_large_update_matches_refit(engine):
     refit = MODEL.fit(full)
     np.testing.assert_allclose(updated.mean, refit.mean, atol=1e-9)
     np.testing.assert_allclose(updated.predictive_variance, refit.predictive_variance, atol=1e-9)
+    if engine == "dense":   # k >= p: the chain collapsed to one dense factor
+        assert isinstance(updated._sampler.posterior, _DenseFactor)
+    draws = updated.sample(40_000, rng=0)
+    np.testing.assert_allclose(draws.std(axis=0), np.sqrt(refit.predictive_variance), rtol=0.03)
 
 
 # --- non-Gaussian rows and integrated hyperparameters -----------------------
@@ -247,9 +250,13 @@ def test_integrated_update_tracks_an_integrated_refit():
                                atol=0.02)
 
 
-def test_integrated_update_rejects_tabulated_latent_marginals():
+def test_integrated_update_falls_back_to_gaussian_marginals_and_drops_criteria():
     first = _panel().assign(y=lambda f: np.where(f["t"] < 10, f["y"], np.nan))
     result = GAUSSIAN_INTEGRATED.fit(first, hyperparameters="integrate",
                                      latent_strategy="simplified_laplace")
-    with pytest.raises(UnsupportedEngineError, match="latent_strategy"):
-        result.update(_panel()[lambda f: f["t"] >= 10])
+    with pytest.warns(UserWarning, match="Gaussian grid-mixture"):
+        updated = result.update(_panel()[lambda f: f["t"] >= 10])
+    assert updated.latent_marginal_table is None
+    assert np.all(updated.latent_marginals().std > 0)
+    with pytest.raises(ValueError, match="update"):
+        updated.criteria
