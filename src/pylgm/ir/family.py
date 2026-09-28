@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
 from types import MappingProxyType
 from typing import Mapping
 
@@ -168,7 +169,7 @@ class ParametricDesignBlock:
             )
         multiplier = resolved[self.parameter] if self.parameter else self.scale
         with np.errstate(over="ignore", invalid="ignore"):
-            precision = self.block.precision * multiplier
+            precision = self.block._precision * multiplier
         if not np.isfinite(precision.data).all():
             raise NumericalError(
                 f"precision scaling for block {self.block.name!r} must remain finite"
@@ -230,20 +231,13 @@ def _materialize_blocks(
             continue
         multiplier = resolved[item.parameter] if item.parameter else item.scale
         with np.errstate(over="ignore", invalid="ignore"):
-            precision = item.block.precision * multiplier
+            precision = item.block._precision * multiplier
         if not np.isfinite(precision.data).all():
             raise NumericalError(
                 f"precision scaling for block {item.block.name!r} must remain finite"
             )
-        materialized.append(
-            LatentBlock(
-                item.block.name,
-                item.block.labels,
-                item.block.design,
-                precision,
-                item.block.constraints,
-            )
-        )
+        # A finite rescaling of an already-validated block stays valid.
+        materialized.append(item.block._rescaled(precision))
     return tuple(materialized)
 
 
@@ -415,12 +409,36 @@ class CompiledFamily:
             start = stop
         raise KeyError(name)
 
+    @cached_property
+    def _template(self) -> CompiledLGM | None:
+        """The theta-independent parts, validated once, or ``None`` when absent.
+
+        Built from the unscaled template blocks, so it carries the shared design,
+        constraints, labels and response arrays every ``materialize`` reuses.
+        Parametric designs (MIDAS, estimated copy scales) vary with theta, so
+        such families keep the fully validated per-call assembly.
+        """
+        if not self.blocks or any(
+            isinstance(item, ParametricDesignBlock) for item in self.blocks
+        ):
+            return None
+        return _assemble_compiled_model(
+            self._y, self._observed, self._offset,
+            tuple(item.block for item in self.blocks), object(),
+            extra_constraints=self._extra_constraints,
+            extra_constraint_rhs=self._extra_constraint_rhs,
+        )
+
     def materialize(self, values: Mapping[str, float]) -> CompiledLGM:
         resolved = _validate_parameter_mapping(
             values, self.parameter_names, self.parameter_bounds
         )
         blocks = _materialize_blocks(self.blocks, resolved)
         likelihood = self.likelihood_factory(resolved)
+        template = self._template
+        if template is not None:
+            precision = block_diag([block._precision for block in blocks], format="csr")
+            return template._rebind(precision, likelihood, blocks)
         return _assemble_compiled_model(
             self._y, self._observed, self._offset, blocks, likelihood,
             extra_constraints=self._extra_constraints,
