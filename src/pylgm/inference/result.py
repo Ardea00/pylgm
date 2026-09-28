@@ -960,8 +960,8 @@ class GaussianResult(_BaseResult):
         ``log_marginal_likelihood`` gains ``log p(y_new | y_old)``. Rows with a
         NaN response are skipped. Every latent level ``new_data`` touches must
         already be in the fit -- put future periods on the grid at fit time with
-        a NaN response. Hyperparameters are not re-estimated; refit when they
-        should move.
+        a NaN response. Hyperparameters are not re-estimated: fit with
+        ``hyperparameters="integrate"`` to have ``update`` move them too.
         """
         from pylgm.inference.update import condition_on_rows
 
@@ -1099,6 +1099,20 @@ class LaplaceResult(_BaseResult):
     def fitted_mean(self) -> np.ndarray:
         return _readonly_array(self._fitted_mean)
 
+    def update(self, new_data) -> "LaplaceResult":
+        """Condition this posterior on ``new_data``'s rows, hyperparameters held fixed.
+
+        The Laplace posterior becomes the prior for the new rows, whose mode is
+        found in their own k-dimensional predictor space -- no refactorisation.
+        ``log_marginal_likelihood`` gains the Laplace ``log p(y_new | y_old)``.
+        Unlike the Gaussian case this is not identical to a refit: the old rows'
+        curvature stays at the old mode, an error second order in the mode shift.
+        Row and level rules are ``GaussianResult.update``'s.
+        """
+        from pylgm.inference.update import condition_on_rows
+
+        return condition_on_rows(self, new_data)
+
 
 def _readonly_hyperparameter_marginals(
     values: Mapping[str, LatentMarginals],
@@ -1131,12 +1145,12 @@ class INLAResult(_BaseResult):
     _ENGINE = "inla"
 
     _hyperparameter_marginals: Mapping[str, LatentMarginals] = field(repr=False)
-    _criteria: ModelCriteria = field(repr=False)
+    _criteria: ModelCriteria | None = field(repr=False)
     _fitted_mean: np.ndarray | None = field(repr=False)
     link_name: str | None
     _latent_marginal_table: "SkewNormalMarginals | TabulatedMarginals | None" = field(repr=False)
     _latent_variances: np.ndarray | None = field(repr=False)
-    _mixture: tuple = field(repr=False)
+    _grid: object = field(repr=False)
 
     def __init__(
         self,
@@ -1148,7 +1162,7 @@ class INLAResult(_BaseResult):
         predictive_variance: np.ndarray,
         hyperparameter_marginals: Mapping[str, LatentMarginals],
         *,
-        criteria: ModelCriteria,
+        criteria: ModelCriteria | None,
         fitted_mean: np.ndarray | None = None,
         link_name: str | None = None,
         block_slices: Mapping[str, slice] | None = None,
@@ -1159,10 +1173,10 @@ class INLAResult(_BaseResult):
         prediction_context: object | None = None,
         observation_variance: float | None = None,
         latent_variances: np.ndarray | None = None,
-        mixture: tuple = (),
+        grid: object = None,
     ) -> None:
         def _validate_inla_extras() -> None:
-            if not isinstance(criteria, ModelCriteria):
+            if criteria is not None and not isinstance(criteria, ModelCriteria):
                 raise TypeError("criteria must be a ModelCriteria")
             if latent_marginal_table is not None and not isinstance(
                 latent_marginal_table, (SkewNormalMarginals, TabulatedMarginals)
@@ -1197,7 +1211,7 @@ class INLAResult(_BaseResult):
                 "_latent_variances",
                 latent_variances if latent_variances is None else _readonly_array(latent_variances),
             )
-            object.__setattr__(self, "_mixture", tuple(mixture))
+            object.__setattr__(self, "_grid", grid)
 
         self._init_common(
             labels=labels,
@@ -1248,7 +1262,38 @@ class INLAResult(_BaseResult):
 
     @property
     def criteria(self) -> ModelCriteria:
+        if self._criteria is None:
+            raise ValueError(
+                "criteria score the originally fitted rows and are not carried through "
+                "update(); refit on all rows to compare models"
+            )
         return self._criteria
 
     def _sampling_components(self) -> tuple:
-        return self._mixture
+        # Each grid point's conditional is refitted only if it receives draws.
+        from pylgm.inference.sampling import RefitSampler
+
+        if self._grid is None:
+            return ()
+        return tuple(
+            (float(w), RefitSampler(conditional))
+            for w, conditional in zip(self._grid.weights, self._grid.conditionals, strict=True)
+        )
+
+    def update(self, new_data) -> "INLAResult":
+        """Condition on ``new_data``'s rows and update the hyperparameter posterior too.
+
+        Each retained grid point's conditional is updated as
+        ``GaussianResult.update``/``LaplaceResult.update`` do (exact for a
+        Gaussian likelihood), and its integration weight is multiplied by that
+        point's ``p(y_new | y_old, theta)`` -- Bayes' rule on the fitted grid, so
+        the hyperparameters move with the data without a new search. The first
+        update refits each grid point's conditional once; later ones reuse them.
+        The grid itself stays put: a warning fires when the reweighting leaves
+        fewer than three effective points, and a refit re-centres it.
+        ``criteria`` are not carried through (they score the fitted rows), and a
+        skewed ``latent_strategy`` falls back to the Gaussian grid mixture.
+        """
+        from pylgm.inference.update import update_integrated
+
+        return update_integrated(self, new_data)

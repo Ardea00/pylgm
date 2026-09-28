@@ -1024,7 +1024,7 @@ def _weighted_family_block(item, weights: np.ndarray):
     weighting leaves alone, so scaling the template design is enough.
 
     A ``ParametricDesignBlock`` is deliberately not handled here: it rebuilds
-    its design per hyperparameter draw, and ``_context_with_fitted_weights``
+    its design per hyperparameter draw, and ``_fitted_context``
     (``pylgm/model.py``) does not recurse into a ``("weighted", ...)``
     prediction entry, so predict() would silently reuse the *initial* theta
     rather than the fitted one. It is also unreachable today -- the only

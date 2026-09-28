@@ -230,6 +230,14 @@ a regional panel, at the same fixed hyperparameters:
 `update` equals the refit to 1e-9. It pays off when a batch of new rows is small
 next to the latent field; when every batch touches every latent, refit.
 
+The same holds beyond fixed Gaussian fits:
+- A **Laplace fit** (Poisson, binomial, negative binomial, ...) absorbs new rows through a
+  Newton step in their own `k`-dimensional predictor space.
+- An **integrated fit** also updates its hyperparameter posterior, by reweighting the INLA
+  grid with each point's `p(y_new | y_old, theta)`, with no new hyperparameter search.
+
+INLA has neither: every new batch is a full refit.
+
 ## When *not* to reach for pyLGM
 
 Being clear about this is more useful than a feature list:

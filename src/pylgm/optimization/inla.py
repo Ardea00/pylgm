@@ -24,7 +24,7 @@ from pylgm.inference.result import (
     TabulatedMarginals,
     quadratic_form_diagonal,
 )
-from pylgm.inference.sampling import RefitSampler
+from pylgm.inference.update import IntegrationGrid
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 from pylgm.parallel import blas_limit, map_ordered, validate_blas_threads, validate_workers
 
@@ -436,6 +436,58 @@ def _explore_grid(
     return np.asarray(grid), payloads
 
 
+def _all_sparse(conditional) -> bool:
+    """Grid conditionals share the model shape: all sparse or all dense together."""
+    return getattr(conditional, "_sparse_posterior", None) is not None and conditional._covariance is None
+
+
+def _integrated_moments(conditionals, weights) -> dict:
+    """Mixture moments of the grid conditionals under the integration ``weights``."""
+    reference = conditionals[0]
+    is_laplace = isinstance(reference, LaplaceResult)
+    sparse = _all_sparse(reference)
+    mean_acc = np.zeros_like(reference.mean)
+    cov_acc = None if sparse else np.zeros_like(reference.covariance)
+    var_acc = np.zeros_like(reference.mean) if sparse else None
+    pm_acc = np.zeros_like(reference.predictive_mean)
+    pv_acc = np.zeros_like(reference.predictive_variance)
+    fitted_acc = np.zeros_like(reference.fitted_mean) if is_laplace else None
+    # E[sigma^2] over the grid, so an integrated Gaussian fit can still recover
+    # the response-scale variance as predictive_variance + observation_variance.
+    observation_acc = None if is_laplace else 0.0
+    for cond, w in zip(conditionals, weights, strict=True):
+        m = cond.mean
+        pm = cond.predictive_mean
+        mean_acc += w * m
+        if sparse:
+            var_acc += w * (_conditional_latent_variances(cond) + m * m)
+        else:
+            cov_acc += w * (cond.covariance + np.outer(m, m))
+        pm_acc += w * pm
+        pv_acc += w * (cond.predictive_variance + pm * pm)
+        if is_laplace:
+            fitted_acc += w * cond.fitted_mean
+        else:
+            observation_acc += w * float(cond.observation_variance)
+    return {
+        "mean": mean_acc,
+        "covariance": None if sparse else cov_acc - np.outer(mean_acc, mean_acc),
+        "latent_variance": var_acc - mean_acc * mean_acc if sparse else None,
+        "predictive_mean": pm_acc,
+        "predictive_variance": pv_acc - pm_acc * pm_acc,
+        "fitted_mean": fitted_acc,
+        "observation_variance": observation_acc,
+    }
+
+
+def _theta_moments(names, thetas, weights):
+    theta_mean = {name: float(sum(w * t[name] for t, w in zip(thetas, weights, strict=True)))
+                  for name in names}
+    theta_sq = {name: float(sum(w * t[name] * t[name] for t, w in zip(thetas, weights, strict=True)))
+                for name in names}
+    return theta_mean, theta_sq
+
+
 def _theta_marginals(names, grid, s_values, transforms, theta_mean, theta_sq, points=513):
     """Posterior marginals for the hyperparameters.
 
@@ -839,52 +891,12 @@ def _integrate_inla(
     is_laplace = isinstance(reference, LaplaceResult)
     link_name = reference.link_name if is_laplace else None
 
-    # All grid conditionals share the model shape, so they are all-sparse or
-    # all-dense together -- one flag governs the whole accumulation loop.
-    sparse_conditionals = (
-        getattr(reference, "_sparse_posterior", None) is not None
-        and reference._covariance is None
-    )
-
-    mean_acc = np.zeros_like(reference.mean)
-    cov_acc = None if sparse_conditionals else np.zeros_like(reference.covariance)
-    var_acc = np.zeros_like(reference.mean) if sparse_conditionals else None
-    pm_acc = np.zeros_like(reference.predictive_mean)
-    pv_acc = np.zeros_like(reference.predictive_variance)
-    fitted_acc = np.zeros_like(reference.fitted_mean) if is_laplace else None
-    # E[sigma^2] over the grid, so an integrated Gaussian fit can still recover
-    # the response-scale variance as predictive_variance + observation_variance.
-    observation_acc = None if is_laplace else 0.0
-    theta_mean = {name: 0.0 for name in names}
-    theta_sq = {name: 0.0 for name in names}
-
-    for (_, _, cond, theta, _), w in zip(kept, weights, strict=True):
-        m = cond.mean
-        pm = cond.predictive_mean
-        mean_acc += w * m
-        if sparse_conditionals:
-            var_acc += w * (_conditional_latent_variances(cond) + m * m)
-        else:
-            cov_acc += w * (cond.covariance + np.outer(m, m))
-        pm_acc += w * pm
-        pv_acc += w * (cond.predictive_variance + pm * pm)
-        if is_laplace:
-            fitted_acc += w * cond.fitted_mean
-        else:
-            observation_acc += w * float(cond.observation_variance)
-        for name in names:
-            theta_mean[name] += w * theta[name]
-            theta_sq[name] += w * theta[name] * theta[name]
-
-    mean = mean_acc
-    if sparse_conditionals:
-        covariance = None
-        latent_variance = var_acc - mean * mean
-    else:
-        covariance = cov_acc - np.outer(mean, mean)
-        latent_variance = None
-    predictive_mean = pm_acc
-    predictive_variance = pv_acc - pm_acc * pm_acc
+    sparse_conditionals = _all_sparse(reference)
+    moments = _integrated_moments([cond for (_, _, cond, _, _) in kept], weights)
+    mean, covariance, latent_variance = moments["mean"], moments["covariance"], moments["latent_variance"]
+    predictive_mean, predictive_variance = moments["predictive_mean"], moments["predictive_variance"]
+    fitted_acc, observation_acc = moments["fitted_mean"], moments["observation_variance"]
+    theta_mean, theta_sq = _theta_moments(names, [theta for (_, _, _, theta, _) in kept], weights)
 
     hyper_marginals = _theta_marginals(
         names, grid, s_values, transforms, theta_mean, theta_sq
@@ -966,6 +978,7 @@ def _integrate_inla(
         ]
         latent_marginal_table = _full_laplace_marginals(design_obs, offset_obs, y_obs, laplace_grid)
 
+    refit = partial(_refit_conditional, family, conditional_fit, allow_large_dense)
     return INLAResult(
         labels=reference.labels,
         mean=mean, covariance=covariance, log_marginal_likelihood=integrated_lml,
@@ -976,31 +989,26 @@ def _integrate_inla(
         observation_variance=observation_acc,
         block_slices=dict(reference.block_slices), diagnostics=diagnostics,
         latent_marginal_table=latent_marginal_table, latent_variances=latent_variance,
-        mixture=_sampling_mixture(kept, weights, family, conditional_fit, allow_large_dense),
+        grid=None if any(cond._sampler is None for (_, _, cond, _, _) in kept) else IntegrationGrid(
+            thetas=tuple(dict(theta) for (_, _, _, theta, _) in kept),
+            u=np.array([u for (u, _, _, _, _) in kept]),
+            s=np.array([s for (_, s, _, _, _) in kept]),
+            weights=weights,
+            conditionals=tuple(
+                partial(refit, dict(theta)) for (_, _, _, theta, _) in kept
+            ),
+            marginals=lambda grid, s_values, theta_mean, theta_sq: _theta_marginals(
+                names, grid, s_values, transforms, theta_mean, theta_sq
+            ),
+        ),
     )
 
 
-def _sampling_mixture(kept, weights, family, conditional_fit, allow_large_dense) -> tuple:
-    """``(weight, RefitSampler)`` per kept grid point, or ``()`` if any lacks a sampler.
-
-    Keeps each point's theta, not its fitted factor: the conditional is refitted
-    at ``sample()`` time, and only for points that receive draws.
-    """
-    if any(getattr(cond, "_sampler", None) is None for (_, _, cond, _, _) in kept):
-        return ()
-
-    def refit(theta):
-        compiled = family.materialize(theta)
-        conditional = (
-            conditional_fit(compiled, allow_large_dense=True)
-            if allow_large_dense else conditional_fit(compiled)
-        )
-        return conditional._sampler
-
-    return tuple(
-        (float(w), RefitSampler(partial(refit, dict(theta))))
-        for (_, _, _, theta, _), w in zip(kept, weights, strict=True)
-    )
+def _refit_conditional(family, conditional_fit, allow_large_dense, theta):
+    compiled = family.materialize(theta)
+    if allow_large_dense:
+        return conditional_fit(compiled, allow_large_dense=True)
+    return conditional_fit(compiled)
 
 
 @dataclass(frozen=True)

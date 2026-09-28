@@ -15,7 +15,7 @@ with no error and plausible-looking numbers:
    instead of its fitted marginal mean).
 
 Nothing in the compiler structurally cross-checks declared -> registered ->
-effective: ``_family_optimization_inputs`` builds ``initial`` from declared
+effective: ``model._optimization_inputs`` builds ``initial`` from declared
 Hyperparameters and ``bounds`` from ``family.parameter_bounds`` and never
 compares either against what the compiled design/precision actually do. This
 module is that missing cross-check, applied directly to ``compile_family``'s
