@@ -131,7 +131,7 @@ CONFOUNDED = {
 
 @pytest.mark.parametrize("name", sorted(CONFOUNDED))
 def test_confounded_intrinsic_effects_match_dense(name, monkeypatch):
-    """E-sparse-D2: the sparse path regularises with the confounded blocks' own
+    """E-sparse-D2: the sparse path regularises with the intrinsic blocks' own
     constraint rows (exact on the constraint set) and SMW-updates a grounded
     factor. It used to refuse these models -- and before that, silently return
     a mean violating the sum-to-zero rows."""
@@ -311,7 +311,7 @@ def test_warm_start_changes_iterations_not_the_answer(sparse, monkeypatch):
 def test_augmented_bym2_confounded_with_rw1_matches_dense(monkeypatch):
     """BYM2's augmented block pins its null vector g = (sqrt(phi) 1, 1) through a
     row on the u* half only, so its constraint row is not a null vector; the
-    detector must still see g confounded with the RW1 constant."""
+    regularisation must still ground g, the block's true null vector."""
     from pylgm import BYM2
 
     import pylgm.effects.bym2 as bym2

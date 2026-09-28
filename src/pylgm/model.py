@@ -130,7 +130,11 @@ def _fitted_context(context, model, estimates: Mapping[str, float], table: Mappi
         return float(estimates[spec]) if isinstance(spec, str) else value
 
     entries = []
-    for kind, payload in context.entries:
+    for entry in context.entries:
+        kind, payload = entry
+        if kind not in ("midas_parametric", "copied"):
+            entries.append(entry)
+            continue
         if kind == "midas_parametric":
             name, columns, kernel, theta_spec = payload
             payload = (name, columns, kernel, tuple(resolve(t, t) for t in theta_spec))
@@ -141,6 +145,8 @@ def _fitted_context(context, model, estimates: Mapping[str, float], table: Mappi
                 for index, labels, spec, value in copies
             ))
         entries.append((kind, payload))
+    if all(new is old for new, old in zip(entries, context.entries, strict=True)):
+        return context      # nothing theta-dependent: keep the entries object shared
     return replace(context, entries=tuple(entries))
 
 

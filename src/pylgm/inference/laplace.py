@@ -100,6 +100,21 @@ def _prediction_outputs(model: CompiledLGM, mean: np.ndarray, predictive_varianc
     )
 
 
+def _stalled(current: float, candidate: float, scale: float) -> bool:
+    """A Newton step the line search had to shorten and that still moved the
+    objective by no more than its round-off.
+
+    A full step near the mode is fine even when the objective cannot register
+    it (quadratic convergence keeps shrinking the gradient). A shortened one
+    that gains nothing is the stall: a gradient test on the data's scale can
+    stay just above its tolerance for every remaining iteration, each paying a
+    line search that halves to nothing. Two in a row end the loop (one can be a
+    rounding accident the next full step recovers from); the Newton-decrement
+    rescue after it is the right judge, and ``_polished`` fixes the mode.
+    """
+    return scale < 1.0 and current - candidate <= 4 * np.finfo(float).eps * max(abs(current), 1.0)
+
+
 def _polished(objective, point: np.ndarray, candidate: np.ndarray) -> np.ndarray:
     """``candidate`` (one more Newton step) unless it raises the objective past round-off.
 
@@ -168,7 +183,22 @@ def _fit_laplace_dense(
     basis = _constraint_null_space(structural_constraints, latent_size)
     identity = not structural_constraints.shape[0]
     reduced_dim = basis.shape[1]
-    reduced_design = np.asarray(design[observed] @ basis)
+    # The observed design stays sparse: eta = Z (B z), the gradient B^T (Z^T g) and
+    # the curvature B^T (Z^T W Z) B cost O(nnz(Z)) and O(p^2 d), where the dense
+    # reduced design Z B would cost O(n d) per objective and O(n d^2) per Hessian.
+    observed_design = design[observed]
+
+    def predictor(z):
+        return np.asarray(observed_design @ (z if identity else basis @ z)).reshape(-1) + offset_obs
+
+    def pulled_back(values):
+        pulled = np.asarray(observed_design.T @ values).reshape(-1)
+        return pulled if identity else basis.T @ pulled
+
+    def curvature(weights):
+        data = (observed_design.T @ observed_design.multiply(weights[:, None])).toarray()
+        return reduced_precision + (data if identity else basis.T @ data @ basis)
+
     reduced_precision = basis.T @ precision @ basis
     prior_factor, logdet_prior = _factor_positive_definite(
         reduced_precision, "reduced prior precision"
@@ -188,7 +218,7 @@ def _fit_laplace_dense(
             prior_mean = cho_solve(prior_factor, -prior_linear)
 
     def objective(z: np.ndarray) -> float:
-        eta = reduced_design @ z + offset_obs
+        eta = predictor(z)
         return (
             -lk_obs.log_likelihood(eta, y_obs)
             + 0.5 * float(z @ reduced_precision @ z)
@@ -206,16 +236,17 @@ def _fit_laplace_dense(
     converged = reduced_dim == 0
     if reduced_dim:
         current = objective(z)
+        stalls = 0
         for iterations in range(1, max_iterations + 1):
-            eta = reduced_design @ z + offset_obs
+            eta = predictor(z)
             grad_ll = lk_obs.gradient(eta, y_obs)
             weights = lk_obs.working_weights(eta, y_obs)
-            gradient = reduced_precision @ z + prior_linear - reduced_design.T @ grad_ll
+            gradient = reduced_precision @ z + prior_linear - pulled_back(grad_ll)
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
                 converged = True
                 break
-            hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
+            hessian = curvature(weights)
             factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
             step = cho_solve(factor, -gradient)
             slope = float(gradient @ step)
@@ -231,13 +262,16 @@ def _fit_laplace_dense(
                 scale *= 0.5
             else:
                 raise NumericalError("Laplace line search failed to reduce the objective")
+            stalls = stalls + 1 if _stalled(current, candidate_obj, scale) else 0
             z = candidate
             current = candidate_obj
+            if stalls == 2:
+                break
         if not converged:
-            eta = reduced_design @ z + offset_obs
+            eta = predictor(z)
             gradient = (
                 reduced_precision @ z + prior_linear
-                - reduced_design.T @ lk_obs.gradient(eta, y_obs)
+                - pulled_back(lk_obs.gradient(eta, y_obs))
             )
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
@@ -256,7 +290,7 @@ def _fit_laplace_dense(
                 # than the gradient test on well-scaled problems, relocating the
                 # mode; here, every fit that converges today is untouched.
                 weights = lk_obs.working_weights(eta, y_obs)
-                hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
+                hessian = curvature(weights)
                 factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
                 decrement = -0.5 * float(gradient @ cho_solve(factor, -gradient))
                 if decrement >= tolerance:
@@ -264,15 +298,15 @@ def _fit_laplace_dense(
                 converged = True
                 newton_decrement = decrement
         # Polish: one more Newton step from the accepted point (see _polished).
-        eta = reduced_design @ z + offset_obs
-        gradient = reduced_precision @ z + prior_linear - reduced_design.T @ lk_obs.gradient(eta, y_obs)
+        eta = predictor(z)
+        gradient = reduced_precision @ z + prior_linear - pulled_back(lk_obs.gradient(eta, y_obs))
         weights = lk_obs.working_weights(eta, y_obs)
-        hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
+        hessian = curvature(weights)
         polish_factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
         z = _polished(objective, z, z + cho_solve(polish_factor, -gradient))
-        eta = reduced_design @ z + offset_obs
+        eta = predictor(z)
         weights = lk_obs.working_weights(eta, y_obs)
-        hessian = reduced_precision + (reduced_design.T * weights) @ reduced_design
+        hessian = curvature(weights)
         factor, logdet_posterior = _factor_positive_definite(hessian, "reduced posterior precision")
         # Covariance = F F^T with F = basis L^-T; F doubles as the sampling factor.
         covariance_factor = solve_triangular(factor[0], basis.T, lower=True).T
@@ -290,7 +324,8 @@ def _fit_laplace_dense(
     z_mean = z
     if mean_correction and reduced_dim:
         z_mean = z + _variational_mean_shift(
-            reduced_design, cho_solve(factor, np.eye(reduced_dim)), factor, eta, y_obs, lk_obs
+            np.asarray(observed_design @ basis), cho_solve(factor, np.eye(reduced_dim)), factor,
+            eta, y_obs, lk_obs,
         )
 
     centered = z - prior_mean
@@ -437,11 +472,14 @@ def _fit_laplace_sparse(
         x = x - rows.T @ cho_solve(gram, rows @ x - rhs)
     newton_decrement = None
     iterations = 0
+    converged = False
+    stalls = 0
     current = objective(x)
     for iterations in range(1, max_iterations + 1):
         gradient = reduced_gradient(x)
         gradient_norm = float(np.max(np.abs(gradient)))
         if gradient_norm < tolerance:
+            converged = True
             break
         step = newton_step(x)
         slope = float(gradient @ step)
@@ -457,9 +495,12 @@ def _fit_laplace_sparse(
             scale *= 0.5
         else:
             raise NumericalError("Laplace line search failed to reduce the objective")
+        stalls = stalls + 1 if _stalled(current, candidate_obj, scale) else 0
         x = candidate
         current = candidate_obj
-    else:
+        if stalls == 2:
+            break
+    if not converged:
         gradient = reduced_gradient(x)
         gradient_norm = float(np.max(np.abs(gradient)))
         if gradient_norm >= tolerance:

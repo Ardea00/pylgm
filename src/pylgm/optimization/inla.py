@@ -25,6 +25,7 @@ from pylgm.inference.result import (
     quadratic_form_diagonal,
 )
 from pylgm.inference.update import IntegrationGrid
+from pylgm.ir.model import _freeze_csr
 from pylgm.optimization.empirical_bayes import optimize_empirical_bayes
 from pylgm.parallel import blas_limit, map_ordered, validate_blas_threads, validate_workers
 
@@ -1076,10 +1077,22 @@ def _row_scaled(compiled, observed):
     return _RowGaussian(sd)
 
 
+def _row_logsumexp(values: np.ndarray, top: np.ndarray | None = None) -> np.ndarray:
+    """``log sum_j exp(values_ij)`` per row; ``top`` is the row max if known.
+
+    SciPy's ``logsumexp`` re-validates and wraps its input on every call, which
+    costs more than the arithmetic here (one call per grid point and row block).
+    """
+    top = values.max(axis=1) if top is None else top
+    finite = np.where(np.isfinite(top), top, 0.0)
+    with np.errstate(divide="ignore"):
+        return np.log(np.exp(values - finite[:, None]).sum(axis=1)) + finite
+
+
 def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshold=0.5):
     # Kept sparse: both the dense (quadratic_form_diagonal) and the sparse
     # (selected-inverse) variance paths take a CSR design, and densifying is n x p.
-    dense = csr_matrix(design, dtype=float)
+    dense = _freeze_csr(csr_matrix(design, dtype=float))   # ours: its row pairs cache
     offset = np.asarray(offset, dtype=float)
     y = np.asarray(y, dtype=float)
     nodes, gh = hermgauss(n_nodes)
@@ -1094,9 +1107,12 @@ def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshol
     # 1/p can be enormous in the tails (a diffuse latent posterior combined with a
     # tight likelihood), so accumulate the reciprocal terms in log space instead of
     # exponentiating -logp directly: exp(-logp) overflows float64 long before the
-    # harmonic-mean estimator itself becomes numerically meaningless.
-    log_inv_terms = []        # per grid point: log(weight) + log(gh_j) - logp_ij
-    log_cdf_inv_terms = []    # ... + log(cdf_ij)
+    # harmonic-mean estimator itself becomes numerically meaningless. Each grid
+    # point's terms, log(weight) + log(gh_j) - logp_ij (and + log(cdf_ij)), are
+    # folded in as they come: keeping them all is n x (nodes * points) floats.
+    log_einv = np.full(n, -np.inf)
+    log_ecdf_over_p = np.full(n, -np.inf)
+    max_log_contrib = np.full(n, -np.inf)
     points = list(grid)
 
     for weight, fit, likelihood in points:
@@ -1112,10 +1128,12 @@ def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshol
         elog2 += weight * (gh * logp ** 2).sum(axis=1)
 
         base = np.log(weight) + log_gh[None, :] - logp   # (n, n_nodes)
-        log_inv_terms.append(base)
         with np.errstate(divide="ignore"):
             log_cdf = np.log(cdf)   # -inf where cdf == 0; contributes 0 after exp
-        log_cdf_inv_terms.append(base + log_cdf)
+        top = base.max(axis=1)
+        log_einv = np.logaddexp(log_einv, _row_logsumexp(base, top))
+        log_ecdf_over_p = np.logaddexp(log_ecdf_over_p, _row_logsumexp(base + log_cdf))
+        max_log_contrib = np.maximum(max_log_contrib, top)
 
     lppd = np.log(pd_sum)
     var_logp = np.clip(elog2 - elog ** 2, 0.0, None)
@@ -1130,16 +1148,10 @@ def _model_criteria(design, offset, y, grid, *, n_nodes=21, cpo_failure_threshol
     p_d = d_bar - d_mean
     dic = d_bar + p_d
 
-    all_inv = np.concatenate(log_inv_terms, axis=1)          # (n, n_nodes * n_grid_points)
-    all_cdf_inv = np.concatenate(log_cdf_inv_terms, axis=1)
-    log_einv = logsumexp(all_inv, axis=1)
-    log_ecdf_over_p = logsumexp(all_cdf_inv, axis=1)
-
     # Reliability of the harmonic-mean CPO estimator: flag observation i when the
     # single largest (grid point, quadrature node) contribution to E[1/p_i] exceeds
     # cpo_failure_threshold times the total E[1/p_i] (all in log space to avoid
     # overflow from exp(-logp)).
-    max_log_contrib = all_inv.max(axis=1)
     cpo_failure_mask = max_log_contrib > (np.log(cpo_failure_threshold) + log_einv)
 
     cpo = np.exp(-log_einv)

@@ -201,8 +201,15 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     observed_design = design[observed]
     # With no structural rows the basis is the identity: skip the O(p^3) products.
     identity = not constraints.shape[0]
-    reduced_design = np.asarray(observed_design.toarray() if identity else observed_design @ basis)
     reduced_precision = precision if identity else basis.T @ precision @ basis
+
+    # The observed design stays sparse: Z^T Z costs O(nnz(Z) * row width) and
+    # B^T (Z^T Z) B O(p^2 d), where the dense reduced design Z B costs O(n d^2).
+    def pulled_back(values):
+        pulled = np.asarray(observed_design.T @ values).reshape(-1)
+        return pulled if identity else basis.T @ pulled
+
+    gram = (observed_design.T @ observed_design).toarray()
     residual = y[observed] - offset[observed]
     # Nonzero-rhs constraint: x = x_p + basis @ z shifts the likelihood residual
     # by design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p),
@@ -212,7 +219,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     if x_p is not None:
         residual = residual - np.asarray(observed_design @ x_p).reshape(-1)
         prior_linear = basis.T @ (precision @ x_p)
-    posterior_precision = reduced_precision + reduced_design.T @ reduced_design / variance
+    posterior_precision = reduced_precision + (gram if identity else basis.T @ gram @ basis) / variance
 
     prior_factor, logdet_prior = _factor_positive_definite(
         reduced_precision, "reduced prior precision"
@@ -222,7 +229,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     )
 
     if basis.shape[1]:
-        score = np.asarray(reduced_design.T @ residual / variance).reshape(-1) - prior_linear
+        score = pulled_back(residual) / variance - prior_linear
         assert factor is not None
         reduced_mean = cho_solve(factor, score)
         if x_p is not None:
@@ -231,7 +238,9 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     else:
         reduced_mean = np.empty(0)
 
-    posterior_residual = residual - reduced_design @ reduced_mean
+    posterior_residual = residual - np.asarray(
+        observed_design @ (reduced_mean if identity else basis @ reduced_mean)
+    ).reshape(-1)
     centered = reduced_mean - prior_mean
     quadratic = float(
         posterior_residual @ posterior_residual / variance

@@ -1,10 +1,11 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
-from functools import cached_property
+import weakref
+from dataclasses import dataclass, field
+from functools import cached_property, partial
 
 import numpy as np
 from scipy.linalg import cho_solve, null_space, qr, solve_triangular
-from scipy.sparse import coo_matrix, csr_matrix, tril
+from scipy.sparse import coo_matrix, csr_matrix, tril, vstack
 from scipy.sparse.linalg import spsolve_triangular, splu
 
 from pylgm.exceptions import NumericalError
@@ -172,6 +173,9 @@ class SparsePosterior:
     cap_factor: object | None          # cho_factor of A_c Sigma A_c^T
     constraint_rows: "np.ndarray | None" = None  # A_c (c x latent), for sampling
     structural_count: "int | None" = None  # leading rows of A_c that are structural
+    # refactor(rows): this posterior with unit-weight ``rows`` added to H, factored
+    # afresh -- how a long chain of updates is collapsed (inference/update.py).
+    refactor: object = field(default=None, repr=False, compare=False)
 
     def sample_deviations(self, n: int, rng: np.random.Generator) -> np.ndarray:
         """``n`` draws of ``x - mean`` from the constrained posterior, ``(n, latent)``.
@@ -694,6 +698,13 @@ def selected_inverse(matrix) -> csr_matrix:
     ).tocsr()
 
 
+# Row pairs depend on the sparsity pattern alone (indptr), and a model's frozen
+# design keeps one indptr across accesses and INLA grid points, so the pairs of a
+# prediction grid are enumerated once. ponytail: keyed on the (read-only) indptr
+# array's identity; a caller mutating an indptr in place would need to evict.
+_ROW_PAIRS: dict = {}   # id(indptr) -> (weakref to indptr, {max_row_nnz: pairs})
+
+
 def _row_pairs(a: csr_matrix, max_row_nnz: int):
     """Every ordered pair of nonzeros sharing a row of ``a``, as data positions.
 
@@ -701,6 +712,10 @@ def _row_pairs(a: csr_matrix, max_row_nnz: int):
     ``max_row_nnz`` nonzeros are skipped (``small`` False) rather than
     enumerating their ``nnz^2`` pairs.
     """
+    key = id(a.indptr)
+    cached = _ROW_PAIRS.get(key)
+    if cached is not None and cached[0]() is a.indptr and max_row_nnz in cached[1]:
+        return cached[1][max_row_nnz]
     counts = np.diff(a.indptr)
     small = counts <= max_row_nnz
     row_of = np.repeat(np.arange(a.shape[0]), counts)
@@ -709,18 +724,29 @@ def _row_pairs(a: csr_matrix, max_row_nnz: int):
     first = np.repeat(entry, reps)
     offset = np.arange(first.size) - np.repeat(np.cumsum(reps) - reps, reps)
     second = np.repeat(a.indptr[row_of[entry]], reps) + offset
-    return first, second, row_of[first], small
+    pairs = first, second, row_of[first], small
+    if not a.indptr.flags.writeable:
+        if cached is None or cached[0]() is not a.indptr:
+            cached = _ROW_PAIRS[key] = (weakref.ref(a.indptr), {})
+            weakref.finalize(a.indptr, _ROW_PAIRS.pop, key, None)
+        cached[1][max_row_nnz] = pairs
+    return pairs
 
 
 def sparse_row_quadratic(a, dense: np.ndarray, max_row_nnz: int = 64) -> np.ndarray:
     """``diag(a M aᵀ)`` for sparse ``a`` and dense symmetric ``M``, never forming ``a M``."""
-    a = csr_matrix(a, dtype=float)
+    if not (isinstance(a, csr_matrix) and a.dtype == np.float64):
+        a = csr_matrix(a, dtype=float)
     first, second, pair_row, small = _row_pairs(a, max_row_nnz)
-    value = np.bincount(
-        pair_row,
-        a.data[first] * a.data[second] * dense[a.indices[first], a.indices[second]],
-        minlength=a.shape[0],
-    )
+    # a_ij a_ik and the flat position of M_jk per pair: fixed by a, so a frozen
+    # a (a model's design) computes them once, alongside its pairs.
+    terms = _ROW_PAIRS.get(id(a.indptr), (None, {}))[1].get(("terms", max_row_nnz))
+    if terms is None or terms[0] is not a.data:
+        terms = (a.data, a.indices[first] * dense.shape[1] + a.indices[second],
+                 a.data[first] * a.data[second])
+        if not a.data.flags.writeable and id(a.indptr) in _ROW_PAIRS:
+            _ROW_PAIRS[id(a.indptr)][1][("terms", max_row_nnz)] = terms
+    value = np.bincount(pair_row, terms[2] * dense.ravel()[terms[1]], minlength=a.shape[0])
     if not small.all():
         wide = a[~small]
         value[~small] = np.asarray(wide.multiply(wide @ dense).sum(axis=1)).ravel()
@@ -828,24 +854,24 @@ def _block_null_basis(block) -> np.ndarray | None:
     return basis if np.abs(q @ basis).max() <= tolerance * max(1.0, np.abs(basis).max()) else None
 
 
-def _confounded_null_space(model: CompiledLGM, sparse_index, z_s, weights):
-    """``(N, rows)``: the null space of ``A_ss = Q_ss + Z_s^T W Z_s``, or ``(None, None)``.
+def _intrinsic_null_space(model: CompiledLGM, sparse_index):
+    """``(N, rows)``: the intrinsic blocks' prior null spaces, or ``(None, None)``.
 
     A block whose constraint rows span its prior null space (Besag, RW1/RW2,
-    SpaceTime, Grouped, Replicated) leaves ``A_ss`` singular exactly along the
-    combinations ``v = V a`` of those null vectors the data cannot see,
-    ``W^1/2 Z_s V a = 0`` -- two intrinsic effects with confounded constants
-    (Besag + RW1). ``N`` (n_s x k, sparse coordinates) is a basis of them and
-    ``rows`` (r x latent) the constraint rows of the blocks involved, which
-    ``_sparse_solve`` uses to regularise exactly (see there). Each block's null
-    basis comes from ``_block_null_basis``; one it cannot compute is left to the
-    post-kriging backstop.
+    SpaceTime, Grouped, Replicated) is improper along those null vectors, and
+    only the data -- or a vague fixed effect, or nothing at all when two such
+    blocks share a constant -- pins them, so ``H = Q + Z^T W Z`` is singular or
+    badly conditioned there. ``N`` (n_s x k, sparse coordinates) collects every
+    such block's null basis, and ``rows`` (r x latent) their constraint rows,
+    which ``_sparse_solve`` uses to regularise exactly (see there). Each block's
+    null basis comes from ``_block_null_basis``; one it cannot compute is left
+    to the post-kriging backstop.
     """
     latent_size = model.precision.shape[0]
     position = np.full(latent_size, -1)
     position[sparse_index] = np.arange(sparse_index.size)
-    columns, owners, lifted, start = [], [], {}, 0
-    for block_number, block in enumerate(model.blocks):
+    columns, lifted, start = [], [], 0
+    for block in model.blocks:
         width = block.design.shape[1]
         rows = np.asarray(block.constraints, dtype=float)
         span = position[start:start + width]
@@ -857,25 +883,18 @@ def _confounded_null_space(model: CompiledLGM, sparse_index, z_s, weights):
             continue
         null = np.zeros((sparse_index.size, block_null.shape[1]))
         null[span] = block_null
-        lifted[block_number] = np.zeros((rows.shape[0], latent_size))
-        lifted[block_number][:, start - width:start] = rows
+        rows_lifted = np.zeros((rows.shape[0], latent_size))
+        rows_lifted[:, start - width:start] = rows
         columns.append(null)
-        owners.extend([block_number] * block_null.shape[1])
-    if len(columns) < 2:
+        lifted.append(rows_lifted)
+    if not columns:
         return None, None
-    v = np.hstack(columns)
-    seen = np.asarray(z_s @ v) * np.sqrt(np.clip(weights, 0.0, None))[:, None]
-    _, singular, right = np.linalg.svd(seen, full_matrices=False)
-    invisible = singular <= 1e-9 * max(singular.max(initial=0.0), 1.0)
-    if not invisible.any():
-        return None, None
-    coefficients = right[invisible].T                                 # c x k
-    involved = sorted({owners[i] for i in np.flatnonzero(np.abs(coefficients).max(axis=1) > 1e-12)})
-    return v @ coefficients, np.vstack([lifted[block] for block in involved])
+    return np.hstack(columns), np.vstack(lifted)
 
 
 def _sparse_solve(
-    model: CompiledLGM, weights: np.ndarray, score: np.ndarray, *, final: bool = True
+    model: CompiledLGM, weights: np.ndarray, score: np.ndarray, *, final: bool = True,
+    observed_design: "csr_matrix | None" = None,
 ) -> _SparseSolve:
     """Partitioned Schur solve of ``H = Q + Z^T W Z`` (``Z`` the observed design,
     ``W = diag(weights)``) against a full-length ``score``.
@@ -889,7 +908,8 @@ def _sparse_solve(
 
     ``final=False`` skips the terms that do not depend on the weights or score
     (``logdet_prior``, ``nu``: NaN / zero), for Newton steps that only need
-    ``structural_mean``.
+    ``structural_mean``. ``observed_design`` replaces the model's observed rows
+    (``weights`` then follows it) -- ``_refactored`` appends updated rows so.
 
     ponytail: assumes ``Q_sd == 0`` (block-diagonal prior + block-granular
     partition), so ``B = Z_s^T W Z_d``. True for every LGM this path handles;
@@ -897,20 +917,22 @@ def _sparse_solve(
     """
     sparse_index, dense_index = _partition_blocks(model)
     latent_size = model.precision.shape[0]
-    observed_design = model.design[model.observed]
+    if observed_design is None:
+        observed_design = model.design[model.observed]
     q = model.precision
     weights = np.asarray(weights, dtype=float)
 
-    # Confounded intrinsic blocks leave A_ss singular before the constraints
-    # (E-sparse-D2). Regularise with R = U U^T, U^T the involved blocks' own
-    # constraint rows: on {C x = e}, x^T R x is constant, so the constrained
-    # posterior and the reduced logdet are unchanged while H + R is SPD. R is
-    # dense on the field, so ground it: move one anchor node per null direction
-    # (pivoted QR on the null basis) to the dense block -- making the remaining
-    # A_s'.s' SPD and sparse -- and carry U's sparse part by Woodbury.
+    # Intrinsic blocks leave H singular (two sharing a constant: E-sparse-D2) or
+    # badly conditioned (one against a vague intercept: cond ~1e13, costing the
+    # variances ~1e-4) along their prior null spaces. Regularise with R = U U^T,
+    # U^T those blocks' own constraint rows: on {C x = e}, x^T R x is constant,
+    # so the constrained posterior and the reduced logdet are unchanged while
+    # H + R is SPD and well conditioned. R is dense on the field, so ground it:
+    # move one anchor node per null direction (pivoted QR on the null basis) to
+    # the dense block -- making the remaining A_s'.s' SPD and sparse -- and carry
+    # U's sparse part by Woodbury.
     null, u_rows = (
-        _confounded_null_space(model, sparse_index, observed_design[:, sparse_index], weights)
-        if sparse_index.size else (None, None)
+        _intrinsic_null_space(model, sparse_index) if sparse_index.size else (None, None)
     )
     if null is not None:
         _, _, pivots = qr(null.T, pivoting=True, mode="economic")
@@ -1083,12 +1105,22 @@ def _sparse_solve(
         cap_factor=cap_factor_ref,
         constraint_rows=a if constraint_count else None,
         structural_count=structural_count,
+        refactor=partial(_refactored, model, observed_design, weights),
     )
     return _SparseSolve(
         posterior=posterior, unconstrained=unconstrained, structural_mean=structural_mean,
         mean=mean, logdet_posterior=logdet_posterior, logdet_prior=logdet_prior, nu=nu,
         data_log_density=data_log_density, sparse_dimension=int(n_s), dense_dimension=int(m),
     )
+
+
+def _refactored(model, observed_design, weights, rows: np.ndarray) -> SparsePosterior:
+    """The posterior whose ``H`` gains the unit-weight ``rows``, factored afresh."""
+    return _sparse_solve(
+        model, np.concatenate([weights, np.ones(rows.shape[0])]),
+        np.zeros(model.precision.shape[0]), final=False,
+        observed_design=vstack([observed_design, csr_matrix(rows)], format="csr"),
+    ).posterior
 
 
 def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:

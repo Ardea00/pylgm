@@ -163,7 +163,10 @@ def test_laplace_log_link_families_intercept_matches_log_mean(family_name):
     model = LGM("y", family, Fixed("1", prior_precision=1e-8), time="t")
     result = fit_laplace(compile_lgm(model, _panel(frame)))
     np.testing.assert_allclose(result.mean, [np.log(4.0)], atol=1e-6)
-    assert result.diagnostics["final_gradient_norm"] < 1e-8
+    # Converged by the gradient test, or -- when rounding stalls the line search
+    # just above it -- by a Newton decrement at round-off.
+    decrement = result.diagnostics["newton_decrement"]
+    assert result.diagnostics["final_gradient_norm"] < 1e-8 or decrement < 1e-15
 
 
 def test_laplace_beta_intercept_matches_logit_link_mode():

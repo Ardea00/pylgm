@@ -20,6 +20,11 @@ def _readonly_csr_matrix(value: csr_matrix) -> csr_matrix:
     return _freeze_csr(value.copy())
 
 
+def _shared_csr(value: csr_matrix) -> csr_matrix:
+    """A new CSR object over ``value``'s frozen arrays: O(1), and read-only still."""
+    return csr_matrix((value.data, value.indices, value.indptr), shape=value.shape, copy=False)
+
+
 def _array(value: object, name: str) -> np.ndarray:
     try:
         return np.asarray(value)
@@ -124,11 +129,11 @@ class LatentBlock:
 
     @property
     def design(self) -> csr_matrix:
-        return _readonly_csr_matrix(self._design)
+        return _shared_csr(self._design)
 
     @property
     def precision(self) -> csr_matrix:
-        return _readonly_csr_matrix(self._precision)
+        return _shared_csr(self._precision)
 
     @property
     def constraints(self) -> np.ndarray:
@@ -358,11 +363,11 @@ class CompiledLGM:
 
     @property
     def design(self) -> csr_matrix:
-        return _readonly_csr_matrix(self._design)
+        return _shared_csr(self._design)
 
     @property
     def precision(self) -> csr_matrix:
-        return _readonly_csr_matrix(self._precision)
+        return _shared_csr(self._precision)
 
     @property
     def constraints(self) -> np.ndarray:
@@ -387,7 +392,7 @@ class CompiledLGM:
     @property
     def prediction_design(self) -> csr_matrix:
         """Design used for returned predictions; normally identical to ``design``."""
-        return _readonly_csr_matrix(self._prediction_design)
+        return _shared_csr(self._prediction_design)
 
     @property
     def prediction_offset(self) -> np.ndarray:

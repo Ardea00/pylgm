@@ -686,3 +686,33 @@ def test_prior_logdet_full_rank_block_matches_dense_reference():
     q_intrinsic = csr_matrix(rw1_ring(n_intrinsic, 0.0))
     rows_intrinsic = np.ones((1, n_intrinsic))
     assert _full_rank_reduced_logdet(rows_intrinsic, q_intrinsic, "intrinsic") is None
+
+
+def test_intrinsic_field_against_a_vague_intercept_keeps_sparse_variances_exact(monkeypatch):
+    """An RW1 whose constant only a vague intercept pins leaves H with cond ~1e13;
+    the sparse path used to solve it as is and lose ~1e-4 on the variances (then
+    amplified by update() cancellations). Regularising every intrinsic block by
+    its constraint rows -- exact on the constraint set -- keeps them to ~1e-7."""
+    import pandas as pd
+
+    import pylgm.inference.gaussian as gaussian_engine
+    from pylgm import IID, LGM, RW1, Fixed, Gaussian
+
+    rng = np.random.default_rng(0)
+    regions, periods = 200, 60
+    frame = pd.DataFrame([(f"r{r}", t) for r in range(regions) for t in range(periods)],
+                         columns=["region", "t"])
+    frame["y"] = (np.cumsum(rng.normal(scale=0.2, size=periods))[frame["t"]]
+                  + rng.normal(size=regions)[frame["region"].str[1:].astype(int)]
+                  + rng.normal(scale=0.5, size=len(frame)))
+    frame.loc[frame["t"] >= 40, "y"] = np.nan                    # an unobserved tail
+    model = LGM(response="y", likelihood=Gaussian(0.5),
+                predictor=Fixed("1") + RW1("trend", index="t", precision=20.0)
+                + IID("level", index="region", precision=1.0))
+    dense = model.fit(frame)
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    sparse = model.fit(frame)
+    assert sparse._sparse_posterior is not None
+    np.testing.assert_allclose(
+        sparse.latent_marginals().variance, np.diag(dense.covariance), rtol=1e-6
+    )

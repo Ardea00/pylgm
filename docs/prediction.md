@@ -254,10 +254,15 @@ are fine.
 Limits: an empirical-Bayes result keeps its hyperparameters fixed (fit with
 `"integrate"` to have them move); every latent level the new rows touch must
 already be on the grid (a new level raises, as in `predict()`); rows with a NaN
-response are skipped. On a dense fit
-the accumulated low-rank terms collapse into one factor once they hold more
-rows than latents. On a sparse fit they grow by `k` columns per update, so
-refit after many large updates.
+response are skipped.
+
+Each update adds a rank-`k` term to the covariance rather than refactorising,
+and the terms are compacted as they accumulate. On a dense fit they collapse
+into one factor once they hold more rows than there are latents. On a sparse
+fit, past 500 accumulated rows, \(H + \sum A^\top W A\) is factored afresh with
+the fit's own sparse solver: the same posterior, with no chain behind it. A
+long stream of small releases therefore costs a refactorisation every few
+hundred rows instead of a growing chain.
 
 ### News decomposition
 

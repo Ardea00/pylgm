@@ -32,15 +32,10 @@ from dataclasses import dataclass
 import warnings
 
 import numpy as np
-from scipy.linalg import cho_factor, cho_solve
+from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.special import logsumexp
 
 from pylgm.exceptions import InferenceConvergenceError, NumericalError, UnsupportedEngineError
-
-
-def _quadratic_diagonal(left: np.ndarray, s_factor) -> np.ndarray:
-    """diag(left S^-1 left^T)."""
-    return np.einsum("ij,ji->i", left, cho_solve(s_factor, left.T))
 
 
 @dataclass(frozen=True)
@@ -55,49 +50,56 @@ class _DenseFactor:
 
 @dataclass(frozen=True)
 class UpdatedPosterior:
-    """``Sigma' = Sigma_base - V S^-1 V^T`` with ``V = Sigma_base A^T``.
+    """``Sigma' = Sigma_base - H H^T``, ``H = V L^-T``: ``V = Sigma_base A^T`` and
+    ``B = L L^T`` for the (whitened) rows ``A``.
 
     Duck-types ``SparsePosterior`` (variances, sampling, covariance products),
     so it can serve as the base of a further update.
     """
 
     base: object
-    v: np.ndarray
-    design: np.ndarray
-    s_factor: tuple
+    half: np.ndarray      # H, latent x k
+    design: np.ndarray    # A, k x latent
+    lower: np.ndarray     # L, k x k
 
     def covariance_apply(self, rhs: np.ndarray) -> np.ndarray:
         rhs = np.asarray(rhs, dtype=float)
-        return self.base.covariance_apply(rhs) - self.v @ cho_solve(self.s_factor, self.v.T @ rhs)
+        return self.base.covariance_apply(rhs) - self.half @ (self.half.T @ rhs)
 
     def marginal_variances(self) -> np.ndarray:
         base = self.base.marginal_variances()
-        return np.clip(base - _quadratic_diagonal(self.v, self.s_factor), 0.0, None)
+        return np.clip(base - np.einsum("ij,ij->i", self.half, self.half), 0.0, None)
 
     def predictive_variances(self, design) -> np.ndarray:
         dense = design.toarray() if hasattr(design, "toarray") else np.asarray(design, float)
+        projected = dense @ self.half
         base = self.base.predictive_variances(dense)
-        return np.clip(base - _quadratic_diagonal(dense @ self.v, self.s_factor), 0.0, None)
+        return np.clip(base - np.einsum("ij,ij->i", projected, projected), 0.0, None)
 
     def linear_combination_variances(self, weights) -> np.ndarray:
         return self.predictive_variances(weights)
 
     def sample_deviations(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        # Matheron: x' = x - Sigma A^T S^-1 (A x + e) is exactly N(0, Sigma'); the
-        # rows are whitened by W^1/2, so e has unit variance.
+        # Matheron: x' = x - V B^-1 (A x + e) = x - H L^-1 (A x + e) is exactly
+        # N(0, Sigma'); the rows are whitened by W^1/2, so e has unit variance.
         base = self.base.sample_deviations(n, rng)
-        noise = rng.standard_normal((n, self.design.shape[0]))
-        residual = base @ self.design.T + noise
-        return base - cho_solve(self.s_factor, residual.T).T @ self.v.T
+        residual = base @ self.design.T + rng.standard_normal((n, self.design.shape[0]))
+        return base - solve_triangular(self.lower, residual.T, lower=True).T @ self.half.T
 
 
-def _chain_rank(posterior) -> int:
-    """Rows accumulated in a chain of ``UpdatedPosterior`` terms."""
-    rank = 0
+def _chain(posterior):
+    """``(base, rows)``: the factored posterior under a chain of updates, and the
+    chain's whitened rows (each unit-weight), oldest first."""
+    rows = []
     while isinstance(posterior, UpdatedPosterior):
-        rank += posterior.v.shape[1]
+        rows.append(posterior.design)
         posterior = posterior.base
-    return rank
+    return posterior, rows[::-1]
+
+
+# Rows a sparse chain may hold before it is refactored: past this, every
+# covariance product pays more for the low-rank terms than a fresh factor costs.
+_SPARSE_CHAIN_ROWS = 500
 
 
 def _psd_factor(covariance: np.ndarray) -> np.ndarray:
@@ -186,7 +188,19 @@ class _Rows:
     likelihood: object    # scoring them, bound to their own trials
 
 
-def _observed_rows(result, frame, caller="update"):
+def _cached_design(context, frame, key, memo, build):
+    """``build()``, memoised in ``memo`` (one integrated call's dict) by the
+    context's entries and the frame: every grid point shares them unless a
+    hyperparameter shapes the design (a copy scale, a MIDAS shape)."""
+    if memo is None:
+        return build()
+    key = (id(context.entries), id(context.column_slices), id(frame), key)
+    if key not in memo:
+        memo[key] = build()
+    return memo[key]
+
+
+def _observed_rows(result, frame, caller="update", memo=None):
     """``frame``'s rows with an observed response, or ``None`` if there are none."""
     import pandas as pd
 
@@ -228,7 +242,8 @@ def _observed_rows(result, frame, caller="update"):
         likelihood.validate_response(y[observed])
         labels.append([(c.response, label) for label in rows.index] if joint else list(rows.index))
         ys.append(y[observed])
-        designs.append(_design_for(c, rows))
+        designs.append(_cached_design(c, frame, c.response, memo,
+                                      lambda c=c, rows=rows: _design_for(c, rows)))
         offsets.append(_offset_for(c, rows))
         parts.append((slice(start, start + len(rows)), likelihood))
         start += len(rows)
@@ -268,20 +283,23 @@ class _Conditioning:
     v: np.ndarray         # Sigma A^T
     a: np.ndarray
     root: np.ndarray      # W^1/2
-    s_factor: tuple       # cho(B)
+    lower: np.ndarray     # L, B = L L^T
+    half: np.ndarray      # H = V W^1/2 L^-T: Sigma' = Sigma - H H^T
     log_evidence: float
 
 
-def _condition(result, new_data, caller="update"):
+def _condition(result, new_data, caller="update", memo=None):
     """``_Conditioning`` for ``new_data``'s observed rows, or ``None`` if there are none."""
-    rows = _observed_rows(result, new_data, caller)
+    rows = _observed_rows(result, new_data, caller, memo)
     if rows is None:
         return None
     v = _covariance_apply(result, rows.design.T)
     m = rows.offset + rows.design @ result.mean
     s0 = rows.design @ v
     a, root, s_factor, log_evidence = _rows_mode(m, s0, rows.y, rows.likelihood)
-    return _Conditioning(rows, m, s0, v, a, root, s_factor, log_evidence)
+    lower = np.tril(s_factor[0])
+    half = solve_triangular(lower, (v * root).T, lower=True).T
+    return _Conditioning(rows, m, s0, v, a, root, lower, half, log_evidence)
 
 
 def _covariance_apply(result, rhs):
@@ -300,7 +318,7 @@ class _Revision:
     log_evidence: float   # change in the log marginal likelihood
 
 
-def _revision(result, revisions, caller):
+def _revision(result, revisions, caller, memo=None):
     """``_Revision`` for ``revisions = (previous_rows, revised_rows)``, or ``None``.
 
     Revising Gaussian rows moves the mean linearly and leaves the covariance
@@ -319,8 +337,8 @@ def _revision(result, revisions, caller):
         before, after = revisions
     except (TypeError, ValueError) as error:
         raise TypeError(f"{caller}() revisions must be a (previous, revised) pair of frames") from error
-    previous = _observed_rows(result, before, caller)
-    revised = _observed_rows(result, after, caller)
+    previous = _observed_rows(result, before, caller, memo)
+    revised = _observed_rows(result, after, caller, memo)
     if previous is None or revised is None or not previous.labels.equals(revised.labels):
         raise ValueError(
             f"{caller}() revisions must give the same observed rows before and after"
@@ -362,25 +380,25 @@ def update(result, new_data, revisions=None):
     return _step(result, new_data, revisions, "update")[0]
 
 
-def _step(result, new_data, revisions, caller):
+def _step(result, new_data, revisions, caller, memo=None):
     """``(updated, revision, conditioning)`` at fixed hyperparameters."""
-    revision = _revision(result, revisions, caller)
+    revision = _revision(result, revisions, caller, memo)
     if revision is not None:
         result = _assembled(result, revision.latent.sum(axis=1), revision.log_evidence, 0)
-    c = None if new_data is None else _condition(result, new_data, caller)
+    c = None if new_data is None else _condition(result, new_data, caller, memo)
     if c is not None:
         # Whitening the rows by W^1/2 turns S into B with unit noise.
         result = _assembled(
             result, c.v @ c.a, c.log_evidence, c.rows.y.size,
-            low_rank=(c.v * c.root, c.rows.design * c.root[:, None], c.s_factor),
+            low_rank=(c.half, c.rows.design * c.root[:, None], c.lower),
         )
     return result, revision, c
 
 
 def _assembled(result, shift, log_evidence, added_rows, low_rank=None):
-    """``result`` with its mean moved by ``shift`` and, given ``low_rank = (V, A, cho(S))``,
-    ``V S^-1 V^T`` taken off its covariance (``UpdatedPosterior``)."""
-    from pylgm.inference.result import GaussianResult, LaplaceResult, quadratic_form_diagonal
+    """``result`` with its mean moved by ``shift`` and, given ``low_rank = (H, A, L)``,
+    ``H H^T`` taken off its covariance (``UpdatedPosterior``)."""
+    from pylgm.inference.result import GaussianResult, LaplaceResult
     from pylgm.inference.sampling import GridSampler
 
     context = result.prediction_context
@@ -390,36 +408,39 @@ def _assembled(result, shift, log_evidence, added_rows, low_rank=None):
     predictive_variance = result._predictive_variance
     posterior = result._sparse_posterior
     factor = sampler.factor
-    # The fitted grid: canonical rows of the sampler's design, in caller order.
-    grid = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
+
+    def on_grid(x):
+        """The fitted grid's rows times ``x``, in caller order (the design is canonical)."""
+        out = np.asarray(sampler.design @ x)
+        return out if sampler.row_order is None else out[sampler.row_order]
+
     if low_rank is not None:
-        v, design, s_factor = low_rank
+        half, design, lower = low_rank
         posterior = UpdatedPosterior(
             base=_DenseFactor(factor) if factor is not None else sampler.posterior,
-            v=v, design=design, s_factor=s_factor,
+            half=half, design=design, lower=lower,
         )
         factor = None
-        # diag(G S^-1 G^T), G = P V: through the p x p Delta = V S^-1 V^T when that
-        # is cheaper (O(p^2 k + nnz(P) p)) than the n x k route (O(n k^2)); the
-        # dense path needs Delta for the covariance anyway.
-        (p, k), n = v.shape, grid.shape[0]
-        via_delta = dense or p * p * k + grid.nnz * p < n * k * k
-        delta = v @ cho_solve(s_factor, v.T) if via_delta else None
+        base, rows = _chain(posterior)
+        chained = sum(row.shape[0] for row in rows)
         if dense:
-            covariance = result._covariance - delta
+            covariance = result._covariance - half @ half.T
             covariance = 0.5 * (covariance + covariance.T)
-            if _chain_rank(posterior) >= p:
+            if chained >= covariance.shape[0]:
                 # Past p accumulated rows the low-rank chain costs more than a
                 # dense factor of Sigma' itself: collapse it (O(p^3) per ~p rows).
                 posterior = _DenseFactor(_psd_factor(covariance))
+        elif chained >= _SPARSE_CHAIN_ROWS and getattr(base, "refactor", None) is not None:
+            # Factor H + sum A^T W A afresh: the same posterior, no chain.
+            posterior = base.refactor(np.vstack(rows))
         if predictive_variance is not None:
-            shrink = (
-                quadratic_form_diagonal(grid, delta) if delta is not None
-                else _quadratic_diagonal(np.asarray(grid @ v), s_factor)
+            # diag(G H H^T G^T): O(nnz(G) k), the grid never meets a k x k solve.
+            projected = on_grid(half)
+            predictive_variance = np.clip(
+                predictive_variance - np.einsum("ij,ij->i", projected, projected), 0.0, None
             )
-            predictive_variance = np.clip(predictive_variance - shrink, 0.0, None)
     mean = result.mean + shift
-    predictive_mean = result.predictive_mean + np.asarray(grid @ shift).ravel()
+    predictive_mean = result.predictive_mean + on_grid(shift).ravel()
     diagnostics = dict(result.diagnostics)
     diagnostics["updated_rows"] = int(diagnostics.get("updated_rows", 0)) + added_rows
     common = dict(
@@ -485,8 +506,9 @@ def _update_integrated(result, new_data, revisions):
             UserWarning, stacklevel=4,   # user -> result.update -> update -> here
         )
     before = [conditional() for conditional in grid.conditionals]
+    memo = {}
     return _reweighted(
-        result, before, [_step(cond, new_data, revisions, "update")[0] for cond in before]
+        result, before, [_step(cond, new_data, revisions, "update", memo)[0] for cond in before]
     )
 
 
@@ -594,7 +616,7 @@ class News:
     updated: object
 
 
-def _targets(result, at, weights):
+def _targets(result, at, weights, memo=None):
     """``(G, index)``: the target design and its labels (``news`` docstring)."""
     from collections.abc import Mapping
 
@@ -613,12 +635,17 @@ def _targets(result, at, weights):
             raise ValueError(
                 f"news() at= on a joint model maps outcomes {context.outcomes} to rows"
             )
-        design = np.vstack([_design_for(context.contexts[o], rows) for o, rows in at.items()])
+        design = np.vstack([
+            _cached_design(context.contexts[o], rows, "target", memo,
+                           lambda o=o, rows=rows: _design_for(context.contexts[o], rows))
+            for o, rows in at.items()
+        ])
         index = pd.MultiIndex.from_tuples(
             [(o, label) for o, rows in at.items() for label in rows.index], names=["outcome", None]
         )
     else:
-        design, index = _design_for(context, at), at.index
+        design = _cached_design(context, at, "target", memo, lambda: _design_for(context, at))
+        index = at.index
     if weights is None:
         return design, index
     missing = [label for label in weights.columns if label not in index]
@@ -643,11 +670,9 @@ class _PointNews:
     reduction: np.ndarray   # targets x releases: sequential variance reductions
 
 
-def _point_news(result, new_data, revisions, targets) -> _PointNews:
-    from scipy.linalg import solve_triangular
-
-    target, _ = targets(result)
-    updated, revision, c = _step(result, new_data, revisions, "news")
+def _point_news(result, new_data, revisions, targets, memo=None) -> _PointNews:
+    target, _ = targets(result, memo)
+    updated, revision, c = _step(result, new_data, revisions, "news", memo)
     if c is None and revision is None:
         raise ValueError("news() needs a released row with an observed response, or revisions")
     columns, news, expected = [], np.empty(0), np.empty(0)
@@ -659,17 +684,16 @@ def _point_news(result, new_data, revisions, targets) -> _PointNews:
         whitened = c.root * (c.s0 @ c.a) + np.divide(
             c.a, c.root, out=np.zeros_like(c.a), where=positive
         )
-        gain = (c.v * c.root) @ cho_solve(c.s_factor, np.eye(c.a.size))
+        gain = solve_triangular(c.lower.T, c.half.T).T          # V W^1/2 B^-1 = H L^-1
         columns.append(gain * whitened)
         news = np.divide(whitened, c.root, out=np.full_like(c.a, np.nan), where=positive)
         expected = np.asarray(
             c.rows.likelihood.response_prediction(c.m, np.diag(c.s0)), dtype=float
         )
-        # Sigma' = Sigma - U U^T, U = V W^1/2 L^-T with B = L L^T: column j of U is
+        # Sigma' = Sigma - H H^T with H = V W^1/2 L^-T, B = L L^T: column j of H is
         # row j's innovation given the rows before it, so the variance a target
         # loses splits over the rows in order.
-        projected = np.asarray(target @ (c.v * c.root))
-        reduction = solve_triangular(c.s_factor[0], projected.T, lower=True).T ** 2
+        reduction = np.asarray(target @ c.half) ** 2
     if revision is not None:
         columns.append(revision.latent)
     latent = np.column_stack(columns)
@@ -698,8 +722,8 @@ def news(result, new_data, at=None, *, weights=None, revisions=None) -> News:
     if weights is not None and not isinstance(weights, pd.DataFrame):
         raise TypeError("news() weights must be a DataFrame: aggregates x target rows")
 
-    def targets(point):
-        return _targets(point, at, weights)
+    def targets(point, memo=None):
+        return _targets(point, at, weights, memo)
 
     if isinstance(result, INLAResult):
         return _integrated_news(result, new_data, revisions, targets)
@@ -717,7 +741,8 @@ def _integrated_news(result, new_data, revisions, targets):
     if grid is None:
         raise ValueError("news() is available on integrated results produced by LGM.fit")
     before = [conditional() for conditional in grid.conditionals]
-    points = [_point_news(cond, new_data, revisions, targets) for cond in before]
+    memo = {}
+    points = [_point_news(cond, new_data, revisions, targets, memo) for cond in before]
     updated = _reweighted(result, before, [point.updated for point in points])
     old, new = grid.weights, updated._grid.weights
     # sum_k w'_k mu'_k - sum_k w_k mu_k = sum_k w'_k (mu'_k - mu_k) + sum_k (w'_k - w_k) mu_k:
@@ -743,20 +768,25 @@ def _integrated_news(result, new_data, revisions, targets):
         ])
         for block, where in result.block_slices.items()
     }
-    # Var of the mixture before minus after; the rows' part is sum_k w'_k (row reductions).
+    # Var of the mixture before minus after; the rows' part is sum_k w'_k (row
+    # reductions). A point's target variance after the release is its variance
+    # before minus its row reductions (revisions of Gaussian rows move none).
     dense_targets = [np.asarray(point.target.todense() if hasattr(point.target, "todense")
                                 else point.target) for point in points]
+    means_before = [t @ cond.mean for t, cond in zip(dense_targets, before, strict=True)]
+    means_after = [t @ point.updated.mean for t, point in zip(dense_targets, points, strict=True)]
+    variances_before = [_conditional_predictive_variances(cond, t)
+                        for t, cond in zip(dense_targets, before, strict=True)]
+    variances_after = [v - point.reduction.sum(axis=1)
+                       for v, point in zip(variances_before, points, strict=True)]
 
-    def mixture_variance(weights, conditionals):
-        means = [t @ cond.mean for t, cond in zip(dense_targets, conditionals, strict=True)]
-        variances = [_conditional_predictive_variances(cond, t)
-                     for t, cond in zip(dense_targets, conditionals, strict=True)]
+    def mixture_variance(weights, means, variances):
         first = mixed(means, weights)
         return mixed([v + m * m for v, m in zip(variances, means, strict=True)], weights) - first ** 2
 
     rows_part = mixed([point.reduction for point in points])
-    total = (mixture_variance(old, before)
-             - mixture_variance(new, [point.updated for point in points]))
+    total = (mixture_variance(old, means_before, variances_before)
+             - mixture_variance(new, means_after, variances_after))
     reduction = np.column_stack([rows_part, total - rows_part.sum(axis=1)])
     return _news_frames(
         result, points[0], targets(result)[1],
