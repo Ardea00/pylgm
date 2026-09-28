@@ -26,6 +26,11 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   step for non-Gaussian likelihoods, and with the hyperparameters reweighted on
   the INLA grid for `hyperparameters="integrate"`. See
   [prediction](prediction.md#sequential-updates).
+- **News decomposition** — `result.news(release, at=targets)` splits the
+  revision a release causes, in every latent effect and in the linear
+  predictor at chosen rows, into one exact contribution per released row
+  (plus a hyperparameter part for integrated fits). See
+  [prediction](prediction.md#news-decomposition).
 - **Warm starts** — `fit(..., warm_start=previous)` starts a rolling or
   expanding backtest's fit at the previous window's hyperparameters and latent
   mode (by label), for `"optimize"` and `"integrate"`, pandas, Spark and

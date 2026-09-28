@@ -258,3 +258,44 @@ response are skipped; joint models do not support `update` yet. On a dense fit
 the accumulated low-rank terms collapse into one factor once they hold more
 rows than latents. On a sparse fit they grow by `k` columns per update, so
 refit after many large updates.
+
+### News decomposition
+
+`result.news(release, at=targets)` breaks the revision a release causes into
+one contribution per released row:
+
+```python
+news = result.news(release, at=targets)   # targets: rows to track, default the fitted grid
+news.releases     # per released row: actual, expected (before the release), news
+news.prediction   # linear predictor at each target row x one column per released row
+news.latent       # every latent effect, indexed by (block, label) x released row
+news.updated      # the posterior after the release, as result.update(release)
+
+news.prediction.sum(axis=1)                    # = the total revision of each target
+news.latent.loc["trend"]                       # each trend level's revision, by release
+news.prediction.T.groupby(release["series"]).sum().T   # per series, or any other grouping
+```
+
+The **news** of a Gaussian row is its forecast error: the actual value minus
+what the posterior expected, \(y_j - \mathrm E[\eta_j \mid y_\text{old}]\). The
+update moves every target by a fixed linear combination of the news:
+
+\[
+\Delta\mu_t = \sum_j K_{tj}\, \text{news}_j,\qquad
+K = G\,\Sigma A^\top S^{-1}.
+\]
+
+Here \(G\) is the target design, so column \(j\) depends on row \(j\)'s news
+alone. The columns add up to the revision exactly.
+
+For a non-Gaussian row the news is the working response at the new mode, minus
+\(\mathrm E[\eta_j]\). This is the linearisation the Laplace update makes, so
+the decomposition is still exact. `expected` is reported on the response scale
+(\(\mathrm E[y_j]\) under the pre-release posterior), and `news` on the
+predictor scale, where the contributions add.
+
+On an integrated result every grid point's revision is decomposed, and the
+results are mixed with the post-release weights. A final `hyperparameters`
+column holds what the release changes by moving the hyperparameter posterior
+itself, \(\sum_k (w_k' - w_k)\,\mu_k\). Impacts are on the linear predictor;
+for a nonlinear link the response-scale revision does not split additively.

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     # helpers from gaussian.py, which imports GaussianResult from here, so a
     # top-level import of SparsePosterior would be circular.
     from pylgm.inference.sampling import GridSampler
+    from pylgm.inference.update import News
     from pylgm.inference.sparse import SparsePosterior
 
 
@@ -840,6 +841,22 @@ class _BaseResult:
                 f"{type(self).__name__} keeps no joint posterior to sample from"
             )
         return sample_mixture(components, n, rng)
+
+    def news(self, new_data, at=None) -> "News":
+        """Decompose the revision a release of ``new_data``'s rows causes.
+
+        Returns a ``pylgm.inference.update.News``: the news in each released
+        row (actual minus expected, on the linear-predictor scale) and the
+        revision each row causes in every latent effect and in the linear
+        predictor at ``at``'s rows (default: the fitted grid). The columns sum
+        to the total revision exactly; ``News.updated`` is the posterior after
+        the release, as ``update(new_data)`` returns it. On an integrated
+        result a ``hyperparameters`` column carries the revision due to the
+        release moving the hyperparameter posterior.
+        """
+        from pylgm.inference.update import news
+
+        return news(self, new_data, at)
 
     def predict(self, new_data, outcome: str | None = None):
         """Score new rows against this result's latent posterior.

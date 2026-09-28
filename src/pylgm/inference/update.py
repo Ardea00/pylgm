@@ -176,34 +176,68 @@ def _fitted_mean(likelihood, predictive_mean, predictive_variance, row_order):
     return np.asarray(likelihood.response_prediction(canonical, variance))[row_order]
 
 
+@dataclass(frozen=True)
+class _Conditioning:
+    """The k new rows' conditioning of a fitted posterior (module doc symbols)."""
+
+    rows: object          # the observed new rows
+    design: np.ndarray    # A
+    m: np.ndarray         # prior mean of eta at the rows
+    s0: np.ndarray        # A Sigma A^T
+    v: np.ndarray         # Sigma A^T
+    a: np.ndarray
+    root: np.ndarray      # W^1/2
+    s_factor: tuple       # cho(B)
+    log_evidence: float
+
+
+def _condition(result, new_data, caller="update"):
+    """``_Conditioning`` for ``new_data``'s observed rows, or ``None`` if there are none."""
+    from pylgm.inference.prediction import PredictionContext, _design_for, _offset_for
+
+    context = result.prediction_context
+    if (not isinstance(context, PredictionContext) or context.response is None
+            or result._sampler is None):
+        raise ValueError(f"{caller}() is available on single-response results produced by LGM.fit")
+    if context.response not in new_data.columns:
+        raise ValueError(
+            f"{caller}() new_data is missing the response column {context.response!r}"
+        )
+    y = np.asarray(new_data[context.response], dtype=float)
+    observed = np.isfinite(y)
+    if not observed.any():
+        return None
+    rows = new_data[observed]
+    likelihood = _rows_likelihood(result, context, rows)
+    likelihood.validate_response(y[observed])
+    design = _design_for(context, rows)
+    if result._covariance is not None:
+        v = result._covariance @ design.T
+    else:
+        v = result._sparse_posterior.covariance_apply(design.T)
+    m = _offset_for(context, rows) + design @ result.mean
+    s0 = design @ v
+    a, root, s_factor, log_evidence = _rows_mode(m, s0, y[observed], likelihood)
+    return _Conditioning(rows, design, m, s0, v, a, root, s_factor, log_evidence)
+
+
 def condition_on_rows(result, new_data):
     """Return ``result`` conditioned on ``new_data``'s observed rows (see module doc)."""
-    from pylgm.inference.prediction import PredictionContext, _design_for, _offset_for
+    conditioning = _condition(result, new_data)
+    return result if conditioning is None else _conditioned(result, conditioning)
+
+
+def _conditioned(result, c: _Conditioning):
     from pylgm.inference.result import GaussianResult, LaplaceResult, quadratic_form_diagonal
     from pylgm.inference.sampling import GridSampler
 
     context = result.prediction_context
     sampler = result._sampler
-    if not isinstance(context, PredictionContext) or context.response is None or sampler is None:
-        raise ValueError("update() is available on single-response results produced by LGM.fit")
-    if context.response not in new_data.columns:
-        raise ValueError(f"update() new_data is missing the response column {context.response!r}")
-    y = np.asarray(new_data[context.response], dtype=float)
-    observed = np.isfinite(y)
-    if not observed.any():
-        return result
-    rows = new_data[observed]
-    likelihood = _rows_likelihood(result, context, rows)
-    likelihood.validate_response(y[observed])
-    design = _design_for(context, rows)
-
+    design, s_factor, root = c.design, c.s_factor, c.root
     dense = result._covariance is not None
-    v = result._covariance @ design.T if dense else result._sparse_posterior.covariance_apply(design.T)
-    m = _offset_for(context, rows) + design @ result.mean
-    a, root, s_factor, log_evidence = _rows_mode(m, design @ v, y[observed], likelihood)
-    shift = v @ a
+    shift = c.v @ c.a
     # Whitening the rows by W^1/2 turns S into B with unit noise.
-    v = v * root
+    v = c.v * root
     posterior = UpdatedPosterior(
         base=_DenseFactor(sampler.factor) if sampler.factor is not None else sampler.posterior,
         v=v, design=design * root[:, None], s_factor=s_factor, noise_sd=1.0,
@@ -234,12 +268,12 @@ def condition_on_rows(result, new_data):
     mean = result.mean + shift
     predictive_mean = result.predictive_mean + np.asarray(grid @ shift).ravel()
     diagnostics = dict(result.diagnostics)
-    diagnostics["updated_rows"] = int(diagnostics.get("updated_rows", 0)) + int(observed.sum())
+    diagnostics["updated_rows"] = int(diagnostics.get("updated_rows", 0)) + len(c.rows)
     common = dict(
         labels=result.labels,
         mean=mean,
         covariance=covariance,
-        log_marginal_likelihood=result.log_marginal_likelihood + log_evidence,
+        log_marginal_likelihood=result.log_marginal_likelihood + c.log_evidence,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
         block_slices=result.block_slices,
@@ -283,9 +317,6 @@ class IntegrationGrid:
 
 def update_integrated(result, new_data):
     """Update every grid point's conditional and reweight the grid (module doc)."""
-    from pylgm.inference.result import INLAResult
-    from pylgm.optimization.inla import _integrated_moments, _theta_moments
-
     grid = result._grid
     if grid is None:
         raise ValueError("update() is available on integrated results produced by LGM.fit")
@@ -298,7 +329,15 @@ def update_integrated(result, new_data):
             UserWarning, stacklevel=3,
         )
     before = [conditional() for conditional in grid.conditionals]
-    after = [conditional.update(new_data) for conditional in before]
+    return _reweighted(result, before, [conditional.update(new_data) for conditional in before])
+
+
+def _reweighted(result, before, after):
+    """The integrated result whose grid conditionals moved from ``before`` to ``after``."""
+    from pylgm.inference.result import INLAResult
+    from pylgm.optimization.inla import _integrated_moments, _theta_moments
+
+    grid = result._grid
     evidence = np.array([
         new.log_marginal_likelihood - old.log_marginal_likelihood
         for old, new in zip(before, after, strict=True)
@@ -353,4 +392,126 @@ def update_integrated(result, new_data):
             conditionals=tuple((lambda new=new: new) for new in after),
             marginals=grid.marginals, context=grid.context,
         ),
+    )
+
+
+# --- news decomposition -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class News:
+    """How a release of new rows revises a fitted posterior, row by row.
+
+    ``releases`` has one row per observed new row: its ``actual`` response, the
+    response ``expected`` before the release, and the ``news`` on the
+    linear-predictor scale, where the decomposition is additive: ``y - E[eta]``
+    for a Gaussian row, and for any other the working response at the new mode
+    minus ``E[eta]`` -- the linearisation the Laplace update makes, so the
+    revisions still add up exactly. ``latent`` (indexed by
+    ``(block, label)``) and ``prediction`` (indexed by the target rows) hold the
+    revision each release causes, one column per released row, so every row of
+    them sums to that target's total revision -- exactly. An integrated result
+    adds a ``hyperparameters`` column: the part of the revision that comes from
+    the release moving the hyperparameter posterior. ``updated`` is the result
+    after the release, the same as ``result.update(new_data)``.
+    """
+
+    releases: object
+    latent: object
+    prediction: object
+    updated: object
+
+
+def _point_news(result, new_data, at):
+    """``(updated, conditioning, news, latent and prediction impacts, target, expected)``."""
+    from pylgm.inference.prediction import _design_for
+
+    c = _condition(result, new_data, caller="news")
+    if c is None:
+        raise ValueError("news() new_data has no row with an observed response")
+    positive = c.root > 0
+    # W^1/2 (z - m), z the working response: the news in the whitened metric.
+    # At the mode a = W^1/2 B^-1 W^1/2 (z - m), so V a splits over the rows.
+    whitened = c.root * (c.s0 @ c.a) + np.divide(c.a, c.root, out=np.zeros_like(c.a), where=positive)
+    news = np.divide(whitened, c.root, out=np.full_like(c.a, np.nan), where=positive)
+    latent = ((c.v * c.root) @ cho_solve(c.s_factor, np.eye(c.a.size))) * whitened
+    if at is None:
+        sampler = result._sampler
+        target = sampler.design if sampler.row_order is None else sampler.design[sampler.row_order]
+    else:
+        target = _design_for(result.prediction_context, at)
+    expected = _rows_likelihood(result, result.prediction_context, c.rows).response_prediction(
+        c.m, np.diag(c.s0)
+    )
+    return (_conditioned(result, c), c, news, latent, np.asarray(target @ latent), target,
+            np.asarray(expected, dtype=float))
+
+
+def news(result, new_data, at=None) -> News:
+    """Decompose ``result``'s revision by ``new_data``'s rows (see ``News``)."""
+    import pandas as pd
+
+    from pylgm.inference.result import INLAResult
+
+    if not isinstance(new_data, pd.DataFrame):
+        raise TypeError("news() new_data must be a pandas DataFrame")
+    if not new_data.index.is_unique:
+        raise ValueError("news() needs a unique new_data index: its labels name the releases")
+    if isinstance(result, INLAResult):
+        return _integrated_news(result, new_data, at)
+    updated, c, row_news, latent, prediction, _, expected = _point_news(result, new_data, at)
+    return _news_frames(result, updated, c.rows, c.rows[result.prediction_context.response],
+                        expected, row_news, latent, prediction, at)
+
+
+def _integrated_news(result, new_data, at):
+    grid = result._grid
+    if grid is None:
+        raise ValueError("news() is available on integrated results produced by LGM.fit")
+    before = [conditional() for conditional in grid.conditionals]
+    parts = [_point_news(conditional, new_data, at) for conditional in before]
+    updated = _reweighted(result, before, [part[0] for part in parts])
+    old, new = grid.weights, updated._grid.weights
+    c = parts[0][1]
+    latent = sum(w * part[3] for w, part in zip(new, parts, strict=True))
+    prediction = sum(w * part[4] for w, part in zip(new, parts, strict=True))
+    # sum_k w'_k mu'_k - sum_k w_k mu_k = sum_k w'_k (mu'_k - mu_k) + sum_k (w'_k - w_k) mu_k
+    moved = new - old
+    latent_theta = sum(d * cond.mean for d, cond in zip(moved, before, strict=True))
+    prediction_theta = sum(
+        d * np.asarray(part[5] @ cond.mean).ravel()
+        for d, cond, part in zip(moved, before, parts, strict=True)
+    )
+    expected = sum(w * part[6] for w, part in zip(old, parts, strict=True))
+    row_news = sum(w * part[2] for w, part in zip(old, parts, strict=True))
+    return _news_frames(
+        result, updated, c.rows, c.rows[result.prediction_context.response], expected, row_news,
+        np.column_stack([latent, latent_theta]), np.column_stack([prediction, prediction_theta]),
+        at, extra="hyperparameters",
+    )
+
+
+def _news_frames(result, updated, rows, actual, expected, row_news, latent, prediction, at,
+                 extra=None):
+    import pandas as pd
+
+    columns = list(rows.index) + ([extra] if extra else [])
+    blocks = np.empty(len(result.labels), dtype=object)
+    for block, where in result.block_slices.items():
+        blocks[where] = block
+    latent_index = pd.MultiIndex.from_arrays([blocks, list(result.labels)], names=["block", "label"])
+    if at is not None:
+        prediction_index = at.index
+    elif result.prediction_keys is not None:
+        prediction_index = pd.MultiIndex.from_frame(result.prediction_keys)
+    else:
+        prediction_index = pd.RangeIndex(prediction.shape[0])
+    return News(
+        releases=pd.DataFrame(
+            {"actual": np.asarray(actual, dtype=float), "expected": expected, "news": row_news},
+            index=rows.index,
+        ),
+        latent=pd.DataFrame(latent, index=latent_index, columns=columns),
+        prediction=pd.DataFrame(prediction, index=prediction_index, columns=columns),
+        updated=updated,
     )
