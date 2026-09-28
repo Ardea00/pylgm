@@ -114,6 +114,10 @@ def test_integrated_revision_adds_the_hyperparameter_part():
         atol=1e-10,
     )
     assert np.abs(news.prediction["hyperparameters"]).max() > 0
+    np.testing.assert_allclose(
+        news.by_block.groupby(level=0, sort=False).sum().to_numpy(), news.prediction.to_numpy(),
+        atol=1e-12,
+    )
 
 
 def test_news_rejects_ambiguous_or_empty_releases():
@@ -123,3 +127,22 @@ def test_news_rejects_ambiguous_or_empty_releases():
         result.news(pd.concat([release, release]))
     with pytest.raises(ValueError, match="no row with an observed response"):
         result.news(release.assign(yg=np.nan))
+
+
+def test_by_block_splits_each_target_revision_without_cancelling():
+    """A block's own latent revisions sum to ~0 under a sum-to-zero constraint;
+    its contribution to a target, G[:, block] @ dmu[block], does not, and the
+    blocks add up to the target's revision."""
+    first, release, target = _vintage("yg")
+    result = _model("yg", Gaussian(0.4)).fit(first)
+    target = target.iloc[::-1]                                # order is kept, not sorted
+    news = result.news(release, at=target)
+    np.testing.assert_allclose(
+        news.by_block.groupby(level=0, sort=False).sum().to_numpy(), news.prediction.to_numpy(),
+        atol=1e-12,
+    )
+    assert list(news.by_block.index.get_level_values(0).unique()) == list(target.index)
+    assert set(news.by_block.index.get_level_values("block")) == {"fixed", "trend", "level"}
+    trend = news.by_block.xs("trend", level="block").sum(axis=1)
+    assert abs(news.latent.loc["trend"].to_numpy().sum()) < 1e-10   # constrained: cancels
+    assert np.abs(trend).max() > 1e-3                              # contribution: does not

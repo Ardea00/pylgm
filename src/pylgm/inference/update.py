@@ -410,7 +410,11 @@ class News:
     revisions still add up exactly. ``latent`` (indexed by
     ``(block, label)``) and ``prediction`` (indexed by the target rows) hold the
     revision each release causes, one column per released row, so every row of
-    them sums to that target's total revision -- exactly. An integrated result
+    them sums to that target's total revision -- exactly. ``by_block`` splits
+    each target's revision further by latent block, ``G[:, block] @ dmu[block]``
+    (indexed by ``(target, block)``), so its blocks add up to ``prediction``;
+    summing a block's own latent revisions is not that (an RW1 or Besag block
+    is constrained to sum to zero). An integrated result
     adds a ``hyperparameters`` column: the part of the revision that comes from
     the release moving the hyperparameter posterior. ``updated`` is the result
     after the release, the same as ``result.update(new_data)``.
@@ -419,11 +423,28 @@ class News:
     releases: object
     latent: object
     prediction: object
+    by_block: object
     updated: object
 
 
-def _point_news(result, new_data, at):
-    """``(updated, conditioning, news, latent and prediction impacts, target, expected)``."""
+@dataclass(frozen=True)
+class _PointNews:
+    """One fixed-theta decomposition: arrays are targets/latents x released rows."""
+
+    updated: object
+    conditioning: _Conditioning
+    news: np.ndarray
+    expected: np.ndarray
+    target: object          # the target design G
+    latent: np.ndarray      # p x k
+    by_block: dict          # block -> G[:, block] @ latent[block], n_targets x k
+
+    @property
+    def prediction(self) -> np.ndarray:
+        return sum(self.by_block.values())
+
+
+def _point_news(result, new_data, at) -> _PointNews:
     from pylgm.inference.prediction import _design_for
 
     c = _condition(result, new_data, caller="news")
@@ -433,7 +454,6 @@ def _point_news(result, new_data, at):
     # W^1/2 (z - m), z the working response: the news in the whitened metric.
     # At the mode a = W^1/2 B^-1 W^1/2 (z - m), so V a splits over the rows.
     whitened = c.root * (c.s0 @ c.a) + np.divide(c.a, c.root, out=np.zeros_like(c.a), where=positive)
-    news = np.divide(whitened, c.root, out=np.full_like(c.a, np.nan), where=positive)
     latent = ((c.v * c.root) @ cho_solve(c.s_factor, np.eye(c.a.size))) * whitened
     if at is None:
         sampler = result._sampler
@@ -443,8 +463,18 @@ def _point_news(result, new_data, at):
     expected = _rows_likelihood(result, result.prediction_context, c.rows).response_prediction(
         c.m, np.diag(c.s0)
     )
-    return (_conditioned(result, c), c, news, latent, np.asarray(target @ latent), target,
-            np.asarray(expected, dtype=float))
+    return _PointNews(
+        updated=_conditioned(result, c),
+        conditioning=c,
+        news=np.divide(whitened, c.root, out=np.full_like(c.a, np.nan), where=positive),
+        expected=np.asarray(expected, dtype=float),
+        target=target,
+        latent=latent,
+        by_block={
+            block: np.asarray(target[:, where] @ latent[where])
+            for block, where in result.block_slices.items()
+        },
+    )
 
 
 def news(result, new_data, at=None) -> News:
@@ -459,9 +489,9 @@ def news(result, new_data, at=None) -> News:
         raise ValueError("news() needs a unique new_data index: its labels name the releases")
     if isinstance(result, INLAResult):
         return _integrated_news(result, new_data, at)
-    updated, c, row_news, latent, prediction, _, expected = _point_news(result, new_data, at)
-    return _news_frames(result, updated, c.rows, c.rows[result.prediction_context.response],
-                        expected, row_news, latent, prediction, at)
+    point = _point_news(result, new_data, at)
+    return _news_frames(result, point.updated, point.conditioning.rows, point.expected,
+                        point.news, point.latent, point.by_block, at)
 
 
 def _integrated_news(result, new_data, at):
@@ -469,30 +499,42 @@ def _integrated_news(result, new_data, at):
     if grid is None:
         raise ValueError("news() is available on integrated results produced by LGM.fit")
     before = [conditional() for conditional in grid.conditionals]
-    parts = [_point_news(conditional, new_data, at) for conditional in before]
-    updated = _reweighted(result, before, [part[0] for part in parts])
+    points = [_point_news(conditional, new_data, at) for conditional in before]
+    updated = _reweighted(result, before, [point.updated for point in points])
     old, new = grid.weights, updated._grid.weights
-    c = parts[0][1]
-    latent = sum(w * part[3] for w, part in zip(new, parts, strict=True))
-    prediction = sum(w * part[4] for w, part in zip(new, parts, strict=True))
-    # sum_k w'_k mu'_k - sum_k w_k mu_k = sum_k w'_k (mu'_k - mu_k) + sum_k (w'_k - w_k) mu_k
+    # sum_k w'_k mu'_k - sum_k w_k mu_k = sum_k w'_k (mu'_k - mu_k) + sum_k (w'_k - w_k) mu_k:
+    # the rows' part, then the hyperparameters' part as a last column.
     moved = new - old
-    latent_theta = sum(d * cond.mean for d, cond in zip(moved, before, strict=True))
-    prediction_theta = sum(
-        d * np.asarray(part[5] @ cond.mean).ravel()
-        for d, cond, part in zip(moved, before, parts, strict=True)
-    )
-    expected = sum(w * part[6] for w, part in zip(old, parts, strict=True))
-    row_news = sum(w * part[2] for w, part in zip(old, parts, strict=True))
+
+    def mixed(values):
+        return sum(w * value for w, value in zip(new, values, strict=True))
+
+    def theta_part(values):
+        return sum(d * value for d, value in zip(moved, values, strict=True))
+
+    latent = np.column_stack([
+        mixed([point.latent for point in points]),
+        theta_part([cond.mean for cond in before]),
+    ])
+    by_block = {
+        block: np.column_stack([
+            mixed([point.by_block[block] for point in points]),
+            theta_part([
+                np.asarray(point.target[:, where] @ cond.mean[where]).ravel()
+                for point, cond in zip(points, before, strict=True)
+            ]),
+        ])
+        for block, where in result.block_slices.items()
+    }
     return _news_frames(
-        result, updated, c.rows, c.rows[result.prediction_context.response], expected, row_news,
-        np.column_stack([latent, latent_theta]), np.column_stack([prediction, prediction_theta]),
-        at, extra="hyperparameters",
+        result, updated, points[0].conditioning.rows,
+        sum(w * point.expected for w, point in zip(old, points, strict=True)),
+        sum(w * point.news for w, point in zip(old, points, strict=True)),
+        latent, by_block, at, extra="hyperparameters",
     )
 
 
-def _news_frames(result, updated, rows, actual, expected, row_news, latent, prediction, at,
-                 extra=None):
+def _news_frames(result, updated, rows, expected, row_news, latent, by_block, at, extra=None):
     import pandas as pd
 
     columns = list(rows.index) + ([extra] if extra else [])
@@ -500,18 +542,31 @@ def _news_frames(result, updated, rows, actual, expected, row_news, latent, pred
     for block, where in result.block_slices.items():
         blocks[where] = block
     latent_index = pd.MultiIndex.from_arrays([blocks, list(result.labels)], names=["block", "label"])
+    n_targets = next(iter(by_block.values())).shape[0]
     if at is not None:
-        prediction_index = at.index
+        targets = at.index
     elif result.prediction_keys is not None:
-        prediction_index = pd.MultiIndex.from_frame(result.prediction_keys)
+        targets = pd.MultiIndex.from_frame(result.prediction_keys)
     else:
-        prediction_index = pd.RangeIndex(prediction.shape[0])
+        targets = pd.RangeIndex(n_targets)
+    # (target..., block): each target's blocks together, targets in the given order.
+    names = list(by_block)
+    by_block_frame = pd.DataFrame(
+        np.stack([by_block[name] for name in names], axis=1).reshape(-1, len(columns)),
+        index=pd.MultiIndex.from_tuples(
+            [(*(t if isinstance(t, tuple) else (t,)), name) for t in targets for name in names],
+            names=[*targets.names, "block"],
+        ),
+        columns=columns,
+    )
     return News(
         releases=pd.DataFrame(
-            {"actual": np.asarray(actual, dtype=float), "expected": expected, "news": row_news},
+            {"actual": np.asarray(rows[result.prediction_context.response], dtype=float),
+             "expected": expected, "news": row_news},
             index=rows.index,
         ),
         latent=pd.DataFrame(latent, index=latent_index, columns=columns),
-        prediction=pd.DataFrame(prediction, index=prediction_index, columns=columns),
+        prediction=pd.DataFrame(sum(by_block.values()), index=targets, columns=columns),
+        by_block=by_block_frame,
         updated=updated,
     )

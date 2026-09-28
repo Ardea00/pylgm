@@ -272,6 +272,7 @@ news.latent       # every latent effect, indexed by (block, label) x released ro
 news.updated      # the posterior after the release, as result.update(release)
 
 news.prediction.sum(axis=1)                    # = the total revision of each target
+news.by_block     # each target's revision split by latent block (target, block) x released row
 news.latent.loc["trend"]                       # each trend level's revision, by release
 news.prediction.T.groupby(release["series"]).sum().T   # per series, or any other grouping
 ```
@@ -287,6 +288,14 @@ K = G\,\Sigma A^\top S^{-1}.
 
 Here \(G\) is the target design, so column \(j\) depends on row \(j\)'s news
 alone. The columns add up to the revision exactly.
+
+`by_block` splits each target's revision further, by the latent block it
+passes through: \(G_{[:,b]}\,\Delta\mu_b\) for block \(b\). Over the blocks
+it adds up to `prediction`. Use it to answer "how much of this revision came
+through the trend, the regional levels, the fixed effects". Do not sum a
+block's own rows of `latent` for that: an RW1 or Besag block is constrained to
+sum to zero, and a vague intercept absorbs a common shift, so those sums are
+near zero whatever the release did.
 
 For a non-Gaussian row the news is the working response at the new mode, minus
 \(\mathrm E[\eta_j]\). This is the linearisation the Laplace update makes, so
