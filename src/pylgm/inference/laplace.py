@@ -161,22 +161,25 @@ def _curvature_rows(likelihood, design, eta: np.ndarray, y: np.ndarray, *, psd: 
     ``[[w_i, c], [c, w_j]]`` is replaced by its eigen-pair rows
     ``cos t d_i + sin t d_j`` and ``-sin t d_i + cos t d_j`` (``tan 2t = 2c / (w_i - w_j)``),
     weighted by the eigenvalues -- the same matrix, and every engine keeps its
-    ``(design, weights)`` form. ``psd`` clips negative eigenvalues: a Newton
-    direction for an iterate where the (not log-concave) block is indefinite.
+    ``(design, weights)`` form. ``psd`` takes absolute eigenvalues (saddle-free
+    Newton): a well-scaled descent direction for an iterate where the (not
+    log-concave) block is indefinite.
     """
     weights = np.asarray(likelihood.working_weights(eta, y), dtype=float)
     coupled = getattr(likelihood, "cross_weights", None)
     pairs = coupled(eta, y) if coupled is not None else None
     if pairs is None:
         return design, weights
-    i, j, c = pairs
+    i, j, c, *flexible = pairs  # a lone coupled likelihood has no flexible flags
+    flexible = flexible[0] if flexible else np.ones(c.size, dtype=bool)
     w_i, w_j = weights[i], weights[j]
     angle = 0.5 * np.arctan2(2.0 * c, w_i - w_j)
     cos, sin = np.cos(angle), np.sin(angle)
     first = w_i * cos * cos + w_j * sin * sin + 2.0 * c * sin * cos
     second = w_i * sin * sin + w_j * cos * cos - 2.0 * c * sin * cos
     if psd:
-        first, second = np.maximum(first, 0.0), np.maximum(second, 0.0)
+        first = np.where(flexible, np.abs(first), first)
+        second = np.where(flexible, np.abs(second), second)
     weights = weights.copy()
     weights[i] = weights[j] = 0.0
     d_i, d_j = design[i], design[j]
@@ -501,7 +504,7 @@ def _fit_laplace_sparse(
         try:
             return weighted_solve(x).structural_mean - x
         except NumericalError:
-            # As the dense engine: clip an indefinite coupled block for the direction.
+            # As the dense engine: a saddle-free direction for an indefinite coupled block.
             return weighted_solve(x, psd=True).structural_mean - x
 
     def reduced_gradient(x: np.ndarray) -> np.ndarray:

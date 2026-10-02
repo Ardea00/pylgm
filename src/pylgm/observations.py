@@ -8,7 +8,10 @@ import numpy as np
 from scipy.linalg import orth, qr
 from scipy.sparse import coo_matrix, csr_matrix, diags, issparse, vstack
 
-from pylgm.exceptions import InferenceError, ModelValidationError, NumericalError, UnsupportedEngineError
+from pylgm.exceptions import (
+    InferenceConvergenceError, InferenceError, ModelValidationError, NumericalError,
+    UnsupportedEngineError,
+)
 from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledCurvatureCorrection, CompiledGaussian, CompiledMixture
 from pylgm.parameters import Hyperparameter
@@ -530,6 +533,8 @@ def reorder_linear_inputs(observations, constraints, source_positions):
 
 
 _RELINEARIZATION_TOLERANCE = 1e-9
+# Predictor change below which relinearization tries the exact curvature first.
+_EXACT_CURVATURE_CHANGE = 1e-2
 _RELINEARIZATION_MAX_ITERATIONS = 100
 
 
@@ -633,6 +638,27 @@ def _curvature_correction(observations, eta: np.ndarray, model):
     return diagonal, pairs
 
 
+def _psd_part(correction):
+    """The positive semidefinite part of ``M``: each pair's 2x2 block, and each
+    unpaired diagonal entry, with negative eigenvalues set to zero."""
+    diagonal, pairs = correction
+    diagonal = np.maximum(diagonal, 0.0) if pairs is None else diagonal.copy()
+    if pairs is None:
+        return diagonal, None
+    i, j, c = pairs
+    paired = np.zeros(diagonal.size, dtype=bool)
+    paired[i] = paired[j] = True
+    diagonal[~paired] = np.maximum(diagonal[~paired], 0.0)
+    w_i, w_j = diagonal[i], diagonal[j]
+    angle = 0.5 * np.arctan2(2.0 * c, w_i - w_j)
+    cos, sin = np.cos(angle), np.sin(angle)
+    first = np.maximum(w_i * cos * cos + w_j * sin * sin + 2.0 * c * sin * cos, 0.0)
+    second = np.maximum(w_i * sin * sin + w_j * cos * cos - 2.0 * c * sin * cos, 0.0)
+    diagonal[i] = first * cos * cos + second * sin * sin
+    diagonal[j] = first * sin * sin + second * cos * cos
+    return diagonal, (i, j, (first - second) * sin * cos)
+
+
 def _with_curvature(model, eta: np.ndarray, correction) -> CompiledLGM:
     """``model`` plus the curvature correction as pseudo-rows centred at ``eta``."""
     diagonal, pairs = correction
@@ -659,11 +685,16 @@ def relinearize(base, observations, constraints, *, project, inner_fit, start=No
     where the fitted grid predictor reproduces ``eta`` on every log-referenced row.
 
     With ``curvature`` (Laplace engines only: the correction is not Gaussian) the
-    projected model also carries the observations' second-order term, so each
-    inner fit is a full Newton step and the Laplace approximation at the fixed
-    point uses the exact Hessian. An iterate whose exact Hessian is indefinite
-    falls back to the Gauss-Newton step; a fixed point where it stays indefinite
-    is a saddle, not a mode, and raises.
+    projected model also carries the observations' second-order term ``M``.
+    Far from the fixed point only its positive semidefinite part ``M+`` enters:
+    the surrogate stays convex, so every pass has a mode, and it keeps the
+    positive curvature Gauss-Newton drops. Once a pass changes the predictor by
+    less than ``_EXACT_CURVATURE_CHANGE`` the exact ``M`` is tried first, for
+    full Newton steps (``M+`` again if that surrogate has no mode). At the fixed
+    point the exact ``M`` replaces it -- the gradient is zero
+    there, so the mode does not move -- and the Laplace approximation uses the
+    exact Hessian. A fixed point where that Hessian is indefinite is a saddle,
+    not a mode, and raises.
     """
     eta = (
         _initial_log_predictor(base, observations, constraints)
@@ -671,29 +702,41 @@ def relinearize(base, observations, constraints, *, project, inner_fit, start=No
     )
     columns = _relinearized_columns(observations, constraints, eta, base)
     previous, damping, change = np.inf, 1.0, np.inf
-    def exact(model, eta):
+    def corrected(model, eta, psd):
         correction = _curvature_correction(observations, eta, base) if curvature else None
-        return model if correction is None else _with_curvature(model, eta, correction)
+        if correction is None:
+            return model
+        return _with_curvature(model, eta, _psd_part(correction) if psd else correction)
 
+    # The latent space is the same every pass, so a Laplace inner fit restarts
+    # from the previous pass's mode (the exact engine takes no start).
+    mode = {}
     for _ in range(_RELINEARIZATION_MAX_ITERATIONS):
         linear = project(base, *linearize(observations, constraints, eta, base))
-        model = exact(linear, eta)
-        try:
-            fit = inner_fit(model)
-        except NumericalError:
-            if model is linear:
-                raise
-            model, fit = linear, inner_fit(linear)
+        fit = None
+        if previous < _EXACT_CURVATURE_CHANGE:
+            # Close to the fixed point: the exact surrogate's Newton step converges
+            # quadratically, and is usually positive definite there.
+            model = corrected(linear, eta, psd=False)
+            try:
+                fit = inner_fit(model, **mode)
+            except (NumericalError, InferenceConvergenceError):
+                fit = None
+        if fit is None:
+            model = corrected(linear, eta, psd=True)
+            fit = inner_fit(model, **mode)
+        if curvature:
+            mode = {"initial_mode": fit.mean}
         target = model.prediction_offset + np.asarray(model.prediction_design @ fit.mean).reshape(-1)
         if not columns.size:
             return model, target
         change = float(np.max(np.abs(target[columns] - eta[columns])))
         if change <= _RELINEARIZATION_TOLERANCE * max(1.0, float(np.max(np.abs(eta[columns])))):
-            if model is linear and curvature:
-                model = exact(linear, eta)
+            if curvature:
+                model = corrected(linear, eta, psd=False)
                 try:
-                    inner_fit(model)
-                except NumericalError as error:
+                    inner_fit(model, **mode)
+                except (NumericalError, InferenceConvergenceError) as error:
                     raise InferenceError(
                         "the relinearized aggregates' fixed point is a saddle of the posterior, "
                         "not a mode: its exact Hessian is indefinite. Give the predictor an "

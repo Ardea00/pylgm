@@ -611,7 +611,8 @@ class Joint:
                 compile_joint_family(self, panels, censoring=censoring), stacked_observations, stacked_constraints,
                 base_model=compiled,
                 family_type=partial(
-                    _RelinearizedFamily, project=project_mixture_model, inner_fit=fit_laplace,
+                    _RelinearizedFamily, project=project_mixture_model,
+                    inner_fit=partial(fit_laplace, predictive_variances=False),
                     curvature=True,
                 ),
             )

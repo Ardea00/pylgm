@@ -648,9 +648,15 @@ class CompiledMixture(_CompiledLikelihood):
         return self._scatter("third_derivative", eta, y)
 
     def cross_weights(self, eta: np.ndarray, y: np.ndarray):
-        """Off-diagonal curvature ``(rows_i, rows_j, -d2l / deta_i deta_j)`` of coupled parts."""
+        """Off-diagonal curvature of coupled parts: ``(rows_i, rows_j, c, flexible)``.
+
+        ``c = -d2l / deta_i deta_j``. ``flexible`` marks the pairs of a bounded
+        likelihood, whose indefinite blocks may take a saddle-free direction; a
+        curvature correction is a local quadratic model, unbounded where it is
+        indefinite, so its pairs are never flexible.
+        """
         pairs = [
-            (rows[i], rows[j], c)
+            (rows[i], rows[j], c, np.full(c.size, not getattr(lk, "curvature_only", False)))
             for mask, lk in self.parts if hasattr(lk, "cross_weights")
             for local in (lk.cross_weights(eta[mask], y[mask]),) if local is not None
             for rows in (np.flatnonzero(mask),)

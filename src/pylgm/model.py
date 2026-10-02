@@ -662,7 +662,7 @@ class LGM:
             inner_fit = partial(fit_gaussian, predictive_variances=False)
         else:
             project, projected_family = project_mixture_model, _ProjectedMixtureFamily
-            inner_fit = fit_laplace
+            inner_fit = partial(fit_laplace, predictive_variances=False)
 
         observations, constraints = reorder_linear_inputs(
             observations, constraints, panel.source_positions
