@@ -388,3 +388,16 @@ result = joint.fit(frame, hold_out={"a": future & is_a, "b": future & is_b})
 news = result.news(release, at={"a": frame[future & is_a]})
 news.prediction.T.groupby(level="outcome").sum().T     # revision per indicator
 ```
+
+## Scoring a reconstructed network
+
+When the candidate edges of a known network are partly held out and refitted
+(for example with `CensoredHurdle`), `pylgm.evaluation` scores the result from
+aligned 1-D arrays over those edges. `link_auc(truth, score)` is the ROC AUC of
+predicted link probabilities against the 0/1 truth (average ranks for ties;
+both classes must be present). `precision_at_k(truth, score, k)` is the share
+of true links among the `k` highest scores, ties broken by stable sort order.
+`weighted_cosine` and `weighted_jaccard` (`Σ min / Σ max`, nonnegative weights)
+compare true and predicted amounts, and `reconstruction_scores(truth_weights,
+link_probability, predicted_weights, k=None)` returns all four in one dict,
+taking true links as `truth_weights > 0` and `k` as their count by default.
