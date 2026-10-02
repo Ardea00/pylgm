@@ -635,9 +635,12 @@ def selected_inverse(matrix) -> csr_matrix:
     recursion on the SuperLU fill pattern. Entries off that pattern are not
     stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own.
 
-    Symmetric-mode ``splu`` (``MMD_AT_PLUS_A`` + ``SymmetricMode`` +
-    ``diag_pivot_thresh=0.0``) yields ``perm_r == perm_c`` and a unit-lower ``L``
-    with ``U == D·Lᵀ``. A reverse column sweep over the *symbolic* fill pattern
+    Symmetric-mode ``splu`` (``COLAMD`` + ``SymmetricMode`` +
+    ``diag_pivot_thresh=0.0``, as ``SparseSpdFactor``) yields ``perm_r == perm_c``
+    and a unit-lower ``L`` with ``U == D·Lᵀ``. Not ``MMD_AT_PLUS_A``: on a
+    bipartite network precision (borrowers x a few hub lenders) it finds the
+    same fill but its ordering time grows quadratically (4.6s against 0.04s at
+    20 000 borrowers), and this one call dominated the whole fit. A reverse column sweep over the *symbolic* fill pattern
     (``_symbolic_fill``) reconstructs the selected inverse exactly; SuperLU's
     stored pattern is not enough, because it drops entries that cancel to zero.
     Result is in the original ordering.
@@ -646,7 +649,7 @@ def selected_inverse(matrix) -> csr_matrix:
     n = q_csc.shape[0]
     lu = splu(
         q_csc,
-        permc_spec="MMD_AT_PLUS_A",
+        permc_spec="COLAMD",
         options=dict(SymmetricMode=True),
         diag_pivot_thresh=0.0,
     )

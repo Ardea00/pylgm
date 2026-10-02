@@ -677,6 +677,26 @@ def _with_curvature(model, eta: np.ndarray, correction) -> CompiledLGM:
     )
 
 
+def _merit(base, observations):
+    """``f(x)``: the exact negative log posterior (up to a constant) the
+    relinearized items approximate, for a line search between passes."""
+    observed = base.observed
+    design, offset, y = base.design[observed], base.offset[observed], base.y[observed]
+    likelihood = base.likelihood.restrict(observed)
+
+    def f(x):
+        value = -likelihood.log_likelihood(design @ x + offset, y) + 0.5 * x @ (base.precision @ x)
+        grid = base.prediction_offset + base.prediction_design @ x
+        for item in observations:
+            level = (grid if item.scale == "identity" else
+                     np.exp(grid) if item.scale == "log" else item.scale.value(grid, base))
+            residual = (item.values - item.operator @ level) / np.asarray(item.sigma)
+            value += 0.5 * residual @ residual
+        return float(value)
+
+    return f
+
+
 def relinearize(base, observations, constraints, *, project, inner_fit, start=None,
                 curvature=False):
     """Fixed-point Gauss-Newton relinearization of the non-identity items.
@@ -691,22 +711,35 @@ def relinearize(base, observations, constraints, *, project, inner_fit, start=No
     positive curvature Gauss-Newton drops. Once a pass changes the predictor by
     less than ``_EXACT_CURVATURE_CHANGE`` the exact ``M`` is tried first, for
     full Newton steps (``M+`` again if that surrogate has no mode). At the fixed
-    point the exact ``M`` replaces it -- the gradient is zero
-    there, so the mode does not move -- and the Laplace approximation uses the
-    exact Hessian. A fixed point where that Hessian is indefinite is a saddle,
-    not a mode, and raises.
+    point the exact ``M`` replaces it -- the gradient is zero there, so the
+    mode does not move -- and the Laplace approximation uses the exact Hessian.
+    A fixed point where that Hessian is indefinite is a saddle, not a mode, and
+    raises.
+
+    Globalization: without a nonlinear constraint each pass linearizes at the
+    accepted latent mode, so the surrogate's mode is a descent direction for
+    the exact objective (``_merit``), and the step is halved until it decreases.
+    A ``scale='log'`` constraint has no such merit function; the predictor then
+    moves by a damped fixed-point step instead.
     """
     eta = (
         _initial_log_predictor(base, observations, constraints)
         if start is None else np.array(start, dtype=float)
     )
     columns = _relinearized_columns(observations, constraints, eta, base)
+    searched = all(item.scale == "identity" for item in constraints)
+    merit = _merit(base, observations) if searched else None
     previous, damping, change = np.inf, 1.0, np.inf
+    accepted = accepted_value = None
+
     def corrected(model, eta, psd):
         correction = _curvature_correction(observations, eta, base) if curvature else None
         if correction is None:
             return model
         return _with_curvature(model, eta, _psd_part(correction) if psd else correction)
+
+    def grid(x):
+        return base.prediction_offset + np.asarray(base.prediction_design @ x).reshape(-1)
 
     # The latent space is the same every pass, so a Laplace inner fit restarts
     # from the previous pass's mode (the exact engine takes no start).
@@ -725,9 +758,7 @@ def relinearize(base, observations, constraints, *, project, inner_fit, start=No
         if fit is None:
             model = corrected(linear, eta, psd=True)
             fit = inner_fit(model, **mode)
-        if curvature:
-            mode = {"initial_mode": fit.mean}
-        target = model.prediction_offset + np.asarray(model.prediction_design @ fit.mean).reshape(-1)
+        target = grid(fit.mean)
         if not columns.size:
             return model, target
         change = float(np.max(np.abs(target[columns] - eta[columns])))
@@ -743,12 +774,28 @@ def relinearize(base, observations, constraints, *, project, inner_fit, start=No
                         "intercept or a tighter prior near the aggregates' level"
                     ) from error
             return model, eta
-        # Damping only tames oscillation; it does not move the fixed point. It
-        # recovers after progress, or a Newton iteration (curvature) would be
-        # held to a linear rate by one early overshoot.
-        damping = max(damping / 2.0, 1.0 / 16.0) if change > previous else min(1.0, 2.0 * damping)
-        previous = change
-        eta = eta + damping * (target - eta)
+        last, previous = previous, change
+        if searched:
+            x = np.asarray(fit.mean, dtype=float)
+            if accepted is not None:
+                step, value = 1.0, merit(x)
+                while value > accepted_value and step > 1e-6:
+                    step /= 2.0
+                    x = accepted + step * (np.asarray(fit.mean) - accepted)
+                    value = merit(x)
+                accepted_value = value
+            else:
+                accepted_value = merit(x)
+            accepted = x
+            eta = grid(x)
+        else:
+            # Damping only tames oscillation; it does not move the fixed point. It
+            # recovers after progress, or a Newton iteration (curvature) would be
+            # held to a linear rate by one early overshoot.
+            damping = max(damping / 2.0, 1.0 / 16.0) if change > last else min(1.0, 2.0 * damping)
+            eta = eta + damping * (target - eta)
+        if curvature:
+            mode = {"initial_mode": accepted if searched else fit.mean}
     raise InferenceError(
         f"scale relinearization did not converge in {_RELINEARIZATION_MAX_ITERATIONS} "
         f"iterations (last change {change:.3e})"

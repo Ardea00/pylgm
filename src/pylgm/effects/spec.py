@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import TypeAlias
 import warnings
 
+import numpy as np
+
 from pylgm.parameters import Hyperparameter
 from pylgm._checks import positive_real as _positive_real, finite_real as _finite_real
 
@@ -65,6 +67,78 @@ class IID(_ComposableEffect):
         object.__setattr__(
             self, "precision", _positive_precision(self.precision, "precision")
         )
+
+
+@dataclass(frozen=True)
+class Correlated(_ComposableEffect):
+    """``k`` correlated IID components per level: R-INLA's ``iid2d``/``iidkd``.
+
+    Component ``c`` is indexed by column ``index[c]``; a NaN there means the
+    component does not enter that row. ``Correlated("node", index=("sender",
+    "receiver"))`` is a network's sender/receiver effect, correlated per node.
+    ``precision`` holds the ``k`` marginal precisions; ``correlation`` the
+    ``k (k - 1) / 2`` canonical partial correlations in ``(-1, 1)``, row-major
+    ``(0,1), (0,2), ..., (1,2), ...`` (for ``k = 2``, simply the correlation).
+    Either may hold ``Hyperparameter``s; a correlation one needs
+    ``transform="logit"``. A correlation ``Hyperparameter`` without a prior gets
+    the LKJ(``lkj``) prior's law for its position, ``Beta(b_j, b_j)`` on
+    ``(-1, 1)`` with ``b_j = lkj + (k - 2 - j) / 2`` (``lkj = 1``: uniform over
+    correlation matrices).
+    """
+
+    name: str
+    index: tuple
+    precision: tuple = ()
+    correlation: tuple = ()
+    lkj: float = 1.0
+
+    def __post_init__(self) -> None:
+        from dataclasses import replace
+
+        from pylgm.priors import SymmetricBeta
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        index = (self.index,) if isinstance(self.index, str) else tuple(self.index)
+        if len(index) < 2:
+            raise ValueError("Correlated needs at least two components (index columns)")
+        for column in index:
+            _non_empty_string(column, "index")
+        k = len(index)
+        precision = self.precision
+        precision = (precision,) * k if not isinstance(precision, tuple) else precision
+        precision = precision or (1.0,) * k
+        if len(precision) != k:
+            raise ValueError(f"Correlated precision needs {k} entries, one per component")
+        correlation = self.correlation
+        correlation = (correlation,) if not isinstance(correlation, tuple) else correlation
+        correlation = correlation or (0.0,) * (k * (k - 1) // 2)
+        if len(correlation) != k * (k - 1) // 2:
+            raise ValueError(
+                f"Correlated correlation needs {k * (k - 1) // 2} canonical partial correlations"
+            )
+        lkj = _positive_real(self.lkj, "lkj")
+        rows = np.triu_indices(k, 1)[0]
+        checked = []
+        for j, value in zip(rows, correlation, strict=True):
+            if isinstance(value, Hyperparameter):
+                if value.prior is None:
+                    value = replace(value, prior=SymmetricBeta(float(lkj + (k - 2 - j) / 2.0)))
+            elif not -1.0 < _finite_real(value, "correlation") < 1.0:
+                raise ValueError("Correlated correlations must lie in (-1, 1)")
+            checked.append(value)
+        object.__setattr__(self, "index", index)
+        object.__setattr__(
+            self, "precision", tuple(_positive_precision(p, "precision") for p in precision)
+        )
+        object.__setattr__(self, "correlation", tuple(checked))
+        object.__setattr__(self, "lkj", lkj)
+
+    @property
+    def hyperparameters(self) -> list:
+        """Each distinct ``Hyperparameter`` once: one object may serve several
+        components (equal precisions, as reciprocity's two directions want)."""
+        found = (p for p in (*self.precision, *self.correlation) if isinstance(p, Hyperparameter))
+        return list({hp.name: hp for hp in found}.values())
 
 
 @dataclass(frozen=True)
@@ -756,6 +830,7 @@ __all__ = [
     "Besag",
     "BYM2",
     "Copy",
+    "Correlated",
     "DynamicSpatialPanel",
     "Fixed",
     "Grouped",

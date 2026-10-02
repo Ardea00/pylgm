@@ -16,7 +16,7 @@ from functools import partial
 import numpy as np
 from scipy.sparse import csr_matrix, vstack
 
-from pylgm.effects import Copy, Weighted
+from pylgm.effects import Copy, Correlated, Weighted
 from pylgm.exceptions import ModelValidationError, UnsupportedEngineError
 from pylgm.ir.model import LatentBlock
 from pylgm.observations import (
@@ -375,6 +375,18 @@ class Joint:
         for entry in shared:
             if not isinstance(entry, Shared):
                 raise TypeError("Joint shared entries must be Shared instances")
+            if isinstance(entry.effect, Correlated):
+                if len(entry.effect.index) != len(submodels):
+                    raise ValueError(
+                        f"shared Correlated {entry.name!r} needs one component (index "
+                        f"column) per sub-model: {len(submodels)}, got {len(entry.effect.index)}"
+                    )
+                if entry.scale != 1.0:
+                    raise ValueError(
+                        f"shared Correlated {entry.name!r} takes no scale: its components' "
+                        "precisions and correlations already set each outcome's share"
+                    )
+                continue
             entry.scales_for(len(submodels))
         shared_names = [entry.name for entry in shared]
         if len(shared_names) != len(set(shared_names)):
@@ -660,6 +672,9 @@ class Joint:
         for model in self.submodels:
             declared.extend(hp for _, hp in _model_hyperparameters(model))
         for entry in self.shared:
+            if isinstance(entry.effect, Correlated):
+                declared.extend(entry.effect.hyperparameters)
+                continue
             for scale in entry.scales_for(len(self.submodels)):
                 if isinstance(scale, Hyperparameter):
                     declared.append(scale)
