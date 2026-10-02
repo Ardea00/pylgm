@@ -247,6 +247,15 @@ def _config_lgm(data: DataConfig, model: ModelConfig, optimized) -> "LGM":
             built = build_effect(effect, Path("."))
         except (ConfigurationError, ModelValidationError, KeyError, TypeError, ValueError) as error:
             raise CompilationError(f"failed to compile effect {effect.name!r}: {error}") from error
+        if isinstance(built, Correlated):
+            # k precisions and correlations: one ``<name>.precision`` cannot name them.
+            if f"{effect.name}.precision" in optimized:
+                raise CompilationError(
+                    f"effect {effect.name!r} is correlated: estimate its precisions and "
+                    "correlations through the Python API (Hyperparameter entries)"
+                )
+            predictor = predictor + built
+            continue
         precision = declared(f"{effect.name}.precision", _configured_precision(effect))
         if isinstance(precision, Hyperparameter):
             if isinstance(built, Grouped):

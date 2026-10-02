@@ -20,7 +20,6 @@ Each structured effect takes a fixed `precision` or a declared
 | `Copy(name, index, scale=)` | A second occurrence of an existing field at another index, optionally rescaled | [Copy](#copy) |
 | `Replicated(effect, over=)` | `R` independent copies of any indexed effect, sharing its hyperparameters | [Replicated](#replicated) |
 | `Grouped(effect, over=, structure=)` | `R` **correlated** copies of any indexed effect, tied by a between-group structure | [Grouped](#grouped) |
-| `Correlated(name, index=(...), correlation=)` | `k` correlated IID components per level (R-INLA `iid2d`/`iidkd`) — a network's sender/receiver effect | [Correlated](#correlated-effect) |
 | `MIDAS(name, columns)` | Mixed-frequency distributed lag, smoothness-penalised | [MIDAS](#midas-smooth-lag-effect) |
 | `MIDASParametric(...)` | Restricted lag curve (exp-Almon / Beta kernel) | [restricted MIDAS](#restricted-midas-effect-parametric-lag-weights) |
 | `SpaceTime(name, space, time, interaction=)` | Knorr-Held space-time interaction, types I–IV | [SpaceTime](#spacetime-effect-knorr-held-interaction) |
@@ -115,6 +114,17 @@ gets the LKJ(`lkj`) prior's law for its position, `Beta(b_j, b_j)` on `(−1, 1)
 with `b_j = lkj + (k − 2 − j)/2` (`SymmetricBeta`); `lkj = 1` is uniform over
 correlation matrices. One `Hyperparameter` may serve several components — equal
 precisions, as reciprocity's two directions want.
+
+**From YAML:** the standalone `load_model` frontend declares `type: correlated`
+with a list `index`, a `precision` list (default all `1.0`), a `correlation`
+list or scalar (default all `0.0`) and an optional `lkj`. As for every YAML
+effect, the values are fixed; estimating them is Python-API-only.
+
+```yaml
+predictor:
+  effects:
+    - {name: node, type: correlated, index: [sender, receiver], precision: [2.0, 2.0], correlation: 0.4}
+```
 
 In a `Joint`, `Shared(Correlated(name, index=(col_1, ..., col_K)))` puts
 component `c` in outcome `c`: a firm's link propensity and its typical exposure,
@@ -845,24 +855,6 @@ overrides stay Python-API-only.
 predictor:
   effects:
     - {name: m, type: midas_parametric, columns: [x0, x1, x2, x3], kernel: exp_almon}
-```
-
-## Correlated effect
-
-`Correlated(name, index=("sender", "receiver"), precision=(τ₁, τ₂), correlation=ρ)`
-gives `k` IID components per level, component `c` read from column `index[c]`,
-with covariance `Σ ⊗ I` where `Σ` has marginal precisions `precision` and
-canonical partial correlations `correlation` (`k(k-1)/2` of them, in `(-1, 1)`).
-
-**From YAML:** the standalone `load_model` frontend declares `type: correlated`
-with a list `index` (at least two columns), a `precision` list (default all
-`1.0`), a `correlation` list or scalar (default all `0.0`) and an optional
-`lkj`. Estimating `precision`/`correlation` from YAML stays Python-API-only.
-
-```yaml
-predictor:
-  effects:
-    - {name: node, type: correlated, index: [sender, receiver], precision: [2.0, 2.0], correlation: 0.4}
 ```
 
 ## Linear constraints (`extraconstr`)

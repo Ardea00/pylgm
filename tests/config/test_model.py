@@ -829,3 +829,20 @@ def test_load_model_rejects_wrong_correlated_lengths(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="precision needs 2 entries"):
         load_model(path)
+
+
+def test_experiment_path_accepts_a_correlated_effect():
+    """The experiment (RunConfig) path builds a correlated effect as-is, and
+    refuses a ``<name>.precision`` optimisation it cannot map to k precisions."""
+    from pylgm.compiler import _config_lgm
+    from pylgm.config.schema import DataConfig, ModelConfig
+    from pylgm.effects import Correlated
+    from pylgm.exceptions import CompilationError
+
+    data = DataConfig(time="t", response="y")
+    model = ModelConfig(sigma=1.0, effects=[{"name": "node", "type": "correlated",
+                                             "index": ["sender", "receiver"], "correlation": 0.3}])
+    built = _config_lgm(data, model, ())
+    assert any(isinstance(effect, Correlated) for effect in built.predictor.effects)
+    with pytest.raises(CompilationError, match="correlated"):
+        _config_lgm(data, model, ("node.precision",))
