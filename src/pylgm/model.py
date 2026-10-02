@@ -515,11 +515,13 @@ class LGM:
         fits full-Laplace tabulated marginals (unconstrained models only);
         both non-``"gaussian"`` strategies require ``hyperparameters="integrate"``.
 
-        For a Gaussian model, ``observations`` may contain ``LinearObservation``
-        blocks whose operators aggregate the predictor-grid rows, and ``constraints``
-        may contain exact ``LinearConstraint`` equalities on that same grid. Operator
-        columns follow the caller's frame order. When either is supplied, the response
-        column may be absent entirely.
+        ``observations`` may contain ``LinearObservation`` blocks whose operators
+        aggregate the predictor-grid rows, and ``constraints`` may contain exact
+        ``LinearConstraint`` equalities on that same grid, for any likelihood: a
+        non-Gaussian model keeps its own row likelihood and takes the observations
+        as Gaussian pseudo-rows on the Laplace engine. Operator columns follow the
+        caller's frame order. When either is supplied, the response column may be
+        absent entirely.
 
         ``num_workers`` runs a hyperparameter search's independent conditional
         fits (a finite-difference gradient's points, an INLA grid) concurrently
@@ -547,10 +549,6 @@ class LGM:
             raise TypeError("observations must contain only LinearObservation instances")
         if any(not isinstance(item, LinearConstraint) for item in constraints):
             raise TypeError("constraints must contain only LinearConstraint instances")
-        if (observations or constraints) and not isinstance(self.likelihood, Gaussian):
-            raise UnsupportedEngineError(
-                "linear observations and predictor constraints require a Gaussian likelihood"
-            )
         if hyperparameters not in ("optimize", "integrate"):
             raise ValueError(
                 f"hyperparameters must be 'optimize' or 'integrate', got {hyperparameters!r}"
@@ -643,12 +641,24 @@ class LGM:
 
         from pylgm.compiler import build_prediction_context, compile_family, compile_lgm
         from pylgm.observations import (
+            _ProjectedGaussianFamily,
+            _ProjectedMixtureFamily,
             _RelinearizedFamily,
             observation_hyperparameters,
             project_gaussian_family,
             project_gaussian_model,
+            project_mixture_model,
             reorder_linear_inputs,
         )
+
+        # A Gaussian model folds the observations into one standardized Gaussian
+        # likelihood; any other keeps its rows and gains Gaussian pseudo-rows.
+        if isinstance(self.likelihood, Gaussian):
+            project, projected_family = project_gaussian_model, _ProjectedGaussianFamily
+            inner_fit = partial(fit_gaussian, predictive_variances=False)
+        else:
+            project, projected_family = project_mixture_model, _ProjectedMixtureFamily
+            inner_fit = fit_laplace
 
         observations, constraints = reorder_linear_inputs(
             observations, constraints, panel.source_positions
@@ -656,7 +666,7 @@ class LGM:
         if (
             (observations or constraints)
             and not panel.observed.any()
-            and isinstance(self.likelihood.sigma, Hyperparameter)
+            and isinstance(getattr(self.likelihood, "sigma", None), Hyperparameter)
         ):
             # Without row responses the row likelihood is a placeholder: its sigma
             # moves neither the predictions nor the LML, so it would be a flat
@@ -672,10 +682,7 @@ class LGM:
             family = project_gaussian_family(
                 compile_family(self, panel), observations, constraints,
                 base_model=compiled,
-                family_type=partial(
-                    _RelinearizedFamily, project=project_gaussian_model,
-                    inner_fit=partial(fit_gaussian, predictive_variances=False),
-                ),
+                family_type=partial(_RelinearizedFamily, project=project, inner_fit=inner_fit),
             )
 
             def direct():
@@ -686,13 +693,16 @@ class LGM:
                 family = project_gaussian_family(
                     family, observations, constraints,
                     base_model=compiled if family is None else None,
+                    family_type=projected_family,
                 )
             elif family is not None and (observations or constraints):
-                family = project_gaussian_family(family, observations, constraints)
+                family = project_gaussian_family(
+                    family, observations, constraints, family_type=projected_family,
+                )
 
             def direct():
                 if observations or constraints:
-                    return project_gaussian_model(compiled, observations, constraints)
+                    return project(compiled, observations, constraints)
                 return compiled
         result = self._fit_family(family, direct, engine, **options)
         return _finished(

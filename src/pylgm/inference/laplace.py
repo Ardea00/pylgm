@@ -153,6 +153,31 @@ def _reported_predictions(model, mean, variances, wanted: bool):
     return predictive_variance, predictive_mean, fitted_mean
 
 
+def _prior_data_log_density(model: CompiledLGM, latent_size: int, precision) -> float:
+    """``log p(e)``: the density of the data rows ``A x = e`` under the prior.
+
+    The prior is conditioned on the structural rows only (intrinsic sum-to-zero,
+    model-level ``constraints=``), which make an intrinsic prior proper on the
+    reduced space. ``precision`` may be dense or sparse.
+    """
+    structural = model.constraints.shape[0] - model.data_constraint_count
+    rows, rhs = model.constraints[:structural], model.constraint_rhs[:structural]
+    basis = _constraint_null_space(rows, latent_size)
+    x_p = _constraint_particular_solution(rows, rhs, latent_size)
+    reduced = basis.T @ (precision @ basis)
+    factor, logdet = _factor_positive_definite(np.asarray(reduced), "reduced prior precision")
+    data_rows = model.constraints[structural:]
+    data_rhs = model.constraint_rhs[structural:]
+    mean = np.zeros(basis.shape[1])
+    if x_p is not None:
+        mean = cho_solve(factor, -(basis.T @ (precision @ x_p)))
+        data_rhs = data_rhs - data_rows @ x_p
+    *_, log_density = _condition_on_data_constraints(
+        mean, logdet, reduced, data_rows @ basis, data_rhs,
+    )
+    return log_density
+
+
 def _fit_laplace_dense(
     model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False,
     initial_mode: np.ndarray | None = None, predictive_variances: bool = True,
@@ -169,19 +194,20 @@ def _fit_laplace_dense(
     lk_obs = _observed_likelihood(model)
 
     # A trailing ``data_constraint_count`` rows of ``model.constraints`` are
-    # exact data (a ``LinearConstraint``), not pure conditioning: they enter
-    # ``log p(y, e) = log p(y) + log p(e | y)`` as the density of an exact
-    # observation of ``A x``, scored below by ``_condition_on_data_constraints``
-    # against the *Laplace* posterior -- the same identity ``inference/gaussian.py``
-    # uses against the exact Gaussian posterior. Only the structural rows (the
-    # intrinsic sum-to-zero and any model-level ``constraints=`` label rows)
-    # restrict the Newton fit's search space here.
-    structural_count = model.constraints.shape[0] - model.data_constraint_count
-    structural_constraints = model.constraints[:structural_count]
-    structural_rhs = model.constraint_rhs[:structural_count]
+    # exact data (a ``LinearConstraint``), not pure conditioning. They enter as
+    # ``log p(y, e) = log p(e) + log p(y | e)``: the prior density of ``A x`` at
+    # ``e`` is exact Gaussian, and the Laplace step runs on the prior conditioned
+    # on every row, so the Newton search stays on ``A x = e`` and lands on the
+    # constrained mode. (Conditioning the *unconstrained* Laplace posterior
+    # afterwards is only first-order accurate for a non-Gaussian likelihood, and
+    # the error grows with how far the data rows move the mode.)
+    data_log_density = 0.0
+    if model.data_constraint_count:
+        data_log_density = _prior_data_log_density(model, latent_size, precision)
+    constraints, constraint_rhs = model.constraints, model.constraint_rhs
 
-    basis = _constraint_null_space(structural_constraints, latent_size)
-    identity = not structural_constraints.shape[0]
+    basis = _constraint_null_space(constraints, latent_size)
+    identity = not constraints.shape[0]
     reduced_dim = basis.shape[1]
     # The observed design stays sparse: eta = Z (B z), the gradient B^T (Z^T g) and
     # the curvature B^T (Z^T W Z) B cost O(nnz(Z)) and O(p^2 d), where the dense
@@ -207,7 +233,7 @@ def _fit_laplace_dense(
     # Nonzero-rhs constraint: x = x_p + basis @ z shifts the observed predictor by
     # design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p); the
     # induced prior mean of z is m = -Q_r^-1 b_p (conditioning by kriging).
-    x_p = _constraint_particular_solution(structural_constraints, structural_rhs, latent_size)
+    x_p = _constraint_particular_solution(constraints, constraint_rhs, latent_size)
     prior_linear = np.zeros(reduced_dim)
     prior_mean = np.zeros(reduced_dim)
     if x_p is not None:
@@ -308,11 +334,8 @@ def _fit_laplace_dense(
         weights = lk_obs.working_weights(eta, y_obs)
         hessian = curvature(weights)
         factor, logdet_posterior = _factor_positive_definite(hessian, "reduced posterior precision")
-        # Covariance = F F^T with F = basis L^-T; F doubles as the sampling factor.
-        covariance_factor = solve_triangular(factor[0], basis.T, lower=True).T
         loglik_mode = lk_obs.log_likelihood(eta, y_obs)
     else:
-        covariance_factor = np.zeros((latent_size, 0))
         logdet_posterior = 0.0
         loglik_mode = lk_obs.log_likelihood(offset_obs, y_obs)
         factor = prior_factor
@@ -334,43 +357,16 @@ def _fit_laplace_dense(
         - 0.5 * float(centered @ reduced_precision @ centered)
         + 0.5 * logdet_prior
         - 0.5 * logdet_posterior
-    ) + model.log_likelihood_normalization
+    ) + model.log_likelihood_normalization + data_log_density
 
-    covariance_basis = basis
-    z_reported = z_mean
-    if model.data_constraint_count:
-        # log p(y, e) = log p(y) + log p(e | y): the Laplace posterior at the
-        # mode (mean=z, precision=hessian) stands in for the exact Gaussian
-        # posterior _condition_on_data_constraints was written against; the
-        # identity itself is purely array-based (mean/logdet/precision plus the
-        # data rows/rhs), so it applies unchanged to a Laplace mode.
-        data_rows = model.constraints[structural_count:]
-        data_rhs = model.constraint_rhs[structural_count:]
-        if x_p is not None:
-            data_rhs = data_rhs - data_rows @ x_p
-        # `factor` is reassigned here to the *conditioned* factor (of
-        # ``null.T @ hessian @ null``, shape ``null.shape[1]``), not the
-        # pre-conditioning Hessian factor computed above -- covariance after
-        # conditioning is ``N (N^T H N)^-1 N^T``, so the sampling factor below
-        # must be built from that smaller factor, exactly as
-        # ``inference/gaussian.py`` reassigns its own ``factor`` at the
-        # matching step.
-        z_reported, null, factor, data_log_density = _condition_on_data_constraints(
-            z_reported, logdet_posterior, hessian,
-            data_rows if identity else data_rows @ basis, data_rhs,
-        )
-        log_marginal_likelihood += data_log_density
-        covariance_basis = null if identity else basis @ null
-
-    # Covariance factor after any data-constraint conditioning: its columns span
-    # the *data*-constrained null space, so sampler draws satisfy every extra
-    # constraint row, structural or data, to numerical precision.
+    # Covariance = F F^T with F = basis L^-T; F doubles as the sampling factor.
+    # Its columns span the null space of every constraint row, structural or
+    # data, so sampler draws satisfy all of them to numerical precision.
     covariance_factor = (
-        solve_triangular(factor[0], covariance_basis.T, lower=True).T
-        if reduced_dim and covariance_basis.shape[1]
-        else np.zeros((latent_size, covariance_basis.shape[1]))
+        solve_triangular(factor[0], basis.T, lower=True).T
+        if reduced_dim else np.zeros((latent_size, 0))
     )
-    mean = basis @ z_reported if x_p is None else x_p + basis @ z_reported
+    mean = basis @ z_mean if x_p is None else x_p + basis @ z_mean
     covariance = covariance_factor @ covariance_factor.T
 
     prediction_design = model.prediction_design
@@ -426,7 +422,14 @@ def _fit_laplace_sparse(
     Newton-decrement rescue mirror ``_fit_laplace_dense`` so both stop at the
     same mode; see docs/design/specs/2026-09-27-pylgm-sparse-laplace-design.md.
     """
-    from pylgm.inference.sparse import _sparse_solve
+    from pylgm.inference.sparse import _sparse_solve, prior_data_log_density
+
+    # Data rows join the structural ones for the Newton search and the Laplace
+    # term, which is then log p(y | e); log p(e) is added at the end (see the
+    # dense engine).
+    data_model = model if model.data_constraint_count else None
+    if data_model is not None:
+        model = model._structural_data_rows()
 
     latent_size = model.precision.shape[0]
     observed = model.observed
@@ -519,15 +522,15 @@ def _fit_laplace_sparse(
         - 0.5 * float(centered @ (q @ centered))
         + 0.5 * solve.logdet_prior
         - 0.5 * solve.logdet_posterior
-    ) + model.log_likelihood_normalization + solve.data_log_density
+    ) + model.log_likelihood_normalization
+    if data_model is not None:
+        log_marginal_likelihood += prior_data_log_density(data_model, solve.logdet_prior, solve.nu)
 
     mean = solve.mean
     if mean_correction:
-        # The dense engine shifts the mode with the structural-only posterior and
-        # then conditions on the data rows; by linearity that is the conditioned
-        # mean plus Sigma_all A^T (sigma_eta^2 g3 / 2), with sigma_eta^2 taken
-        # before the data rows (structural_only).
-        eta_variance = posterior.predictive_variances(design, structural_only=True)
+        # Every row is structural here, so this is the dense engine's shift
+        # Sigma A^T (sigma_eta^2 g3 / 2) on the fully constrained posterior.
+        eta_variance = posterior.predictive_variances(design)
         third = np.asarray(lk_obs.third_derivative(eta, y_obs), dtype=float)
         mean = mean + posterior.covariance_apply(design.T @ (0.5 * eta_variance * third))
 

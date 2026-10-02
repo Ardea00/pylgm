@@ -250,9 +250,35 @@ def test_joint_with_a_shared_field_and_a_data_constraint(monkeypatch):
     np.testing.assert_allclose(sparse.predictive_variance, dense.predictive_variance, rtol=1e-6, atol=1e-10)
 
 
+def test_data_constraint_evidence_is_exact_for_a_gaussian_likelihood(monkeypatch):
+    """log p(e) + Laplace log p(y | e) is exact for a Gaussian row likelihood, so
+    both Laplace engines reproduce the exact engine's log p(y) + log p(e | y)."""
+    from pylgm.joint import Joint
+    from pylgm.observations import LinearConstraint
+
+    frame = _frame()
+    frame["level"] = np.log1p(frame["count"].fillna(2.0))
+    model = LGM(response="level", likelihood=Gaussian(0.5), predictor=FIELD,
+                panel=("region",), time="t")
+    operator = np.zeros((1, len(frame)))
+    operator[0, :REGIONS] = 1.0 / REGIONS
+    constraint = LinearConstraint(operator, [1.0])
+    # With nothing shared the joint factorizes, so its evidence is the sum of
+    # two exact single-response fits.
+    frame["other"] = frame["x"] + 0.1 * frame["level"]
+    other = LGM(response="other", likelihood=Gaussian(0.7), predictor=Fixed("1 + x"),
+                panel=("region",), time="t")
+    exact = (model.fit(frame, constraints=[constraint]).log_marginal_likelihood
+             + other.fit(frame).log_marginal_likelihood)
+    for result in _dense_and_sparse(
+        lambda: Joint([model, other]).fit(frame, constraints={"level": [constraint]}), monkeypatch
+    ):
+        np.testing.assert_allclose(result.log_marginal_likelihood, exact, atol=1e-8)
+
+
 def test_mean_correction_with_data_constraints_matches_dense(monkeypatch):
-    """The shift uses the eta variances *before* conditioning on the data rows
-    (the dense engine shifts, then conditions); used to be refused above the guard."""
+    """The shift uses the posterior conditioned on every row, data rows included;
+    used to be refused above the guard."""
     from pylgm.joint import Joint
     from pylgm.observations import LinearConstraint
 

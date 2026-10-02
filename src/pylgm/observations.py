@@ -1,4 +1,4 @@
-"""Gaussian observations and exact constraints on a predictor grid."""
+"""Gaussian linear observations and exact constraints on a predictor grid."""
 
 from dataclasses import dataclass, field
 
@@ -277,12 +277,13 @@ def project_gaussian_model(
     )
 
 
-def project_joint_model(model, observations, constraints):
-    """Append standardized ``LinearObservation`` pseudo-rows to a stacked joint model.
+def project_mixture_model(model, observations, constraints):
+    """Append standardized ``LinearObservation`` pseudo-rows to a non-Gaussian model.
 
-    Unlike :func:`project_gaussian_model`, the sub-model rows keep their own
-    likelihoods; only the pseudo-rows are divided by ``sigma``, under a unit
-    Gaussian part appended to the mixture after every grid row.
+    Unlike :func:`project_gaussian_model`, the rows keep their own likelihoods
+    (a single one, or a joint's mixture); only the pseudo-rows are divided by
+    ``sigma``, under a unit Gaussian part appended to the mixture after every
+    grid row.
     """
     if any(item.scale != "identity" for item in (*observations, *constraints)):
         raise ModelValidationError(
@@ -414,8 +415,8 @@ class _ProjectedGaussianFamily:
 
 
 @dataclass(frozen=True)
-class _ProjectedJointFamily(_ProjectedGaussianFamily):
-    """``_ProjectedGaussianFamily`` for a stacked joint: sub-model rows keep their likelihoods."""
+class _ProjectedMixtureFamily(_ProjectedGaussianFamily):
+    """``_ProjectedGaussianFamily`` for a non-Gaussian model: its rows keep their likelihoods."""
 
     def materialize(self, values):
         base = self.base.materialize({name: values[name] for name in self.base.parameter_names})
@@ -424,7 +425,7 @@ class _ProjectedJointFamily(_ProjectedGaussianFamily):
             if isinstance(item.sigma, Hyperparameter) else item
             for item in self.observations
         )
-        return project_joint_model(base, observations, self.constraints)
+        return project_mixture_model(base, observations, self.constraints)
 
 
 @dataclass(frozen=True)

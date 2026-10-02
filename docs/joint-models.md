@@ -294,14 +294,14 @@ result = joint.fit(
 **Pseudo-rows.** Each `LinearObservation` adds a Gaussian pseudo-row,
 standardized by `1 / sigma`, under a unit-Gaussian mixture part appended
 after the sub-models' own rows; the sub-model rows keep their own
-likelihoods (Poisson, Binomial, ...), unlike `LGM.fit`'s all-Gaussian
-projection. `log_likelihood_normalization` is reduced by `sum(log sigma)`
+likelihoods (Poisson, Binomial, ...), exactly as a non-Gaussian `LGM.fit`
+does. `log_likelihood_normalization` is reduced by `sum(log sigma)`
 accordingly.
 
-**Constraints** are exact equality constraints on the predictor grid,
-conditioned on after finding the mode: exact for an all-Gaussian stack, and
-an approximation for a non-Gaussian one — the same R-INLA `extraconstr`-style
-approximation `LGM.fit` already uses.
+**Constraints** are exact equality constraints on the predictor grid. They
+enter as `log p(e) + log p(y | e)`: the Newton search runs on the constrained
+prior, so the mode is the exact constrained mode for any likelihood, not the
+R-INLA `extraconstr`-style conditioning of the unconstrained one.
 
 `sigma` may be a `Hyperparameter`: it is then estimated by empirical Bayes
 alongside every other joint hyperparameter (sub-model likelihood parameters

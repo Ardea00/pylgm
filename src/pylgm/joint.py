@@ -22,7 +22,7 @@ from pylgm.ir.model import LatentBlock
 from pylgm.observations import (
     LinearConstraint,
     LinearObservation,
-    _ProjectedJointFamily,
+    _ProjectedMixtureFamily,
     _RelinearizedFamily,
     _aligned,
 )
@@ -283,7 +283,7 @@ class Joint:
         from pylgm.observations import (
             observation_hyperparameters,
             project_gaussian_family,
-            project_joint_model,
+            project_mixture_model,
         )
         from pylgm.parallel import validate_blas_threads, validate_workers
 
@@ -406,7 +406,7 @@ class Joint:
                 compile_joint_family(self, panels), stacked_observations, stacked_constraints,
                 base_model=compiled,
                 family_type=partial(
-                    _RelinearizedFamily, project=project_joint_model, inner_fit=fit_laplace,
+                    _RelinearizedFamily, project=project_mixture_model, inner_fit=fit_laplace,
                 ),
             )
 
@@ -418,17 +418,17 @@ class Joint:
                 family = project_gaussian_family(
                     family, stacked_observations, stacked_constraints,
                     base_model=compiled if family is None else None,
-                    family_type=_ProjectedJointFamily,
+                    family_type=_ProjectedMixtureFamily,
                 )
             elif family is not None and linear:
                 family = project_gaussian_family(
                     family, stacked_observations, stacked_constraints,
-                    family_type=_ProjectedJointFamily,
+                    family_type=_ProjectedMixtureFamily,
                 )
 
             def direct():
                 if linear:
-                    return project_joint_model(compiled, stacked_observations, stacked_constraints)
+                    return project_mixture_model(compiled, stacked_observations, stacked_constraints)
                 return compiled
         result = _fit_family(
             family, direct,
