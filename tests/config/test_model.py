@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from pylgm import Bernoulli, Fixed, Gaussian, IID, LGM, Poisson, RW1
+import numpy as np
+import pandas as pd
+
+from pylgm import Bernoulli, Correlated, Fixed, Gaussian, IID, LGM, Poisson, RW1
 from pylgm.config import load_model
 from pylgm.exceptions import ConfigurationError
 
@@ -785,4 +788,44 @@ def test_exponentialsurv_config_rejects_shape(tmp_path: Path) -> None:
         "predictor:\n  fixed: '1'\n"
     )
     with pytest.raises(ConfigurationError, match="shape"):
+        load_model(path)
+
+
+_CORRELATED_YAML = """
+response: y
+likelihood: {family: gaussian, sigma: 0.5}
+predictor:
+  effects:
+    - {name: node, type: correlated, index: [sender, receiver], precision: [2.0, 3.0], correlation: 0.4}
+""".strip()
+
+
+def test_load_model_builds_correlated_like_python(tmp_path: Path) -> None:
+    path = tmp_path / "model.yaml"
+    path.write_text(_CORRELATED_YAML)
+
+    assert load_model(path) == LGM(
+        response="y",
+        likelihood=Gaussian(0.5),
+        predictor=Fixed("1")
+        + Correlated("node", ("sender", "receiver"), (2.0, 3.0), (0.4,)),
+    )
+
+
+def test_load_model_fits_correlated(tmp_path: Path) -> None:
+    path = tmp_path / "model.yaml"
+    path.write_text(_CORRELATED_YAML)
+    rng = np.random.default_rng(0)
+    sender = np.repeat(np.arange(12), 6)
+    receiver = (sender + rng.integers(1, 12, sender.size)) % 12
+    frame = pd.DataFrame({"sender": sender, "receiver": receiver, "y": rng.normal(size=sender.size)})
+
+    assert np.isfinite(load_model(path).fit(frame).log_marginal_likelihood)
+
+
+def test_load_model_rejects_wrong_correlated_lengths(tmp_path: Path) -> None:
+    path = tmp_path / "model.yaml"
+    path.write_text(_CORRELATED_YAML.replace("[2.0, 3.0]", "[2.0, 3.0, 1.0]"))
+
+    with pytest.raises(ConfigurationError, match="precision needs 2 entries"):
         load_model(path)
