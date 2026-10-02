@@ -5,7 +5,7 @@ from scipy.linalg import cho_factor, cho_solve, null_space, solve_triangular
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, UnsupportedEngineError
 from pylgm.inference.result import GaussianResult, quadratic_form_diagonal
-from pylgm.inference.sampling import GridSampler
+from pylgm.inference.sampling import GridSampler, LazyArray
 from pylgm.ir.model import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -179,12 +179,25 @@ def _condition_on_data_constraints(
     return conditioned, null, null_factor, float(log_density)
 
 
+def _guarded(compute):
+    """Run a deferred dense computation under the same floating-point regime as the fit."""
+
+    def run():
+        try:
+            with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
+                return compute()
+        except FloatingPointError as error:
+            raise NumericalError("exact Gaussian numerical calculation was non-finite") from error
+
+    return run
+
+
 def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
     variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
         raise NumericalError("sigma squared must be finite and positive")
 
-    precision = model.precision.toarray()
+    precision = model.precision
     latent_size = precision.shape[0]
     design = model.design
     y = model.y
@@ -201,7 +214,17 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     observed_design = design[observed]
     # With no structural rows the basis is the identity: skip the O(p^3) products.
     identity = not constraints.shape[0]
-    reduced_precision = precision if identity else basis.T @ precision @ basis
+    # Q and the likelihood gram G stay sparse until the one dense product with B:
+    # B^T (Q B) costs a sparse-times-dense O(nnz p) plus one dense p^3 matmul,
+    # where B^T Q B on densified Q costs two.
+    gram = (observed_design.T @ observed_design).tocsr()
+    if identity:
+        reduced_precision = precision.toarray()
+        posterior_precision = reduced_precision + gram.toarray() / variance
+    else:
+        prior_basis = precision @ basis
+        reduced_precision = basis.T @ prior_basis
+        posterior_precision = reduced_precision + basis.T @ (gram @ basis) / variance
 
     # The observed design stays sparse: Z^T Z costs O(nnz(Z) * row width) and
     # B^T (Z^T Z) B O(p^2 d), where the dense reduced design Z B costs O(n d^2).
@@ -209,7 +232,6 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
         pulled = np.asarray(observed_design.T @ values).reshape(-1)
         return pulled if identity else basis.T @ pulled
 
-    gram = (observed_design.T @ observed_design).toarray()
     residual = y[observed] - offset[observed]
     # Nonzero-rhs constraint: x = x_p + basis @ z shifts the likelihood residual
     # by design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p),
@@ -219,7 +241,6 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     if x_p is not None:
         residual = residual - np.asarray(observed_design @ x_p).reshape(-1)
         prior_linear = basis.T @ (precision @ x_p)
-    posterior_precision = reduced_precision + (gram if identity else basis.T @ gram @ basis) / variance
 
     prior_factor, logdet_prior = _factor_positive_definite(
         reduced_precision, "reduced prior precision"
@@ -251,7 +272,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
         n_observed * np.log(2 * np.pi * variance) - logdet_prior + logdet_posterior + quadratic
     ) + model.log_likelihood_normalization
 
-    covariance_basis = basis
+    covariance_basis, covariance_rank = (lambda: basis), basis.shape[1]
     if model.data_constraint_count:
         # log p(y, e) = log p(y) + log p(e | y): the data rows are exact observations.
         data_rows = model.constraints[structural_count:]
@@ -263,27 +284,43 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
             data_rows if identity else data_rows @ basis, data_rhs,
         )
         log_marginal_likelihood += data_log_density
-        covariance_basis = null if identity else basis @ null
+        covariance_rank = null.shape[1]
+        covariance_basis = (lambda: null) if identity else (lambda: basis @ null)
 
     # Covariance = F F^T with F = basis L^-T: F doubles as the sampling factor, and
     # its columns span the constraint null space, so every draw meets A x = e.
-    covariance_factor = (
-        solve_triangular(factor[0], covariance_basis.T, lower=True).T
-        if covariance_basis.shape[1] else np.zeros((latent_size, 0))
-    )
+    # Both O(p^3) objects are built on first read, not per fit: the log marginal
+    # likelihood never needs them, and an empirical-Bayes objective evaluation
+    # discards the result. The finiteness guard therefore runs when the covariance
+    # is first read (NumericalError, as before) rather than inside fit_gaussian.
+    chol = factor[0] if covariance_rank else None
+
+    @_guarded
+    def build_factor():
+        if chol is None:
+            return np.zeros((latent_size, 0))
+        return solve_triangular(chol, covariance_basis().T, lower=True).T
+
+    @_guarded
+    def build_covariance():
+        covariance_f = covariance_factor.get()
+        covariance = covariance_f @ covariance_f.T
+        _require_finite("posterior covariance", covariance)
+        return covariance
+
+    covariance_factor = LazyArray(build_factor)
+    lazy_covariance = LazyArray(build_covariance)
     mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
-    covariance = covariance_factor @ covariance_factor.T
     prediction_design = model.prediction_design
     predictive_mean = np.asarray(
         model.prediction_offset + prediction_design @ mean
     ).reshape(-1)
     predictive_variance = (
-        quadratic_form_diagonal(prediction_design, covariance)
+        quadratic_form_diagonal(prediction_design, lazy_covariance.get())
         if predictive_variances else None
     )
 
     _require_finite("posterior mean", mean)
-    _require_finite("posterior covariance", covariance)
     _require_finite("log marginal likelihood", log_marginal_likelihood)
     _require_finite("predictive mean", predictive_mean)
     if predictive_variance is not None:
@@ -291,7 +328,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     return GaussianResult(
         labels=model.labels,
         mean=mean,
-        covariance=covariance,
+        covariance=lazy_covariance,
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,

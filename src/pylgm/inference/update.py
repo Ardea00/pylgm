@@ -409,7 +409,7 @@ def _assembled(result, shift, log_evidence, added_rows, low_rank=None):
     covariance = result._covariance
     predictive_variance = result._predictive_variance
     posterior = result._sparse_posterior
-    factor = sampler.factor
+    factor = sampler.dense_factor()
 
     def on_grid(x):
         """The fitted grid's rows times ``x``, in caller order (the design is canonical)."""
