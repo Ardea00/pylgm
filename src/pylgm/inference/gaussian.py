@@ -249,10 +249,11 @@ def _lml_gradient(
         np.zeros((x_hat.size, 0)) if prior_factor is None
         else solve_triangular(prior_factor[0], prior_basis_t, lower=True).T
     )
-    noise_term = (_sparse_trace(post_factor, gram) + residual_sq) / variance**2
+    # Factored as (dv/v) (n - (tr(S G) + r'r)/v): v**2 overflows at extreme sigma.
+    noise_term = n_observed - (_sparse_trace(post_factor, gram) + residual_sq) / variance
     out = []
     for d_q, d_v in directions:
-        value = (n_observed / variance - noise_term) * d_v
+        value = (d_v / variance) * noise_term
         if d_q is not None:
             value += (
                 _sparse_trace(post_factor, d_q) - _sparse_trace(f_prior, d_q)

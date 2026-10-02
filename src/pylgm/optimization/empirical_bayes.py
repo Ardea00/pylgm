@@ -267,7 +267,14 @@ def optimize_empirical_bayes(
     except (TypeError, ValueError):
         fit_parameters = {}
     skip_intermediate_variances = "predictive_variances" in fit_parameters
-    use_directions = _ANALYTIC_GRADIENT and "lml_directions" in fit_parameters
+    # A family whose materialize carries state between calls (the relinearized
+    # projection warm-starts from the previous point) must not see the extra
+    # perturbed materializations the directions need.
+    use_directions = (
+        _ANALYTIC_GRADIENT
+        and "lml_directions" in fit_parameters
+        and not getattr(family, "stateful_materialize", False)
+    )
     # A Laplace fit warm-starts Newton from ONE fixed mode -- the first
     # evaluation's, at the initial point -- never from the previous evaluation:
     # finite-difference gradients turn a history-dependent change in the

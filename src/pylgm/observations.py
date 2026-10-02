@@ -615,6 +615,7 @@ class _RelinearizedFamily(_ProjectedGaussianFamily):
     inner_fit: Callable | None = field(default=None, compare=False)
     laplace: bool = field(default=False, compare=False)
     _start: dict = field(default_factory=dict, compare=False, repr=False)
+    stateful_materialize = True  # empirical Bayes: no perturbed gradient materializations
 
     def materialize(self, values):
         base = self.base.materialize({name: values[name] for name in self.base.parameter_names})
