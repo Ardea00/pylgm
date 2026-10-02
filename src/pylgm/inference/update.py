@@ -112,7 +112,7 @@ def _psd_factor(covariance: np.ndarray) -> np.ndarray:
 
 def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood):
     """Mode of ``p(y | eta) N(eta; m, S0)``: ``(a, W^1/2, cho(B), log p(y))`` (module doc)."""
-    require_separable(likelihood, m, y, "update()")
+    require_separable(likelihood, "update()")
     k = m.size
 
     def curvature(eta):

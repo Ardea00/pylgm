@@ -682,13 +682,17 @@ class LGM:
             )
 
         compiled = compile_lgm(self, panel)
-        if any(item.scale != "identity" for item in (*observations, *constraints)):
+        # The Laplace path fits a nonlinear observation exactly (CompiledAggregate);
+        # what is left to relinearize is a nonlinear constraint, or any nonlinear
+        # item on the exact Gaussian engine.
+        laplace = project is project_mixture_model
+        relinearized = (*constraints, *(() if laplace else observations))
+        if any(item.scale != "identity" for item in relinearized):
             family = project_gaussian_family(
                 compile_family(self, panel), observations, constraints,
                 base_model=compiled,
                 family_type=partial(
-                    _RelinearizedFamily, project=project, inner_fit=inner_fit,
-                    curvature=project is project_mixture_model,
+                    _RelinearizedFamily, project=project, inner_fit=inner_fit, laplace=laplace,
                 ),
             )
 

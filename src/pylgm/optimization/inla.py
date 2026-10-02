@@ -189,7 +189,7 @@ def _full_laplace_marginals(design, offset, y, grid, *,
     y = np.asarray(y, float)
     points = list(grid)
     for _, fit, likelihood, _ in points:
-        require_separable(likelihood, offset, y, "latent_strategy='laplace'")
+        require_separable(likelihood, "latent_strategy='laplace'")
     p = points[0][1].mean.shape[0]
     std_nodes = np.polynomial.hermite.hermgauss(n_abscissae)[0] * np.sqrt(2.0)  # ~N(0,1) abscissae
 
@@ -942,14 +942,13 @@ def _integrate_inla(
     theta_grid = [(w, cond, compiled.likelihood.restrict(observed))
                   for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
     criteria = None
-    # Curvature-correction pseudo-rows are not observations: criteria skip them.
+    # Nonlinear-aggregate pseudo-rows are not observations of their own: criteria
+    # skip them. A likelihood whose observations span rows has no per-row criteria.
     scored = observed.copy()
     for mask, part in getattr(kept[0][4].likelihood, "parts", ()):
-        if getattr(part, "curvature_only", False):
+        if getattr(part, "pseudo_rows", False):
             scored &= ~mask
-    if getattr(
-        kept[0][4].likelihood.restrict(scored), "cross_weights", lambda *_: None
-    )(kept[0][4].offset[scored], kept[0][4].y[scored]) is None:
+    if not getattr(kept[0][4].likelihood.restrict(scored), "couples_rows", False):
         crit = _model_criteria(*_criteria_inputs(kept, weights, scored))
 
         # crit.cpo/pit are computed in canonical order over observed rows only

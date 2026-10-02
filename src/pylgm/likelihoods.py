@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 import numpy as np
+from scipy.sparse import csr_matrix, vstack
 from scipy.special import (
     betainc, digamma, erf, gamma as gamma_fn, gammainc, gammaincc, gammaln, log_expit, log_ndtr,
     polygamma,
@@ -609,13 +610,18 @@ class CompiledMixture(_CompiledLikelihood):
         kept = []
         for mask, lk in self.parts:
             local = observed[mask]
-            if hasattr(lk, "cross_weights") and local.any() != local.all():
+            coupled = getattr(lk, "couples_rows", False)
+            if coupled and local.any() != local.all():
                 # Its rows index each other: keep the part whole or drop it whole.
                 raise ModelValidationError("a coupled likelihood part must keep all its rows")
-            if hasattr(lk, "cross_weights") and not local.any():
+            if coupled and not local.any():
                 continue
             kept.append((mask[observed], _restrict_bound_aux(lk, local)))
         return CompiledMixture(tuple(kept), int(observed.sum()))
+
+    @property
+    def couples_rows(self) -> bool:
+        return any(getattr(lk, "couples_rows", False) for _, lk in self.parts)
 
     def for_observations(self, aux) -> "CompiledMixture":
         if aux is None:
@@ -647,24 +653,33 @@ class CompiledMixture(_CompiledLikelihood):
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return self._scatter("third_derivative", eta, y)
 
-    def cross_weights(self, eta: np.ndarray, y: np.ndarray):
-        """Off-diagonal curvature of coupled parts: ``(rows_i, rows_j, c, flexible)``.
+    def curvature(self, eta: np.ndarray, y: np.ndarray, psd: bool = False):
+        """``(diagonal, pairs, virtual)``: the parts' curvature on the stacked rows.
 
-        ``c = -d2l / deta_i deta_j``. ``flexible`` marks the pairs of a bounded
-        likelihood, whose indefinite blocks may take a saddle-free direction; a
-        curvature correction is a local quadratic model, unbounded where it is
-        indefinite, so its pairs are never flexible.
+        ``pairs = (i, j, c)`` adds ``c (d_i d_j^T + d_j d_i^T)``; ``virtual`` is a
+        sparse row-combination matrix ``V`` adding ``(V D)^T (V D)``. Either may
+        be ``None``. ``psd`` asks each coupled part for a positive semidefinite
+        stand-in (a Newton direction for an iterate where it is indefinite).
         """
-        pairs = [
-            (rows[i], rows[j], c, np.full(c.size, not getattr(lk, "curvature_only", False)))
-            for mask, lk in self.parts if hasattr(lk, "cross_weights")
-            for local in (lk.cross_weights(eta[mask], y[mask]),) if local is not None
-            for rows in (np.flatnonzero(mask),)
-            for i, j, c in (local,)
-        ]
-        if not pairs:
-            return None
-        return tuple(np.concatenate(column) for column in zip(*pairs, strict=True))
+        diagonal = np.zeros(self.n_rows, dtype=float)
+        pairs, virtual = [], []
+        for mask, lk in self.parts:
+            rows = np.flatnonzero(mask)
+            if not hasattr(lk, "curvature"):
+                diagonal[mask] = lk.working_weights(eta[mask], y[mask])
+                continue
+            local_diagonal, local_pairs, local_virtual = lk.curvature(eta[mask], y[mask], psd)
+            diagonal[mask] = local_diagonal
+            if local_pairs is not None:
+                i, j, c = local_pairs
+                pairs.append((rows[i], rows[j], c))
+            if local_virtual is not None:
+                coo = local_virtual.tocoo()
+                virtual.append(csr_matrix(
+                    (coo.data, (coo.row, rows[coo.col])), shape=(coo.shape[0], self.n_rows)
+                ))
+        pairs = tuple(np.concatenate(c) for c in zip(*pairs, strict=True)) if pairs else None
+        return diagonal, pairs, (vstack(virtual, format="csr") if virtual else None)
 
     def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return self._scatter("pointwise_log_density", eta, y)
@@ -716,8 +731,8 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
 
     As a mixture part it owns ``2K`` rows: ``link_rows`` and ``amount_rows`` are
     the part-local rows of each pair. The term is not separable in its rows, so
-    besides the diagonal ``working_weights`` it reports the cross curvature
-    ``-d2l / da db`` through ``cross_weights``. With ``q = pS / (1 - pS)`` and
+    besides the diagonal ``working_weights`` it reports each pair's 2x2
+    curvature block through ``curvature``. With ``q = pS / (1 - pS)`` and
     ``m = p phi(w) / (sigma (1 - pS))``, both formed as exponentials of log
     differences so neither cancels:
 
@@ -733,6 +748,7 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
     amount_rows: np.ndarray
     threshold: np.ndarray
     sigma: float
+    couples_rows = True
 
     def _terms(self, eta):
         eta = np.asarray(eta, dtype=float)
@@ -757,9 +773,17 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
         out[self.amount_rows] = -l_bb
         return out
 
-    def cross_weights(self, eta: np.ndarray, y: np.ndarray):
-        _, w, one_minus_p, _, q, m = self._terms(eta)
-        return self.link_rows, self.amount_rows, -hurdle_curvature(one_minus_p, w, self.sigma, q, m)[1]
+    def curvature(self, eta: np.ndarray, y: np.ndarray, psd: bool = False):
+        """Per-pair 2x2 blocks; ``psd`` takes absolute eigenvalues (saddle-free
+        Newton): the term is bounded, so that is a well-scaled descent direction."""
+        eta, w, one_minus_p, _, q, m = self._terms(eta)
+        l_aa, l_ab, l_bb = hurdle_curvature(one_minus_p, w, self.sigma, q, m)
+        w_a, w_b, c = -l_aa, -l_bb, -l_ab
+        if psd:
+            w_a, w_b, c = psd_block(w_a, w_b, c, np.abs)
+        out = np.empty_like(eta)
+        out[self.link_rows], out[self.amount_rows] = w_a, w_b
+        return out, (self.link_rows, self.amount_rows, c), None
 
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         raise UnsupportedEngineError(
@@ -787,69 +811,24 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
         """Its rows carry no response: the absence from the register is the datum."""
 
 
-@dataclass(frozen=True)
-class CompiledCurvatureCorrection(_CompiledLikelihood):
-    """``-1/2 (eta - center)^T M (eta - center)`` on pseudo-rows: curvature, not data.
-
-    A relinearized aggregate's tangent matches its value and slope at ``center``
-    but not its curvature; this part restores the missing term of the exact
-    Hessian there while leaving the gradient, hence the mode, unchanged. ``M`` is
-    ``diagonal`` plus symmetric ``pairs`` ``(i, j, c)`` of distinct rows, each row
-    in at most one pair.
-    """
-
-    center: np.ndarray
-    diagonal: np.ndarray
-    pairs: tuple | None = None
-    curvature_only = True
-
-    def _apply(self, delta):
-        out = self.diagonal * delta
-        if self.pairs is not None:
-            i, j, c = self.pairs
-            np.add.at(out, i, c * delta[j])
-            np.add.at(out, j, c * delta[i])
-        return out
-
-    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
-        delta = np.asarray(eta, dtype=float) - self.center
-        return float(-0.5 * delta @ self._apply(delta))
-
-    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return -self._apply(np.asarray(eta, dtype=float) - self.center)
-
-    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.array(self.diagonal, dtype=float)
-
-    def cross_weights(self, eta: np.ndarray, y: np.ndarray):
-        return self.pairs
-
-    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.zeros(np.asarray(eta).shape)
-
-    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.zeros(np.asarray(eta).shape)
-
-    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.full(np.asarray(eta).shape, np.nan)
-
-    def response_mean(self, eta: np.ndarray) -> np.ndarray:
-        return np.asarray(eta, dtype=float)
-
-    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
-        return np.asarray(eta_mean, dtype=float)
-
-    def validate_response(self, y: np.ndarray) -> None:
-        """Pseudo-rows: no response."""
-
-
-def require_separable(likelihood, eta: np.ndarray, y: np.ndarray, what: str) -> None:
+def require_separable(likelihood, what: str) -> None:
     """Refuse a row-separable-only computation on a likelihood with coupled rows."""
-    coupled = getattr(likelihood, "cross_weights", None)
-    if coupled is not None and coupled(eta, y) is not None:
+    if getattr(likelihood, "couples_rows", False):
         raise UnsupportedEngineError(
-            f"{what} needs a row-separable likelihood; a censored hurdle couples rows"
+            f"{what} needs a row-separable likelihood; a censored hurdle or a nonlinear "
+            "aggregate observation couples rows"
         )
+
+
+def psd_block(w_i, w_j, c, positive):
+    """A symmetric 2x2 block ``[[w_i, c], [c, w_j]]`` with ``positive`` applied to
+    its eigenvalues (``np.abs``: saddle-free; ``lambda v: np.maximum(v, 0)``: clip)."""
+    angle = 0.5 * np.arctan2(2.0 * c, w_i - w_j)
+    cos, sin = np.cos(angle), np.sin(angle)
+    first = positive(w_i * cos * cos + w_j * sin * sin + 2.0 * c * sin * cos)
+    second = positive(w_i * sin * sin + w_j * cos * cos - 2.0 * c * sin * cos)
+    return (first * cos * cos + second * sin * sin, first * sin * sin + second * cos * cos,
+            (first - second) * sin * cos)
 
 
 def _restrict_bound_aux(likelihood, local_observed: np.ndarray):

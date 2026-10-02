@@ -157,37 +157,32 @@ def _curvature_rows(likelihood, design, eta: np.ndarray, y: np.ndarray, *, psd: 
     """``(rows, weights)`` with ``rows^T diag(weights) rows`` the likelihood curvature.
 
     A row-separable likelihood gives ``(design, working_weights)``. A coupled one
-    owns each pair's two rows outright, so its 2x2 curvature block
-    ``[[w_i, c], [c, w_j]]`` is replaced by its eigen-pair rows
-    ``cos t d_i + sin t d_j`` and ``-sin t d_i + cos t d_j`` (``tan 2t = 2c / (w_i - w_j)``),
-    weighted by the eigenvalues -- the same matrix, and every engine keeps its
-    ``(design, weights)`` form. ``psd`` takes absolute eigenvalues (saddle-free
-    Newton): a well-scaled descent direction for an iterate where the (not
-    log-concave) block is indefinite.
+    (``curvature``) adds per-pair 2x2 blocks ``[[w_i, c], [c, w_j]]`` -- each
+    replaced by its eigen-pair rows ``cos t d_i + sin t d_j`` and
+    ``-sin t d_i + cos t d_j`` (``tan 2t = 2c / (w_i - w_j)``) weighted by the
+    eigenvalues, the same matrix -- and virtual rows ``V D`` with unit weight.
+    Every engine keeps its ``(design, weights)`` form. ``psd`` asks the coupled
+    parts for a positive semidefinite stand-in (see ``CompiledMixture.curvature``).
     """
-    weights = np.asarray(likelihood.working_weights(eta, y), dtype=float)
-    coupled = getattr(likelihood, "cross_weights", None)
-    pairs = coupled(eta, y) if coupled is not None else None
-    if pairs is None:
-        return design, weights
-    i, j, c, *flexible = pairs  # a lone coupled likelihood has no flexible flags
-    flexible = flexible[0] if flexible else np.ones(c.size, dtype=bool)
-    w_i, w_j = weights[i], weights[j]
-    angle = 0.5 * np.arctan2(2.0 * c, w_i - w_j)
-    cos, sin = np.cos(angle), np.sin(angle)
-    first = w_i * cos * cos + w_j * sin * sin + 2.0 * c * sin * cos
-    second = w_i * sin * sin + w_j * cos * cos - 2.0 * c * sin * cos
-    if psd:
-        first = np.where(flexible, np.abs(first), first)
-        second = np.where(flexible, np.abs(second), second)
-    weights = weights.copy()
-    weights[i] = weights[j] = 0.0
-    d_i, d_j = design[i], design[j]
-    return (
-        vstack([design, d_i.multiply(cos[:, None]) + d_j.multiply(sin[:, None]),
-                d_j.multiply(cos[:, None]) - d_i.multiply(sin[:, None])], format="csr"),
-        np.concatenate([weights, first, second]),
-    )
+    if not hasattr(likelihood, "curvature"):
+        return design, np.asarray(likelihood.working_weights(eta, y), dtype=float)
+    weights, pairs, virtual = likelihood.curvature(eta, y, psd)
+    rows, all_weights = [design], [np.array(weights, dtype=float)]
+    if pairs is not None:
+        i, j, c = pairs
+        w_i, w_j = all_weights[0][i], all_weights[0][j]
+        angle = 0.5 * np.arctan2(2.0 * c, w_i - w_j)
+        cos, sin = np.cos(angle), np.sin(angle)
+        all_weights[0][i] = all_weights[0][j] = 0.0
+        d_i, d_j = design[i], design[j]
+        rows += [d_i.multiply(cos[:, None]) + d_j.multiply(sin[:, None]),
+                 d_j.multiply(cos[:, None]) - d_i.multiply(sin[:, None])]
+        all_weights += [w_i * cos * cos + w_j * sin * sin + 2.0 * c * sin * cos,
+                        w_i * sin * sin + w_j * cos * cos - 2.0 * c * sin * cos]
+    if virtual is not None:
+        rows.append(virtual @ design)
+        all_weights.append(np.ones(virtual.shape[0]))
+    return vstack(rows, format="csr"), np.concatenate(all_weights)
 
 
 def _prior_data_log_density(model: CompiledLGM, latent_size: int, precision) -> float:

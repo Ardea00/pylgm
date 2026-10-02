@@ -291,10 +291,10 @@ class _BelowThresholdMass:
         """``(held, log g, dlog g/da, dlog g/db, d2log g/da2, d2log g/dadb, d2log g/db2)``."""
         from scipy.special import log_expit, log_ndtr
 
-        from pylgm.likelihoods import hurdle_curvature, hurdle_terms
+        from pylgm.likelihoods import CompiledCensoredHurdle, hurdle_curvature, hurdle_terms
 
-        sigma = next(lk.sigma for _, lk in model.likelihood.parts if hasattr(lk, "cross_weights")
-                     and hasattr(lk, "sigma"))
+        sigma = next(lk.sigma for _, lk in model.likelihood.parts
+                     if isinstance(lk, CompiledCensoredHurdle))
         held = (self.link >= 0) & (self.amount >= 0)
         a, b, t = eta[self.link[held]], eta[self.amount[held]], self.threshold[held]
         w, one_minus_p, log_absent, q, m = hurdle_terms(a, b, t, sigma)
@@ -618,14 +618,15 @@ class Joint:
             )
 
         compiled = compile_joint(self, panels, censoring=censoring)
-        if any(item.scale != "identity" for item in (*stacked_observations, *stacked_constraints)):
+        # Nonlinear observations are fitted exactly by the projection; only a
+        # nonlinear constraint needs the relinearization loop.
+        if any(item.scale != "identity" for item in stacked_constraints):
             family = project_gaussian_family(
                 compile_joint_family(self, panels, censoring=censoring), stacked_observations, stacked_constraints,
                 base_model=compiled,
                 family_type=partial(
                     _RelinearizedFamily, project=project_mixture_model,
-                    inner_fit=partial(fit_laplace, predictive_variances=False),
-                    curvature=True,
+                    inner_fit=partial(fit_laplace, predictive_variances=False), laplace=True,
                 ),
             )
 

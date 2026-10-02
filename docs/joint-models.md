@@ -386,9 +386,11 @@ residual_debt = LinearObservation(values, firm_by_censored_edge, sigma=0.1,
 joint.fit(edges, observations={"log_amount": [residual_debt]})
 ```
 
-It is relinearized with the exact curvature (see
-[linear observations](linear-observations.md#scope)), and validated against an
-independent numpy optimisation of the exact posterior (mode and evidence).
+It enters the Laplace iteration exactly (see
+[linear observations](linear-observations.md#scope)), and is validated against
+an independent numpy optimisation of the exact posterior (mode and evidence).
+A network of 20 000 borrowers x 20 lenders (400 000 candidate edges) with one
+margin per borrower fits in about 40 s on a laptop.
 
 **Unsupported:** `mean_correction`, `latent_strategy="simplified_laplace"` /
 `"laplace"`, per-row criteria (WAIC, CPO, PIT: an observation spans two rows),
