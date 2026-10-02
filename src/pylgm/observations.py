@@ -6,11 +6,11 @@ from collections.abc import Callable
 
 import numpy as np
 from scipy.linalg import orth, qr
-from scipy.sparse import csr_matrix, diags, issparse, vstack
+from scipy.sparse import coo_matrix, csr_matrix, diags, issparse, vstack
 
-from pylgm.exceptions import InferenceError, ModelValidationError, UnsupportedEngineError
+from pylgm.exceptions import InferenceError, ModelValidationError, NumericalError, UnsupportedEngineError
 from pylgm.ir.model import CompiledLGM, LatentBlock
-from pylgm.likelihoods import CompiledGaussian, CompiledMixture
+from pylgm.likelihoods import CompiledCurvatureCorrection, CompiledGaussian, CompiledMixture
 from pylgm.parameters import Hyperparameter
 
 
@@ -33,6 +33,20 @@ def _matrix(value: object, name: str) -> csr_matrix:
     return result
 
 
+_SCALES = ("identity", "log", "below_threshold")
+
+
+def _scale(value: object, name: str) -> object:
+    """A named scale, or a bound map with ``value``/``jacobian`` (see ``linearize``)."""
+    if isinstance(value, str):
+        if value not in _SCALES:
+            raise ValueError(f"{name} scale must be one of {_SCALES}")
+        return value
+    if not (hasattr(value, "value") and hasattr(value, "jacobian")):
+        raise ValueError(f"{name} scale must be one of {_SCALES}")
+    return value
+
+
 def _vector(value: object, name: str) -> np.ndarray:
     result = np.asarray(value)
     if result.ndim != 1 or not np.issubdtype(result.dtype, np.number) or not np.isrealobj(result):
@@ -53,7 +67,10 @@ class LinearObservation:
     one scalar standard deviation for the whole block, estimated by empirical
     Bayes or integrated by INLA like any effect hyperparameter. With
     ``scale="log"`` the operator acts on ``exp(eta)`` (predictor on the log
-    scale, aggregates on levels), fitted by Gauss-Newton relinearization.
+    scale, aggregates on levels), fitted by Gauss-Newton relinearization. With
+    ``scale="below_threshold"`` (a ``Joint`` with a ``CensoredHurdle`` only) its
+    columns are the frame's censored edges and it acts on each one's expected
+    mass below the reporting threshold.
     """
 
     values: np.ndarray = field(repr=False)
@@ -68,9 +85,7 @@ class LinearObservation:
             raise ValueError("LinearObservation operator rows must match values")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "operator", operator)
-        if scale not in ("identity", "log"):
-            raise ValueError("LinearObservation scale must be 'identity' or 'log'")
-        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "scale", _scale(scale, "LinearObservation"))
         if isinstance(sigma, Hyperparameter):
             if sigma.transform != "log":
                 raise ValueError(
@@ -117,9 +132,7 @@ class LinearConstraint:
             raise ValueError("LinearConstraint operator rows must match rhs")
         object.__setattr__(self, "operator", operator)
         object.__setattr__(self, "rhs", rhs)
-        if scale not in ("identity", "log"):
-            raise ValueError("LinearConstraint scale must be 'identity' or 'log'")
-        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "scale", _scale(scale, "LinearConstraint"))
 
 
 def _aligned(operator: csr_matrix, rows: int, name: str) -> csr_matrix:
@@ -203,7 +216,7 @@ def project_gaussian_model(
         raise UnsupportedEngineError("LinearObservation requires a Gaussian likelihood")
     if any(item.scale != "identity" for item in (*observations, *constraints)):
         raise ModelValidationError(
-            "scale='log' observations and constraints must be linearized before projection"
+            "non-identity scale observations and constraints must be linearized before projection"
         )
 
     designs, values, offsets, sigmas = [], [], [], []
@@ -287,9 +300,8 @@ def project_mixture_model(model, observations, constraints):
     """
     if any(item.scale != "identity" for item in (*observations, *constraints)):
         raise ModelValidationError(
-            "scale='log' observations and constraints must be linearized before projection"
+            "non-identity scale observations and constraints must be linearized before projection"
         )
-    rows = model.design.shape[0]
     grid_rows = model.prediction_design.shape[0]
     designs, values, offsets, sigmas = [], [], [], []
     for observation in observations:
@@ -303,58 +315,80 @@ def project_mixture_model(model, observations, constraints):
         values.append(observation.values)
         offsets.append(np.asarray(operator @ model.prediction_offset).reshape(-1))
         sigmas.append(observation.sigma)
+    width = model.design.shape[1]
     if designs:
         added_design = vstack(designs, format="csr")
         added_y, added_offset, sigma = map(np.concatenate, (values, offsets, sigmas))
         inverse_sigma = 1.0 / sigma
         added_design = added_design.multiply(inverse_sigma[:, None]).tocsr()
-        added_y, added_offset = added_y * inverse_sigma, added_offset * inverse_sigma
-        normalization = model.log_likelihood_normalization - float(np.log(sigma).sum())
+        added_y, added_offset, log_scale = added_y * inverse_sigma, added_offset * inverse_sigma, np.log(sigma)
     else:
-        added_design = csr_matrix((0, model.design.shape[1]))
-        added_y = added_offset = np.empty(0)
-        normalization = model.log_likelihood_normalization
-    added = added_y.size
-    design = vstack([model.design, added_design], format="csr")
+        added_design, added_y, added_offset, log_scale = csr_matrix((0, width)), np.empty(0), np.empty(0), None
+    return _append_rows(
+        model, added_design, added_y, added_offset, CompiledGaussian(1.0),
+        log_scale=log_scale, constraints=_constraint_rows(model, constraints),
+    )
 
+
+def _append_rows(model, design, y, offset, part, *, log_scale=None, constraints=None) -> CompiledLGM:
+    """``model`` with observed rows appended under one more likelihood ``part``.
+
+    The existing rows keep their likelihood (a single one, or a joint's
+    mixture); with no rows to append the likelihood is untouched. ``log_scale``
+    is the new rows' ``log sigma`` (standardized Gaussian pseudo-rows), which
+    also enters ``log_likelihood_normalization``. ``constraints`` replaces the
+    extra constraint rows with ``(rows, rhs)`` from ``_constraint_rows``.
+    """
+    rows, added = model.design.shape[0], design.shape[0]
+    extra, extra_rhs = (
+        (model.extra_constraints, model.extra_constraint_rhs) if constraints is None else constraints
+    )
+    intrinsic_count = model.constraints.shape[0] - model.extra_constraints.shape[0]
+    data_count = (
+        model.data_constraint_count if constraints is None
+        else extra.shape[0] - model.extra_constraints.shape[0]
+    )
+    full = vstack([model.design, design], format="csr")
     blocks, start = [], 0
     for block in model.blocks:
         stop = start + block.design.shape[1]
         blocks.append(
-            LatentBlock(
-                block.name, block.labels, design[:, start:stop],
-                block.precision, block.constraints,
-            )
+            LatentBlock(block.name, block.labels, full[:, start:stop], block.precision, block.constraints)
         )
         start = stop
-
     likelihood = model.likelihood
     if added:
         parts = (
-            model.likelihood.parts
-            if isinstance(model.likelihood, CompiledMixture)
-            else ((np.ones(rows, dtype=bool), model.likelihood),)
+            likelihood.parts
+            if isinstance(likelihood, CompiledMixture)
+            else ((np.ones(rows, dtype=bool), likelihood),)
         )
         padding = np.zeros(added, dtype=bool)
         parts = tuple((np.concatenate([mask, padding]), lk) for mask, lk in parts)
-        pseudo = np.concatenate([np.zeros(rows, dtype=bool), np.ones(added, dtype=bool)])
-        likelihood = CompiledMixture((*parts, (pseudo, CompiledGaussian(1.0))), rows + added)
-    extra, extra_rhs = _constraint_rows(model, constraints)
-    intrinsic_count = model.constraints.shape[0] - model.extra_constraints.shape[0]
+        new = np.concatenate([np.zeros(rows, dtype=bool), np.ones(added, dtype=bool)])
+        likelihood = CompiledMixture((*parts, (new, part)), rows + added)
+    previous_scale = model.row_log_scale
+    if log_scale is None and previous_scale is None:
+        row_log_scale = None
+    else:
+        row_log_scale = np.concatenate([
+            np.zeros(rows) if previous_scale is None else previous_scale,
+            np.zeros(added) if log_scale is None else log_scale,
+        ])
     return CompiledLGM(
-        y=np.concatenate([model.y, added_y]),
+        y=np.concatenate([model.y, y]),
         observed=np.concatenate([model.observed, np.ones(added, dtype=bool)]),
-        offset=np.concatenate([model.offset, added_offset]),
-        design=design, precision=model.precision,
+        offset=np.concatenate([model.offset, offset]),
+        design=full, precision=model.precision,
         constraints=np.vstack([model.constraints[:intrinsic_count], extra]),
         labels=model.labels, likelihood=likelihood, blocks=tuple(blocks),
         extra_constraints=extra, extra_constraint_rhs=extra_rhs,
         prediction_design=model.prediction_design, prediction_offset=model.prediction_offset,
-        log_likelihood_normalization=normalization,
-        data_constraint_count=extra.shape[0] - model.extra_constraints.shape[0],
-        row_log_scale=(
-            np.concatenate([np.zeros(rows), np.log(sigma)]) if designs else model.row_log_scale
+        log_likelihood_normalization=model.log_likelihood_normalization - (
+            0.0 if log_scale is None else float(np.sum(log_scale))
         ),
+        data_constraint_count=data_count,
+        row_log_scale=row_log_scale,
     )
 
 
@@ -430,7 +464,7 @@ class _ProjectedMixtureFamily(_ProjectedGaussianFamily):
 
 @dataclass(frozen=True)
 class _RelinearizedFamily(_ProjectedGaussianFamily):
-    """A projected family whose ``scale='log'`` items are relinearized at every ``theta``.
+    """A projected family whose non-identity items are relinearized at every ``theta``.
 
     Each ``materialize`` runs the fixed point of :func:`relinearize`, warm-started
     from the previous solution, so empirical Bayes and INLA see an ordinary
@@ -439,6 +473,7 @@ class _RelinearizedFamily(_ProjectedGaussianFamily):
 
     project: Callable = field(default=project_gaussian_model, compare=False)
     inner_fit: Callable | None = field(default=None, compare=False)
+    curvature: bool = field(default=False, compare=False)
     _start: dict = field(default_factory=dict, compare=False, repr=False)
 
     def materialize(self, values):
@@ -451,6 +486,7 @@ class _RelinearizedFamily(_ProjectedGaussianFamily):
         model, eta = relinearize(
             base, observations, self.constraints,
             project=self.project, inner_fit=self.inner_fit, start=self._start.get("eta"),
+            curvature=self.curvature,
         )
         self._start["eta"] = eta
         return model
@@ -497,35 +533,44 @@ _RELINEARIZATION_TOLERANCE = 1e-9
 _RELINEARIZATION_MAX_ITERATIONS = 100
 
 
-def linearize(observations, constraints, eta):
-    """Replace every ``scale='log'`` item by its tangent at ``eta``; identity items pass through."""
-    level = np.exp(eta)
-    shift = level * (1.0 - eta)
+def _tangent(item, eta: np.ndarray, model) -> tuple[csr_matrix, np.ndarray]:
+    """``(C J, C (g - J eta))``: the operator's tangent at ``eta`` through its map ``g``."""
+    if item.scale == "log":
+        level = np.exp(eta)
+        jacobian, value = diags(level), level
+    else:
+        jacobian, value = item.scale.jacobian(eta, model), item.scale.value(eta, model)
+    operator = (item.operator @ jacobian).tocsr()
+    return operator, np.asarray(item.operator @ (value - jacobian @ eta)).reshape(-1)
 
-    def tangent(operator):
-        return (operator @ diags(level)).tocsr(), np.asarray(operator @ shift).reshape(-1)
 
+def linearize(observations, constraints, eta, model=None):
+    """Replace every non-identity item by its tangent at ``eta``; identity items pass through.
+
+    ``model`` is the materialized base model, which a bound map reads its
+    parameters from (``below_threshold``: the hurdle's sigma).
+    """
     linear_observations = []
     for item in observations:
-        if item.scale == "log":
-            operator, offset = tangent(item.operator)
+        if item.scale != "identity":
+            operator, offset = _tangent(item, eta, model)
             item = LinearObservation(item.values - offset, operator, item.sigma)
         linear_observations.append(item)
     linear_constraints = []
     for item in constraints:
-        if item.scale == "log":
-            operator, offset = tangent(item.operator)
+        if item.scale != "identity":
+            operator, offset = _tangent(item, eta, model)
             item = LinearConstraint(operator, item.rhs - offset)
         linear_constraints.append(item)
     return tuple(linear_observations), tuple(linear_constraints)
 
 
-def _log_columns(observations, constraints) -> np.ndarray:
-    """Grid rows referenced by a nonzero entry of some ``scale='log'`` operator (sorted ints)."""
+def _relinearized_columns(observations, constraints, eta, model) -> np.ndarray:
+    """Grid rows a non-identity item's tangent touches (sorted ints)."""
     columns = set()
     for item in (*observations, *constraints):
-        if item.scale == "log":
-            operator = item.operator.copy()
+        if item.scale != "identity":
+            operator = _tangent(item, eta, model)[0]
             operator.eliminate_zeros()
             columns.update(np.unique(operator.indices).tolist())
     return np.array(sorted(columns), dtype=int)
@@ -557,34 +602,112 @@ def _initial_log_predictor(model, observations, constraints) -> np.ndarray:
     return eta
 
 
-def relinearize(base, observations, constraints, *, project, inner_fit, start=None):
-    """Fixed-point Gauss-Newton relinearization of the ``scale='log'`` items.
+def _curvature_correction(observations, eta: np.ndarray, model):
+    """``M = -sum_k r_k / sigma_k^2 grad^2 (C_k g)`` at ``eta``: ``(diagonal, pairs)``.
+
+    The relinearized pseudo-rows carry only the Gauss-Newton curvature
+    ``J^T J / sigma^2``; ``M`` is the rest of the exact Hessian. Returns ``None``
+    when no observation is relinearized.
+    """
+    diagonal, pair_terms, touched = np.zeros(len(eta)), [], False
+    for item in observations:
+        if item.scale == "identity":
+            continue
+        touched = True
+        value = np.exp(eta) if item.scale == "log" else item.scale.value(eta, model)
+        residual = (item.values - item.operator @ value) / np.asarray(item.sigma) ** 2
+        weights = np.asarray(item.operator.T @ residual).reshape(-1)
+        if item.scale == "log":
+            diagonal -= weights * value
+        else:
+            item_diagonal, (i, j, c) = item.scale.hessian(eta, model, weights)
+            diagonal -= item_diagonal
+            pair_terms.append((i, j, -c))
+    if not touched:
+        return None
+    pairs = None
+    if pair_terms:
+        i, j, c = (np.concatenate(column) for column in zip(*pair_terms, strict=True))
+        merged = coo_matrix((c, (i, j)), shape=(len(eta), len(eta))).tocsr().tocoo()
+        pairs = (merged.row, merged.col, merged.data)
+    return diagonal, pairs
+
+
+def _with_curvature(model, eta: np.ndarray, correction) -> CompiledLGM:
+    """``model`` plus the curvature correction as pseudo-rows centred at ``eta``."""
+    diagonal, pairs = correction
+    rows = set(np.flatnonzero(diagonal).tolist())
+    if pairs is not None:
+        rows.update(pairs[0].tolist())
+        rows.update(pairs[1].tolist())
+    rows = np.array(sorted(rows), dtype=int)
+    local = None
+    if pairs is not None:
+        local = (np.searchsorted(rows, pairs[0]), np.searchsorted(rows, pairs[1]), pairs[2])
+    part = CompiledCurvatureCorrection(eta[rows], diagonal[rows], local)
+    return _append_rows(
+        model, model.prediction_design[rows], np.zeros(rows.size),
+        model.prediction_offset[rows], part,
+    )
+
+
+def relinearize(base, observations, constraints, *, project, inner_fit, start=None,
+                curvature=False):
+    """Fixed-point Gauss-Newton relinearization of the non-identity items.
 
     Returns ``(model, eta)``: ``base`` projected with the items linearized at ``eta``,
     where the fitted grid predictor reproduces ``eta`` on every log-referenced row.
+
+    With ``curvature`` (Laplace engines only: the correction is not Gaussian) the
+    projected model also carries the observations' second-order term, so each
+    inner fit is a full Newton step and the Laplace approximation at the fixed
+    point uses the exact Hessian. An iterate whose exact Hessian is indefinite
+    falls back to the Gauss-Newton step; a fixed point where it stays indefinite
+    is a saddle, not a mode, and raises.
     """
-    columns = _log_columns(observations, constraints)
     eta = (
         _initial_log_predictor(base, observations, constraints)
         if start is None else np.array(start, dtype=float)
     )
+    columns = _relinearized_columns(observations, constraints, eta, base)
     previous, damping, change = np.inf, 1.0, np.inf
+    def exact(model, eta):
+        correction = _curvature_correction(observations, eta, base) if curvature else None
+        return model if correction is None else _with_curvature(model, eta, correction)
+
     for _ in range(_RELINEARIZATION_MAX_ITERATIONS):
-        model = project(base, *linearize(observations, constraints, eta))
-        fit = inner_fit(model)
+        linear = project(base, *linearize(observations, constraints, eta, base))
+        model = exact(linear, eta)
+        try:
+            fit = inner_fit(model)
+        except NumericalError:
+            if model is linear:
+                raise
+            model, fit = linear, inner_fit(linear)
         target = model.prediction_offset + np.asarray(model.prediction_design @ fit.mean).reshape(-1)
         if not columns.size:
             return model, target
         change = float(np.max(np.abs(target[columns] - eta[columns])))
         if change <= _RELINEARIZATION_TOLERANCE * max(1.0, float(np.max(np.abs(eta[columns])))):
+            if model is linear and curvature:
+                model = exact(linear, eta)
+                try:
+                    inner_fit(model)
+                except NumericalError as error:
+                    raise InferenceError(
+                        "the relinearized aggregates' fixed point is a saddle of the posterior, "
+                        "not a mode: its exact Hessian is indefinite. Give the predictor an "
+                        "intercept or a tighter prior near the aggregates' level"
+                    ) from error
             return model, eta
-        # Damping only tames oscillation; it does not move the fixed point.
-        if change > previous:
-            damping = max(damping / 2.0, 1.0 / 16.0)
+        # Damping only tames oscillation; it does not move the fixed point. It
+        # recovers after progress, or a Newton iteration (curvature) would be
+        # held to a linear rate by one early overshoot.
+        damping = max(damping / 2.0, 1.0 / 16.0) if change > previous else min(1.0, 2.0 * damping)
         previous = change
         eta = eta + damping * (target - eta)
     raise InferenceError(
-        f"scale='log' relinearization did not converge in {_RELINEARIZATION_MAX_ITERATIONS} "
+        f"scale relinearization did not converge in {_RELINEARIZATION_MAX_ITERATIONS} "
         f"iterations (last change {change:.3e})"
     )
 

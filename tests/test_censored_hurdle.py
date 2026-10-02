@@ -154,3 +154,92 @@ def test_censored_rows_must_carry_no_response():
     frame.loc[frame.index[frame["unreported"]][0], "linked"] = 0.0
     with pytest.raises(DataContractError, match="must be NaN on censored rows"):
         _joint().fit(frame)
+
+
+MARGIN_SIGMA = 0.3
+
+
+def _margins(frame):
+    """Per-firm aggregate of the censored edges' below-threshold mass."""
+    censored = frame["unreported"].to_numpy()
+    firms = sorted(frame.loc[censored, "firm"].unique())
+    operator = np.array([(frame["firm"] == f).to_numpy() & censored for f in firms], dtype=float)
+    values = 0.9 + 0.2 * np.arange(len(firms))
+    return operator, values
+
+
+def _below_threshold_mass(a, b):
+    """E[W 1{link} 1{W < c} | absent], straight from its definition."""
+    from scipy.special import expit
+    from scipy.stats import norm
+
+    p = expit(a)
+    survival = norm.sf((LOG_C - b) / SIGMA)
+    partial = np.exp(b + SIGMA**2 / 2) * norm.cdf((LOG_C - b - SIGMA**2) / SIGMA)
+    return p * partial / (1 - p * survival)
+
+
+def test_below_threshold_margins_match_the_exact_oracle():
+    from pylgm import LinearObservation
+
+    frame = _frame()
+    operator, values = _margins(frame)
+    observation = LinearObservation(values, operator, MARGIN_SIGMA, scale="below_threshold")
+    result = _joint().fit(frame, observations={"log_amount": [observation]})
+
+    base, split, dimension, precision_logdet = _oracle_objective(frame)
+
+    def objective(z):
+        a, b, _, _ = split(z)
+        residual = (values - operator @ _below_threshold_mass(a, b)) / MARGIN_SIGMA
+        return base(z) + 0.5 * residual @ residual + values.size * (
+            np.log(MARGIN_SIGMA) + 0.5 * np.log(2 * np.pi)
+        )
+
+    oracle = minimize(objective, np.zeros(dimension), jac=lambda z: _gradient(objective, z),
+                      method="BFGS", options={"gtol": 1e-8})
+    a, b, _, _ = split(oracle.x)
+    np.testing.assert_allclose(_sorted_eta(result, frame, "linked"), a, atol=1e-5)
+    np.testing.assert_allclose(_sorted_eta(result, frame, "log_amount"), b, atol=1e-5)
+
+    hessian = _hessian(objective, oracle.x)
+    laplace = -objective(oracle.x) + 0.5 * precision_logdet - 0.5 * np.linalg.slogdet(hessian)[1]
+    assert result.log_marginal_likelihood == pytest.approx(laplace, abs=1e-4)
+
+
+def test_below_threshold_map_jacobian():
+    from pylgm.joint import _BelowThresholdMass
+    from pylgm.likelihoods import CompiledCensoredHurdle, CompiledMixture
+
+    rng = np.random.default_rng(2)
+    n = 5
+    hurdle = CompiledCensoredHurdle(np.arange(n), np.arange(n, 2 * n), np.full(n, LOG_C), SIGMA)
+
+    class Model:
+        likelihood = CompiledMixture(((np.ones(2 * n, dtype=bool), hurdle),), 2 * n)
+
+    rows = np.arange(n)
+    mass = _BelowThresholdMass.bind(n, np.full(n, LOG_C), (rows, 0), (rows, n))
+    eta = np.r_[rng.normal(0, 2, n), rng.normal(1, 1, n)]
+    np.testing.assert_allclose(mass.value(eta, Model), _below_threshold_mass(eta[:n], eta[n:]), rtol=1e-12)
+    h, eye = 1e-6, np.eye(2 * n)
+    numeric = np.array([(mass.value(eta + h * e, Model) - mass.value(eta - h * e, Model)) / (2 * h)
+                        for e in eye]).T
+    np.testing.assert_allclose(mass.jacobian(eta, Model).toarray(), numeric, atol=1e-8)
+
+
+def test_below_threshold_needs_a_hurdle_and_censored_columns():
+    from pylgm import LinearObservation
+    from pylgm.exceptions import ModelValidationError
+
+    frame = _frame()
+    operator, values = _margins(frame)
+    reported = (frame["linked"] == 1.0).to_numpy()
+    bad = LinearObservation([1.0], reported[None, :].astype(float), 0.3, scale="below_threshold")
+    with pytest.raises(ModelValidationError, match="censored edges only"):
+        _joint().fit(frame, observations={"log_amount": [bad]})
+    with pytest.raises(ModelValidationError, match="CensoredHurdle"):
+        LGM(response="y", likelihood=Gaussian(1.0), predictor=Fixed("1")).fit(
+            frame.assign(y=1.0), observations=[LinearObservation(values, operator, 0.3,
+                                                                   scale="below_threshold")],
+        )

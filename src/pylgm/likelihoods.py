@@ -606,16 +606,16 @@ class CompiledMixture(_CompiledLikelihood):
         # via `for_observations` over the whole sub-frame, not the full stack.
         # `observed[mask]` re-expresses the stacked `observed` flags in that same
         # per-part space, so it's what re-slices the aux vectors correctly.
+        kept = []
         for mask, lk in self.parts:
-            if hasattr(lk, "cross_weights") and not observed[mask].all():
+            local = observed[mask]
+            if hasattr(lk, "cross_weights") and local.any() != local.all():
+                # Its rows index each other: keep the part whole or drop it whole.
                 raise ModelValidationError("a coupled likelihood part must keep all its rows")
-        return CompiledMixture(
-            tuple(
-                (mask[observed], _restrict_bound_aux(lk, observed[mask]))
-                for mask, lk in self.parts
-            ),
-            int(observed.sum()),
-        )
+            if hasattr(lk, "cross_weights") and not local.any():
+                continue
+            kept.append((mask[observed], _restrict_bound_aux(lk, local)))
+        return CompiledMixture(tuple(kept), int(observed.sum()))
 
     def for_observations(self, aux) -> "CompiledMixture":
         if aux is None:
@@ -652,8 +652,9 @@ class CompiledMixture(_CompiledLikelihood):
         pairs = [
             (rows[i], rows[j], c)
             for mask, lk in self.parts if hasattr(lk, "cross_weights")
+            for local in (lk.cross_weights(eta[mask], y[mask]),) if local is not None
             for rows in (np.flatnonzero(mask),)
-            for i, j, c in (lk.cross_weights(eta[mask], y[mask]),)
+            for i, j, c in (local,)
         ]
         if not pairs:
             return None
@@ -676,6 +677,25 @@ class CompiledMixture(_CompiledLikelihood):
     def validate_response(self, y: np.ndarray) -> None:
         for mask, likelihood in self.parts:
             likelihood.validate_response(y[mask])
+
+
+def hurdle_terms(a, b, threshold, sigma):
+    """``(w, 1 - p, log(1 - pS), q, m)`` of the censored hurdle (see below), stably."""
+    w = (b - threshold) / sigma
+    log_p = log_expit(a)
+    log_absent = np.logaddexp(log_expit(-a), log_p + log_ndtr(-w))  # log(1 - pS)
+    q = np.exp(log_p + log_ndtr(w) - log_absent)
+    m = np.exp(log_p - 0.5 * w * w - 0.5 * np.log(2 * np.pi) - np.log(sigma) - log_absent)
+    return w, np.exp(log_expit(-a)), log_absent, q, m
+
+
+def hurdle_curvature(one_minus_p, w, sigma, q, m):
+    """Second derivatives ``(l_aa, l_ab, l_bb)`` of the censored hurdle term."""
+    return (
+        -one_minus_p * (1.0 - 2.0 * (1.0 - one_minus_p)) * q - (one_minus_p * q) ** 2,
+        -one_minus_p * m * (1.0 + q),
+        (w / sigma) * m - m * m,
+    )
 
 
 @dataclass(frozen=True)
@@ -710,13 +730,8 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
 
     def _terms(self, eta):
         eta = np.asarray(eta, dtype=float)
-        a, b = eta[self.link_rows], eta[self.amount_rows]
-        w = (b - self.threshold) / self.sigma
-        log_p = log_expit(a)
-        log_absent = np.logaddexp(log_expit(-a), log_p + log_ndtr(-w))  # log(1 - pS)
-        q = np.exp(log_p + log_ndtr(w) - log_absent)
-        m = np.exp(log_p - 0.5 * w * w - 0.5 * np.log(2 * np.pi) - np.log(self.sigma) - log_absent)
-        return eta, w, np.exp(log_expit(-a)), log_absent, q, m
+        terms = hurdle_terms(eta[self.link_rows], eta[self.amount_rows], self.threshold, self.sigma)
+        return (eta, *terms)
 
     def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
         return float(self._terms(eta)[3].sum())
@@ -730,14 +745,15 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
 
     def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         eta, w, one_minus_p, _, q, m = self._terms(eta)
+        l_aa, _, l_bb = hurdle_curvature(one_minus_p, w, self.sigma, q, m)
         out = np.empty_like(eta)
-        out[self.link_rows] = one_minus_p * (1.0 - 2.0 * (1.0 - one_minus_p)) * q + (one_minus_p * q) ** 2
-        out[self.amount_rows] = m * m - (w / self.sigma) * m
+        out[self.link_rows] = -l_aa
+        out[self.amount_rows] = -l_bb
         return out
 
     def cross_weights(self, eta: np.ndarray, y: np.ndarray):
-        _, _, one_minus_p, _, q, m = self._terms(eta)
-        return self.link_rows, self.amount_rows, one_minus_p * m * (1.0 + q)
+        _, w, one_minus_p, _, q, m = self._terms(eta)
+        return self.link_rows, self.amount_rows, -hurdle_curvature(one_minus_p, w, self.sigma, q, m)[1]
 
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         raise UnsupportedEngineError(
@@ -763,6 +779,62 @@ class CompiledCensoredHurdle(_CompiledLikelihood):
 
     def validate_response(self, y: np.ndarray) -> None:
         """Its rows carry no response: the absence from the register is the datum."""
+
+
+@dataclass(frozen=True)
+class CompiledCurvatureCorrection(_CompiledLikelihood):
+    """``-1/2 (eta - center)^T M (eta - center)`` on pseudo-rows: curvature, not data.
+
+    A relinearized aggregate's tangent matches its value and slope at ``center``
+    but not its curvature; this part restores the missing term of the exact
+    Hessian there while leaving the gradient, hence the mode, unchanged. ``M`` is
+    ``diagonal`` plus symmetric ``pairs`` ``(i, j, c)`` of distinct rows, each row
+    in at most one pair.
+    """
+
+    center: np.ndarray
+    diagonal: np.ndarray
+    pairs: tuple | None = None
+    curvature_only = True
+
+    def _apply(self, delta):
+        out = self.diagonal * delta
+        if self.pairs is not None:
+            i, j, c = self.pairs
+            np.add.at(out, i, c * delta[j])
+            np.add.at(out, j, c * delta[i])
+        return out
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        delta = np.asarray(eta, dtype=float) - self.center
+        return float(-0.5 * delta @ self._apply(delta))
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return -self._apply(np.asarray(eta, dtype=float) - self.center)
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.array(self.diagonal, dtype=float)
+
+    def cross_weights(self, eta: np.ndarray, y: np.ndarray):
+        return self.pairs
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.zeros(np.asarray(eta).shape)
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.zeros(np.asarray(eta).shape)
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.full(np.asarray(eta).shape, np.nan)
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        return np.asarray(eta, dtype=float)
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return np.asarray(eta_mean, dtype=float)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        """Pseudo-rows: no response."""
 
 
 def require_separable(likelihood, eta: np.ndarray, y: np.ndarray, what: str) -> None:

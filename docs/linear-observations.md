@@ -260,10 +260,21 @@ likelihood keeps its own rows and fits on the Laplace engine: each
 `LinearObservation` row becomes a Gaussian pseudo-row, and a `LinearConstraint`
 enters as `log p(y, e) = log p(e) + log p(y | e)` -- the exact prior density of
 `A x` at `e`, plus a Laplace step on the prior conditioned on `A x = e`, so the
-reported mode is the exact constrained mode. With `scale="log"` the fixed point
-can sit on a saddle when the prior is far from the aggregate (no intercept to
-absorb the level): give the predictor an intercept, as any aggregate model
-should have.
+reported mode is the exact constrained mode.
+
+`scale="log"` items are fitted by relinearization: each pass replaces
+`C g(eta)` by its tangent. On the Laplace engines (any non-Gaussian likelihood,
+and every `Joint`) a `LinearObservation` also adds the second-order term the
+tangent drops, `-sum_k r_k / sigma_k^2 grad^2 (C_k g)`, as a curvature
+correction centred at the linearization point: the mode is unchanged, each
+pass is a full Newton step, and the Laplace evidence uses the exact Hessian. A
+fixed point where that Hessian is indefinite is a saddle and raises, rather
+than being reported as a mode -- give the predictor an intercept, as any
+aggregate model should have. Two cases keep the Gauss-Newton curvature, so
+their evidence is approximate when the aggregates are not fitted exactly: a
+`LinearConstraint` (the missing term needs its Lagrange multipliers), and a
+Gaussian `LGM` on the `exact_gaussian` engine (the correction is not a
+Gaussian row).
 
 Exact constraints on a non-Gaussian model need dense `c x latent` workspace
 for `c` constraint rows. For many aggregates -- one per node of a network --

@@ -549,6 +549,10 @@ class LGM:
             raise TypeError("observations must contain only LinearObservation instances")
         if any(not isinstance(item, LinearConstraint) for item in constraints):
             raise TypeError("constraints must contain only LinearConstraint instances")
+        if any(item.scale == "below_threshold" for item in (*observations, *constraints)):
+            raise ModelValidationError(
+                "scale='below_threshold' needs a Joint with a CensoredHurdle"
+            )
         if hyperparameters not in ("optimize", "integrate"):
             raise ValueError(
                 f"hyperparameters must be 'optimize' or 'integrate', got {hyperparameters!r}"
@@ -678,11 +682,14 @@ class LGM:
             )
 
         compiled = compile_lgm(self, panel)
-        if any(item.scale == "log" for item in (*observations, *constraints)):
+        if any(item.scale != "identity" for item in (*observations, *constraints)):
             family = project_gaussian_family(
                 compile_family(self, panel), observations, constraints,
                 base_model=compiled,
-                family_type=partial(_RelinearizedFamily, project=project, inner_fit=inner_fit),
+                family_type=partial(
+                    _RelinearizedFamily, project=project, inner_fit=inner_fit,
+                    curvature=project is project_mixture_model,
+                ),
             )
 
             def direct():

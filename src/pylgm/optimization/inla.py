@@ -942,8 +942,15 @@ def _integrate_inla(
     theta_grid = [(w, cond, compiled.likelihood.restrict(observed))
                   for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
     criteria = None
-    if getattr(theta_grid[0][2], "cross_weights", lambda *_: None)(offset_obs, y_obs) is None:
-        crit = _model_criteria(*_criteria_inputs(kept, weights, observed))
+    # Curvature-correction pseudo-rows are not observations: criteria skip them.
+    scored = observed.copy()
+    for mask, part in getattr(kept[0][4].likelihood, "parts", ()):
+        if getattr(part, "curvature_only", False):
+            scored &= ~mask
+    if getattr(
+        kept[0][4].likelihood.restrict(scored), "cross_weights", lambda *_: None
+    )(kept[0][4].offset[scored], kept[0][4].y[scored]) is None:
+        crit = _model_criteria(*_criteria_inputs(kept, weights, scored))
 
         # crit.cpo/pit are computed in canonical order over observed rows only
         # (length n_observed); scatter them into full-length canonical arrays
@@ -951,8 +958,8 @@ def _integrate_inla(
         # they can be reordered like predictive_mean/predictive_variance below.
         cpo_full = np.full(observed.size, np.nan)
         pit_full = np.full(observed.size, np.nan)
-        cpo_full[observed] = crit.cpo
-        pit_full[observed] = crit.pit
+        cpo_full[scored] = crit.cpo
+        pit_full[scored] = crit.pit
         criteria = ModelCriteria(
             crit.dic, crit.dic_effective_parameters,
             crit.waic, crit.waic_effective_parameters,

@@ -366,6 +366,30 @@ link below `c`" are separated by the parametric amount tail alone, and the
 link intercept is weakly identified. Known non-edges, or margins on the
 below-threshold mass, are what pin it down.
 
+**Margins on the below-threshold mass.** A `LinearObservation` with
+`scale="below_threshold"` takes one column per frame row, referencing censored
+edges only, and acts on each one's expected mass below the threshold given its
+absence from the register,
+
+\[
+g = \frac{p\,M(b)}{1 - p\,S(b)},\qquad
+M(b) = e^{\,b + \sigma^2/2}\,\Phi\Big(\frac{\log c - b - \sigma^2}{\sigma}\Big),\qquad
+S(b) = \Phi\Big(\frac{b - \log c}{\sigma}\Big),
+\]
+
+so a borrower's total debt minus its reported exposures informs both its
+link probabilities and its amounts:
+
+```python
+residual_debt = LinearObservation(values, firm_by_censored_edge, sigma=0.1,
+                                  scale="below_threshold")
+joint.fit(edges, observations={"log_amount": [residual_debt]})
+```
+
+It is relinearized with the exact curvature (see
+[linear observations](linear-observations.md#scope)), and validated against an
+independent numpy optimisation of the exact posterior (mode and evidence).
+
 **Unsupported:** `mean_correction`, `latent_strategy="simplified_laplace"` /
 `"laplace"`, per-row criteria (WAIC, CPO, PIT: an observation spans two rows),
 and `update()` with new censored edges. Each is refused, not approximated.

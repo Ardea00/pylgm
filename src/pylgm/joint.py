@@ -256,6 +256,90 @@ class CensoredHurdle:
         return censored, threshold
 
 
+@dataclass(frozen=True)
+class _BelowThresholdMass:
+    """The map behind ``scale="below_threshold"``: frame rows of censored edges.
+
+    For a censored edge with link predictor ``a`` and log-amount ``b``,
+
+        g = E[W 1{link} 1{W < c} | absent] = p M(b) / (1 - p S(b)),
+        M(b) = exp(b + sigma^2 / 2) Phi((t - b - sigma^2) / sigma),
+
+    so with ``u = (t - b - sigma^2) / sigma`` and the hurdle's ``q`` and ``m``,
+
+        d log g / da = (1 - p)(1 + q),
+        d log g / db = 1 - phi(u) / (sigma Phi(u)) + m.
+
+    ``link`` and ``amount`` give each frame row's stacked grid row (-1 where the
+    outcome does not hold it); ``sigma`` is read off the materialized hurdle.
+    """
+
+    link: np.ndarray
+    amount: np.ndarray
+    threshold: np.ndarray
+
+    @classmethod
+    def bind(cls, rows: int, threshold, link, amount) -> "_BelowThresholdMass":
+        def stacked(original, start):
+            out = np.full(rows, -1)
+            out[original] = start + np.arange(original.size)
+            return out
+
+        return cls(stacked(*link), stacked(*amount), np.asarray(threshold, dtype=float))
+
+    def _log_mass(self, eta, model):
+        """``(held, log g, dlog g/da, dlog g/db, d2log g/da2, d2log g/dadb, d2log g/db2)``."""
+        from scipy.special import log_expit, log_ndtr
+
+        from pylgm.likelihoods import hurdle_curvature, hurdle_terms
+
+        sigma = next(lk.sigma for _, lk in model.likelihood.parts if hasattr(lk, "cross_weights")
+                     and hasattr(lk, "sigma"))
+        held = (self.link >= 0) & (self.amount >= 0)
+        a, b, t = eta[self.link[held]], eta[self.amount[held]], self.threshold[held]
+        w, one_minus_p, log_absent, q, m = hurdle_terms(a, b, t, sigma)
+        l_aa, l_ab, l_bb = hurdle_curvature(one_minus_p, w, sigma, q, m)
+        u = (t - b - sigma * sigma) / sigma
+        log_phi_u = log_ndtr(u)
+        log_mass = log_expit(a) + b + 0.5 * sigma * sigma + log_phi_u - log_absent
+        mills = np.exp(-0.5 * u * u - 0.5 * np.log(2 * np.pi) - log_phi_u)
+        p = 1.0 - one_minus_p
+        return (
+            held, log_mass, one_minus_p * (1.0 + q), 1.0 - mills / sigma + m,
+            -p * one_minus_p - l_aa, -l_ab, -mills * (u + mills) / sigma**2 - l_bb,
+        )
+
+    def value(self, eta, model) -> np.ndarray:
+        held, log_mass, *_ = self._log_mass(eta, model)
+        out = np.zeros(self.link.size)
+        out[held] = np.exp(log_mass)
+        return out
+
+    def jacobian(self, eta, model) -> csr_matrix:
+        held, log_mass, d_a, d_b, *_ = self._log_mass(eta, model)
+        rows = np.flatnonzero(held)
+        mass = np.exp(log_mass)
+        return csr_matrix(
+            (np.concatenate([mass * d_a, mass * d_b]),
+             (np.concatenate([rows, rows]),
+              np.concatenate([self.link[held], self.amount[held]]))),
+            shape=(self.link.size, len(eta)),
+        )
+
+    def hessian(self, eta, model, weights):
+        """``sum_e weights_e grad^2 g_e`` over grid rows: ``(diagonal, (i, j, c))``.
+
+        ``grad^2 g = g (grad L grad L^T + grad^2 L)`` with ``L = log g``.
+        """
+        held, log_mass, d_a, d_b, d_aa, d_ab, d_bb = self._log_mass(eta, model)
+        scaled = weights[held] * np.exp(log_mass)
+        link, amount = self.link[held], self.amount[held]
+        diagonal = np.zeros(len(eta))
+        np.add.at(diagonal, link, scaled * (d_a * d_a + d_aa))
+        np.add.at(diagonal, amount, scaled * (d_b * d_b + d_bb))
+        return diagonal, (link, amount, scaled * (d_a * d_b + d_ab))
+
+
 def _validate_censoring(censoring, submodels) -> None:
     from pylgm.likelihoods import Bernoulli, Gaussian
 
@@ -485,26 +569,50 @@ class Joint:
                     shape=(len(frame), total),
                 )
 
-            stacked_observations = tuple(
-                LinearObservation(
-                    item.values, item.operator @ selections[outcome], item.sigma, scale=item.scale
+            def stacked(item, outcome):
+                """The item on the stacked grid: its operator, or its map, absorbs the rows."""
+                if item.scale != "below_threshold":
+                    return item.operator @ selections[outcome], item.scale
+                if hurdle is None:
+                    raise ModelValidationError(
+                        "scale='below_threshold' needs Joint(..., censoring=CensoredHurdle(...))"
+                    )
+                referenced = np.unique(item.operator.tocsc().nonzero()[1])
+                if not censored_mask[referenced].all():
+                    raise ModelValidationError(
+                        "a scale='below_threshold' operator may reference censored edges only"
+                    )
+                return item.operator, below_threshold
+
+            if hurdle is not None:
+                below_threshold = _BelowThresholdMass.bind(
+                    len(frame), threshold,
+                    *(
+                        (original_rows(outcome), starts[self.outcomes.index(outcome)])
+                        for outcome in (hurdle.link, hurdle.amount)
+                    ),
                 )
+            stacked_observations = tuple(
+                LinearObservation(item.values, operator, item.sigma, scale=scale)
                 for outcome in self.outcomes
                 for item in observations.get(outcome, ())
+                for operator, scale in (stacked(item, outcome),)
             )
             stacked_constraints = tuple(
-                LinearConstraint(item.operator @ selections[outcome], item.rhs, scale=item.scale)
+                LinearConstraint(operator, item.rhs, scale=scale)
                 for outcome in self.outcomes
                 for item in constraints.get(outcome, ())
+                for operator, scale in (stacked(item, outcome),)
             )
 
         compiled = compile_joint(self, panels, censoring=censoring)
-        if any(item.scale == "log" for item in (*stacked_observations, *stacked_constraints)):
+        if any(item.scale != "identity" for item in (*stacked_observations, *stacked_constraints)):
             family = project_gaussian_family(
                 compile_joint_family(self, panels, censoring=censoring), stacked_observations, stacked_constraints,
                 base_model=compiled,
                 family_type=partial(
                     _RelinearizedFamily, project=project_mixture_model, inner_fit=fit_laplace,
+                    curvature=True,
                 ),
             )
 
