@@ -12,6 +12,7 @@ from pylgm.exceptions import (
 )
 from pylgm.inference import gaussian
 from pylgm.inference import fit_gaussian
+from pylgm.inference.sampling import LazyArray
 from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian
 
@@ -501,3 +502,24 @@ def test_constraint_null_space_is_cached_across_hyperparameter_changes() -> None
     # ponytail: same SVD routine on the same normalised row, so exact equality.
     np.testing.assert_array_equal(basis, null_space(np.ones((1, 3)) / np.sqrt(3)))
     assert first.mean.shape == second.mean.shape == (3,)
+
+
+def test_covariance_is_materialised_lazily_and_matches_the_eager_fit() -> None:
+    model = CompiledLGM(
+        y=np.array([1.0, -0.5, 2.0]),
+        observed=np.array([True, True, True]),
+        offset=np.zeros(3),
+        design=csr_matrix(np.eye(3)),
+        precision=csr_matrix(2.0 * np.eye(3)),
+        constraints=np.ones((1, 3)),
+        labels=("a", "b", "c"),
+        likelihood=CompiledGaussian(0.5),
+        blocks=(),
+    )
+    lazy = fit_gaussian(model, predictive_variances=False)
+    assert isinstance(lazy._covariance_store, LazyArray)  # a fit that never reads it
+    assert lazy._sampler.factor._compute is not None  # nor the factor
+    eager = fit_gaussian(model)
+    np.testing.assert_allclose(lazy.covariance, eager.covariance, rtol=1e-12, atol=1e-14)
+    assert isinstance(lazy._covariance_store, np.ndarray)
+    assert not lazy.covariance.flags.writeable

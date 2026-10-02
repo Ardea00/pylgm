@@ -178,7 +178,7 @@ def _rebuild_result(
     common = dict(
         labels=result.labels,
         mean=result.mean,
-        covariance=result._covariance,
+        covariance=result._covariance_store,  # may still be lazy: don't force it
         log_marginal_likelihood=result.log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,

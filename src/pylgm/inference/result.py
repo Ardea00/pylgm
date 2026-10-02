@@ -12,6 +12,7 @@ from scipy.stats import norm
 
 from pylgm.exceptions import DenseReferenceLimitError
 from pylgm._checks import readonly_array as _readonly_array
+from pylgm.inference.sampling import LazyArray
 
 if TYPE_CHECKING:
     # result.py must not import sparse.py at runtime -- sparse.py imports
@@ -587,7 +588,7 @@ class _BaseResult:
 
     labels: tuple[str, ...]
     _mean: np.ndarray = field(repr=False)
-    _covariance: np.ndarray = field(repr=False)
+    _covariance_store: "np.ndarray | LazyArray | None" = field(repr=False)
     log_marginal_likelihood: float
     _predictive_mean: np.ndarray = field(repr=False)
     _predictive_variance: np.ndarray = field(repr=False)
@@ -606,6 +607,7 @@ class _BaseResult:
             "labels",
             "_mean",
             "mean",
+            "_covariance_store",
             "_covariance",
             "covariance",
             "log_marginal_likelihood",
@@ -662,17 +664,13 @@ class _BaseResult:
         if extra_validate is not None:
             extra_validate()
         _validate_prediction_keys(prediction_keys, predictive_mean)
-        if covariance is None:
-            object.__setattr__(self, "_covariance", None)
+        if covariance is None or isinstance(covariance, LazyArray):
+            # A LazyArray is validated when first materialised (see _covariance).
+            object.__setattr__(self, "_covariance_store", covariance)
         else:
-            covariance = np.asarray(covariance)
-            if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(
-                covariance
-            ):
-                raise TypeError("covariance must have a real numeric dtype")
-            if not np.isfinite(covariance).all():
-                raise ValueError("covariance must be finite")
-            object.__setattr__(self, "_covariance", _readonly_array(covariance))
+            object.__setattr__(
+                self, "_covariance_store", self._validated_covariance(covariance)
+            )
         object.__setattr__(self, "labels", tuple(labels))
         object.__setattr__(self, "_mean", _readonly_array(mean))
         object.__setattr__(self, "log_marginal_likelihood", float(log_marginal_likelihood))
@@ -705,6 +703,24 @@ class _BaseResult:
             self, "_hyperparameters", _readonly_hyperparameters(hyperparameters)
         )
         object.__setattr__(self, "_prediction_context", prediction_context)
+
+    @staticmethod
+    def _validated_covariance(covariance) -> np.ndarray:
+        covariance = np.asarray(covariance)
+        if not np.issubdtype(covariance.dtype, np.number) or not np.isrealobj(covariance):
+            raise TypeError("covariance must have a real numeric dtype")
+        if not np.isfinite(covariance).all():
+            raise ValueError("covariance must be finite")
+        return _readonly_array(covariance)
+
+    @property
+    def _covariance(self) -> np.ndarray | None:
+        """The dense covariance, materialised (and validated) on first read if lazy."""
+        stored = self._covariance_store
+        if isinstance(stored, LazyArray):
+            stored = self._validated_covariance(stored.get())
+            object.__setattr__(self, "_covariance_store", stored)
+        return stored
 
     @property
     def mean(self) -> np.ndarray:
