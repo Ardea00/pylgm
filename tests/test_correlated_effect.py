@@ -204,3 +204,11 @@ def test_reciprocity_is_recovered_from_dyads():
     result = model.fit(frame)
     assert result.hyperparameters["reciprocity"] == pytest.approx(0.8, abs=0.1)
     assert set(result.hyperparameters) == {"tau", "reciprocity"}
+
+
+def test_spark_projection_keeps_every_component_column():
+    from pylgm.data.spark import _required_columns
+
+    model = LGM(response="y", likelihood=Gaussian(SIGMA),
+                predictor=Correlated("node", index=("sender", "receiver")))
+    assert {"sender", "receiver"} <= _required_columns(model)

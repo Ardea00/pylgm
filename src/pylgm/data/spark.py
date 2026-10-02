@@ -53,8 +53,11 @@ _COLUMN_FIELDS = ("index", "unit", "space", "time", "over", "by", "replicate", "
 
 
 def _declared_columns(item) -> set[str]:
-    columns = {getattr(item, field, None) for field in _COLUMN_FIELDS}
-    columns.update(getattr(item, "columns", None) or ())
+    columns = set(getattr(item, "columns", None) or ())
+    for field in _COLUMN_FIELDS:
+        value = getattr(item, field, None)
+        # A Correlated effect's index is a tuple of columns, one per component.
+        columns.update(value if isinstance(value, tuple) else (value,))
     columns = {column for column in columns if isinstance(column, str)}
     for nested in (getattr(item, "effect", None), getattr(item, "base", None)):
         if nested is not None:

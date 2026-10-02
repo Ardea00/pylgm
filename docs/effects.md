@@ -11,6 +11,7 @@ Each structured effect takes a fixed `precision` or a declared
 | --- | --- | --- |
 | `Fixed(formula)` | Fixed effects from a formulaic formula | [core](#core-building-blocks) |
 | `IID(name, index)` | Exchangeable random effects per level | [core](#core-building-blocks) |
+| `Correlated(name, index=(...))` | `k` correlated IID components per level — sender/receiver, reciprocity, cross-outcome | [Correlated](#correlated-components) |
 | `RW1` / `RW2` | Smooth temporal trends (1st / 2nd difference penalty) | [core](#core-building-blocks) |
 | `AR1(name, index, rho=)` | Stationary first-order autoregression | [AR1](#ar1-effect) |
 | `AR1(..., replicate=)` | One independent AR1 series **per panel unit** | [group-wise AR1](#group-wise-ar1) |
@@ -79,6 +80,45 @@ few observations are shrunk more. That is the difference the
 
 `IID` is also how you add a **frailty** to a survival model, and the
 unstructured half of a `BYM2` convolution.
+
+### Correlated components
+
+`Correlated(name, index=(col_1, ..., col_k), precision=(...), correlation=(...))`
+gives every level a `k`-vector `(x_1, ..., x_k) ~ N(0, Σ)` — R-INLA's
+`iid2d`/`iidkd` — with precision `Σ⁻¹ ⊗ I_n`. Component `c` is indexed by column
+`col_c`; a NaN there means that component does not enter the row.
+
+```python
+from pylgm import Correlated, Hyperparameter, dyad_columns
+
+# A directed network: each node's sending and receiving effects, correlated.
+nodes = Correlated(
+    "node", index=("sender", "receiver"),
+    precision=(Hyperparameter("tau_send"), Hyperparameter("tau_receive")),
+    correlation=Hyperparameter("rho", initial=0.0, transform="logit", lower=-0.99, upper=0.99),
+)
+
+# Reciprocity: one pair (u_ij, u_ji) per unordered dyad, correlated.
+edges = edges.join(dyad_columns(edges, "sender", "receiver"))
+tau = Hyperparameter("tau_dyad")
+dyads = Correlated("dyad", index=("forward", "backward"), precision=(tau, tau),
+                   correlation=Hyperparameter("reciprocity", initial=0.0, transform="logit",
+                                              lower=-0.99, upper=0.99))
+```
+
+`correlation` holds the `k(k−1)/2` **canonical partial correlations**, row-major
+`(0,1), (0,2), …, (1,2), …` (for `k = 2`, the correlation itself). Any values in
+`(−1, 1)` give a positive-definite `Σ` (Lewandowski, Kurowicka & Joe 2009), so
+the optimizer needs no constraint. An estimated correlation without a prior
+gets the LKJ(`lkj`) prior's law for its position, `Beta(b_j, b_j)` on `(−1, 1)`
+with `b_j = lkj + (k − 2 − j)/2` (`SymmetricBeta`); `lkj = 1` is uniform over
+correlation matrices. One `Hyperparameter` may serve several components — equal
+precisions, as reciprocity's two directions want.
+
+In a `Joint`, `Shared(Correlated(name, index=(col_1, ..., col_K)))` puts
+component `c` in outcome `c`: a firm's link propensity and its typical exposure,
+say, correlated across a Bernoulli and a Gaussian outcome. Unlike other shared
+effects, its precisions and correlations are estimable; it takes no `scale`.
 
 ### `RW1(name, index, precision=1.0, scale=False)` and `RW2(...)`
 
