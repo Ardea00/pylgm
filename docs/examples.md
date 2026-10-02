@@ -35,6 +35,7 @@ rather than remembered.
 | [`disease_mapping`](https://github.com/Ardea00/pylgm/tree/main/examples/disease_mapping) | `Besag` spatial smoothing on Scotland lip cancer; fit to observed counts goes 0.63 → 0.96 against a non-spatial GLM. Walkthrough: [disease mapping](examples-disease-mapping.md) |
 | [`weighted_network`](https://github.com/Ardea00/pylgm/tree/main/examples/weighted_network) | `BYM2` on a **weighted** firm-exposure graph — the CAR family on an economic network, not a map |
 | [`directed_network_sar`](https://github.com/Ardea00/pylgm/tree/main/examples/directed_network_sar) | `SAR` on a directed interbank-exposure network, estimating contagion strength ρ |
+| [`network_reconstruction`](https://github.com/Ardea00/pylgm/tree/main/examples/network_reconstruction) | `CensoredHurdle` mask-and-reconstruct study of a bank-firm credit network against RAS and dcGM baselines |
 | [`columbus_spatial_econometrics`](https://github.com/Ardea00/pylgm/tree/main/examples/columbus_spatial_econometrics) | `SAR` reproducing Anselin's published Columbus results on real contiguity data |
 | [`state_income_dynamic_network`](https://github.com/Ardea00/pylgm/tree/main/examples/state_income_dynamic_network) | `DynamicSpatialPanel` with one network per year, on 48 US states |
 
