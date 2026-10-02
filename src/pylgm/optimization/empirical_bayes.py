@@ -5,9 +5,11 @@ from time import perf_counter
 
 import numpy as np
 import scipy.optimize
+import scipy.sparse
 
 from pylgm.exceptions import InferenceError, NumericalError, OptimizationError
 from pylgm.inference import GaussianResult, LaplaceResult, fit_gaussian
+from pylgm.likelihoods import CompiledGaussian
 from pylgm.optimization.result import EmpiricalBayesResult, OptimizationDiagnostics
 from pylgm.optimization.transforms import LogTransform, Transform
 from pylgm.parallel import blas_limit, map_ordered, validate_blas_threads, validate_workers
@@ -34,6 +36,59 @@ _FINITE_DIFFERENCE_STEP = 1e-3
 # flat while the point still creeps towards a bound (e.g. an LML that is
 # almost flat in one hyperparameter) is not a plateau.
 _PLATEAU_STEP_TOLERANCE = 1e-2
+# Analytic LML gradient: when `fit` accepts `lml_directions`, the engine returns
+# directional derivatives of the LML along (dQ, d sigma^2) supplied here, built
+# from the family itself by differencing the *materialised* precision/variance
+# (no factorisation involved, hence noise-free). Parameters whose perturbation
+# changes anything else fall back to finite differences of the full fit. A
+# module flag so tests/benchmarks can compare against pure finite differences.
+_ANALYTIC_GRADIENT = True
+# Step (internal scale) for differencing the cheap materialised quantities and
+# the penalty; no fit is involved so there is no noise floor to respect.
+_DIRECTION_STEP = 1e-4
+# CompiledLGM fields that must not move for a perturbation to be a pure
+# (precision, variance) direction.
+_FIXED_MODEL_FIELDS = (
+    "_y", "_observed", "_offset", "_design", "_constraints", "labels",
+    "_extra_constraints", "_constraint_rhs", "_prediction_design",
+    "_prediction_offset", "prediction_observation_variance",
+    "log_likelihood_normalization", "data_constraint_count", "row_log_scale",
+)
+
+
+def _same(a: object, b: object) -> bool:
+    if a is b:
+        return True
+    if a is None or b is None:
+        return False
+    if scipy.sparse.issparse(a) or scipy.sparse.issparse(b):
+        return (
+            scipy.sparse.issparse(a) and scipy.sparse.issparse(b)
+            and a.shape == b.shape and (a != b).nnz == 0
+        )
+    if isinstance(a, np.ndarray) and isinstance(b, np.ndarray):
+        return a.shape == b.shape and bool(np.array_equal(a, b))
+    return bool(a == b)
+
+
+def _precision_variance_direction(minus: object, plus: object, span: float):
+    """``((Q_plus - Q_minus)/span, (v_plus - v_minus)/span)`` or ``None``.
+
+    ``None`` unless the two models differ only in precision and Gaussian variance.
+    """
+    if not (
+        isinstance(minus.likelihood, CompiledGaussian)
+        and isinstance(plus.likelihood, CompiledGaussian)
+    ):
+        return None
+    for name in _FIXED_MODEL_FIELDS:
+        if not _same(getattr(minus, name, None), getattr(plus, name, None)):
+            return None
+    dq = (plus.precision - minus.precision) / span
+    if not np.isfinite(dq.data).all():
+        return None
+    dv = (plus.likelihood.variance - minus.likelihood.variance) / span
+    return (dq, float(dv)) if np.isfinite(dv) else None
 
 
 def _ordinary_number(value: object, name: str) -> float:
@@ -84,6 +139,8 @@ class _Evaluation:
     raw_objective: float | None
     fit: GaussianResult | LaplaceResult | None
     parameters: Mapping[str, float] | None
+    # Analytic d(LML)/du_j (internal scale) for the indices that had a direction.
+    partials: Mapping[int, float] | None = None
 
 
 def _validate_problem(
@@ -210,6 +267,7 @@ def optimize_empirical_bayes(
     except (TypeError, ValueError):
         fit_parameters = {}
     skip_intermediate_variances = "predictive_variances" in fit_parameters
+    use_directions = _ANALYTIC_GRADIENT and "lml_directions" in fit_parameters
     # A Laplace fit warm-starts Newton from ONE fixed mode -- the first
     # evaluation's, at the initial point -- never from the previous evaluation:
     # finite-difference gradients turn a history-dependent change in the
@@ -250,7 +308,43 @@ def optimize_empirical_bayes(
     # what keeps memory bounded across hundreds of evaluations at scale.
     latest_fit: tuple[tuple[float, ...], object] | None = None
 
-    def _prepare(point: np.ndarray) -> tuple[tuple[float, ...], object, object]:
+    def _steps(point: np.ndarray, index: int) -> tuple[np.ndarray, np.ndarray, float]:
+        forward = point.copy()
+        backward = point.copy()
+        forward[index] = min(point[index] + _DIRECTION_STEP, upper[index])
+        backward[index] = max(point[index] - _DIRECTION_STEP, lower[index])
+        return forward, backward, forward[index] - backward[index]
+
+    def _directions(point: np.ndarray, center: object) -> dict[int, tuple]:
+        """Index -> (dQ, dv) for every parameter whose perturbation is a pure
+        precision/variance change (one-sided at a bound). Zero-span indices and
+        any failure just omit the index (finite differences handle it)."""
+        found: dict[int, tuple] = {}
+        for index in range(point.size):
+            forward, backward, span = _steps(point, index)
+            if span <= 0.0:
+                continue
+            try:
+                ends = []
+                for end in (backward, forward):
+                    if end[index] == point[index]:
+                        ends.append(center)
+                        continue
+                    values = _parameter_values(
+                        names, tuple(float(v) for v in end), transforms,
+                        natural_lower, natural_upper, lower, upper,
+                    )
+                    ends.append(family.materialize(values))
+            except (InferenceError, ValueError):
+                continue
+            direction = _precision_variance_direction(ends[0], ends[1], span)
+            if direction is not None:
+                found[index] = direction
+        return found
+
+    def _prepare(
+        point: np.ndarray, directions: bool = False
+    ) -> tuple[tuple[float, ...], object, object]:
         """Cache lookup, parameter conversion and materialize -- serial, warm-start
         order preserved. Returns ``(key, model_or_None, error_or_None)``; a cache
         hit or a conversion/materialize failure both come back with
@@ -263,11 +357,14 @@ def optimize_empirical_bayes(
                 names, key, transforms, natural_lower, natural_upper, lower, upper,
             )
             model = family.materialize(parameters)
-            return key, (model, parameters), None
+            found = _directions(point, model) if directions and use_directions else {}
+            return key, (model, parameters, found), None
         except InferenceError as error:
             return key, None, error
 
-    def _run_fit(model: object, snapshot_mode: np.ndarray | None) -> object:
+    def _run_fit(
+        model: object, snapshot_mode: np.ndarray | None, found: Mapping[int, tuple] | None = None
+    ) -> object:
         """Fit ``model`` with today's kwargs -- thread-safe, touches no shared state."""
         fit_kwargs: dict[str, object] = {}
         if allow_large_dense:
@@ -276,12 +373,17 @@ def optimize_empirical_bayes(
             fit_kwargs["predictive_variances"] = False
         if warm_start and snapshot_mode is not None:
             fit_kwargs["initial_mode"] = snapshot_mode
+        if found:
+            fit_kwargs["lml_directions"] = tuple(found[index] for index in sorted(found))
         try:
             return fit(model, **fit_kwargs)
         except InferenceError as error:
             return error
 
-    def _record(key: tuple[float, ...], parameters: object, outcome: object) -> float:
+    def _record(
+        key: tuple[float, ...], parameters: object, outcome: object,
+        found: Mapping[int, tuple] | None = None,
+    ) -> float:
         """Today's post-fit bookkeeping: warm start, latest_fit, penalty, cache."""
         nonlocal evaluations, cache_hits, latest_failure, latest_fit, last_mode
         if key in cache:
@@ -304,8 +406,16 @@ def optimize_empirical_bayes(
             if not np.isfinite(raw_objective):
                 raise NumericalError("optimization objective must be finite")
             latest_fit = (key, result)
+            partials = None
+            if found:
+                reported = (getattr(result, "diagnostics", None) or {}).get("lml_gradient")
+                order = sorted(found)
+                if reported is not None and len(reported) == len(order):
+                    values = [float(v) for v in reported]
+                    if np.isfinite(values).all():
+                        partials = dict(zip(order, values, strict=True))
             evaluation = _Evaluation(
-                _transform_objective(raw_objective), raw_objective, None, parameters,
+                _transform_objective(raw_objective), raw_objective, None, parameters, partials,
             )
         except InferenceError as error:
             latest_failure = error
@@ -314,15 +424,19 @@ def optimize_empirical_bayes(
         cache[key] = evaluation
         return evaluation.objective
 
-    def objective(log_parameters: np.ndarray) -> float:
-        key, prepared, error = _prepare(np.asarray(log_parameters, dtype=float))
+    def _evaluate(log_parameters: np.ndarray, directions: bool) -> float:
+        key, prepared, error = _prepare(np.asarray(log_parameters, dtype=float), directions)
         if key in cache:
             return _record(key, None, None)  # cache hit: _record returns immediately
         if prepared is None:
             return _record(key, None, error)
-        model, parameters = prepared
-        outcome = _run_fit(model, last_mode)
-        return _record(key, parameters, outcome)
+        model, parameters, found = prepared
+        outcome = _run_fit(model, last_mode, found)
+        return _record(key, parameters, outcome, found)
+
+    def objective(log_parameters: np.ndarray) -> float:
+        # scipy asks for f and g at the same points: attach the analytic directions here.
+        return _evaluate(log_parameters, True)
 
     def evaluate_batch(points: list[np.ndarray]) -> list[float]:
         """Objective at each point, in order -- dedupe within the batch AND against
@@ -331,7 +445,7 @@ def optimize_empirical_bayes(
         record serially in order."""
         if num_workers == 1:
             # Today's path: one model alive at a time, same results and counters.
-            return [objective(point) for point in points]
+            return [_evaluate(point, False) for point in points]
         prepared: dict[tuple[float, ...], object] = {}
         errors: dict[tuple[float, ...], object] = {}
         keys: list[tuple[float, ...]] = []
@@ -353,12 +467,41 @@ def optimize_empirical_bayes(
         results = []
         for key in keys:
             if key in outcome_by_key:
-                results.append(_record(key, prepared[key][1], outcome_by_key[key]))
+                results.append(_record(key, prepared[key][1], outcome_by_key[key], prepared[key][2]))
             elif key in errors:
                 results.append(_record(key, None, errors[key]))
             else:
                 results.append(_record(key, None, None))
         return results
+
+    def _analytic_gradient(point: np.ndarray) -> dict[int, float]:
+        """d objective / du_j from the cached analytic LML partials and a cheap
+        finite difference of the penalty (no fit), chained through the log1p
+        objective transform. Empty when nothing analytic is available."""
+        entry = cache.get(tuple(float(value) for value in point))
+        if entry is None or not entry.partials or entry.raw_objective is None:
+            return {}
+        scale = 1.0 + abs(entry.raw_objective)
+        out: dict[int, float] = {}
+        for index, partial in entry.partials.items():
+            slope = 0.0
+            if penalty is not None:
+                forward, backward, span = _steps(point, index)
+                try:
+                    pens = [
+                        float(penalty(_parameter_values(
+                            names, tuple(float(v) for v in end), transforms,
+                            natural_lower, natural_upper, lower, upper,
+                        )))
+                        for end in (forward, backward)
+                    ]
+                except (InferenceError, ValueError):
+                    continue
+                slope = (pens[0] - pens[1]) / span
+                if not np.isfinite(slope):
+                    continue
+            out[index] = (-partial - slope) / scale
+        return out
 
     def gradient(log_parameters: np.ndarray) -> np.ndarray:
         # Central differences with an ABSOLUTE step on the internal
@@ -375,13 +518,18 @@ def optimize_empirical_bayes(
         # any batch runs.
         center = objective(point)
         result = np.empty_like(point)
+        analytic = _analytic_gradient(point)
         # Build the forward/backward points first, one-sided at a bound, in
         # today's per-index interleaved order (f0 already computed above, then
         # fwd0, bwd0, fwd1, bwd1, ...), then evaluate the whole batch at once so
         # num_workers > 1 can fan the independent fits out across threads.
-        specs: list[tuple[int, float, float, bool, bool]] = []
+        specs: list[tuple[int, float, float, bool, bool] | None] = []
         batch_points: list[np.ndarray] = []
         for index in range(point.size):
+            if index in analytic:
+                result[index] = analytic[index]
+                specs.append(None)
+                continue
             step = _FINITE_DIFFERENCE_STEP
             forward = point.copy()
             backward = point.copy()
@@ -399,7 +547,10 @@ def optimize_empirical_bayes(
                 batch_points.append(backward)
             specs.append((index, forward[index] - point[index], point[index] - backward[index], has_forward, has_backward))
         batch_values = iter(evaluate_batch(batch_points))
-        for index, forward_span, backward_span, has_forward, has_backward in specs:
+        for spec in specs:
+            if spec is None:
+                continue
+            index, forward_span, backward_span, has_forward, has_backward = spec
             if not has_forward and not has_backward:
                 result[index] = 0.0
                 continue
