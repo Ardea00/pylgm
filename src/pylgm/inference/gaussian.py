@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 
 import numpy as np
+from scipy.sparse import issparse
 from scipy.linalg import cho_factor, cho_solve, null_space, solve_triangular
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, UnsupportedEngineError
@@ -224,7 +225,46 @@ def _guarded(compute):
     return run
 
 
-def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
+def _sparse_trace(factor: np.ndarray, matrix) -> float:
+    """``tr(F F^T M)`` for sparse ``M`` from the nnz entries only: O(nnz * rank)."""
+    coo = matrix.tocoo()
+    total, step = 0.0, 4096  # chunked so the gathered factor rows stay small
+    for lo in range(0, coo.nnz, step):
+        r, c, d = coo.row[lo:lo + step], coo.col[lo:lo + step], coo.data[lo:lo + step]
+        total += float(np.einsum("ij,ij,i->", factor[r], factor[c], d))
+    return total
+
+
+def _lml_gradient(
+    directions, *, variance, n_observed, residual_sq, gram, x_hat,
+    prior_factor, prior_basis_t, post_factor,
+) -> tuple[float, ...]:
+    """Directional derivatives of the log marginal likelihood (envelope theorem).
+
+    ``dl = -1/2 [n dv/v - tr(S0 dQ) + tr(S dQ) - (tr(S G) + r'r) dv/v^2 + x' dQ x]``
+    with ``S0 = B Q_r^-1 B'`` (prior) and ``S = B P^-1 B'`` (posterior) covariances
+    and ``r`` the residual at the posterior mean.
+    """
+    f_prior = (
+        np.zeros((x_hat.size, 0)) if prior_factor is None
+        else solve_triangular(prior_factor[0], prior_basis_t, lower=True).T
+    )
+    noise_term = (_sparse_trace(post_factor, gram) + residual_sq) / variance**2
+    out = []
+    for d_q, d_v in directions:
+        value = (n_observed / variance - noise_term) * d_v
+        if d_q is not None:
+            value += (
+                _sparse_trace(post_factor, d_q) - _sparse_trace(f_prior, d_q)
+                + float(x_hat @ (d_q @ x_hat))
+            )
+        out.append(float(-0.5 * value))
+    return tuple(out)
+
+
+def _fit_dense(
+    model: CompiledLGM, *, predictive_variances: bool = True, lml_directions=None
+) -> GaussianResult:
     variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
         raise NumericalError("sigma squared must be finite and positive")
@@ -343,6 +383,20 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     covariance_factor = LazyArray(build_factor)
     lazy_covariance = LazyArray(build_covariance)
     mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
+    diagnostics = {
+        "latent_dimension": int(latent_size),
+        "observed_count": int(np.count_nonzero(observed)),
+        "constraint_count": int(model.constraints.shape[0]),
+    }
+    # Unsupported (caller finite-differences): nonzero-rhs and data constraints.
+    # log_likelihood_normalization is constant in (Q, sigma^2): only -sum log(sigma_i).
+    if lml_directions is not None and x_p is None and not model.data_constraint_count:
+        diagnostics["lml_gradient"] = _lml_gradient(
+            lml_directions, variance=variance, n_observed=n_observed,
+            residual_sq=float(posterior_residual @ posterior_residual),
+            gram=gram, x_hat=mean, prior_factor=prior_factor,
+            prior_basis_t=basis.T, post_factor=covariance_factor.get(),
+        )
     prediction_design = model.prediction_design
     predictive_mean = np.asarray(
         model.prediction_offset + prediction_design @ mean
@@ -370,11 +424,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
             else model.prediction_observation_variance
         ),
         block_slices=_block_slices(model),
-        diagnostics={
-            "latent_dimension": int(latent_size),
-            "observed_count": int(np.count_nonzero(observed)),
-            "constraint_count": int(model.constraints.shape[0]),
-        },
+        diagnostics=diagnostics,
         sampler=GridSampler(
             mean, prediction_design, model.prediction_offset, factor=covariance_factor
         ),
@@ -422,7 +472,11 @@ def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> Gau
 
 
 def fit_gaussian(
-    model: CompiledLGM, *, allow_large_dense: bool = False, predictive_variances: bool = True
+    model: CompiledLGM,
+    *,
+    allow_large_dense: bool = False,
+    predictive_variances: bool = True,
+    lml_directions=None,
 ) -> GaussianResult:
     """Fit the small/medium exact Gaussian dense reference engine.
 
@@ -434,6 +488,12 @@ def fit_gaussian(
     only need ``log_marginal_likelihood`` -- e.g. intermediate empirical-Bayes
     objective evaluations, where predictive variances are never read but can
     dominate the per-evaluation cost.
+
+    ``lml_directions`` is ``None`` or a tuple of ``(dQ, d_variance)`` pairs (``dQ`` a
+    sparse latent x latent matrix or ``None``). On the dense path with homogeneous
+    structural constraints, ``diagnostics["lml_gradient"]`` then holds the exact
+    directional derivatives of ``log_marginal_likelihood``; otherwise the key is
+    absent and callers should finite-difference.
     """
     if not isinstance(model.likelihood, CompiledGaussian):
         raise UnsupportedEngineError("exact Gaussian inference requires a Gaussian likelihood")
@@ -441,10 +501,19 @@ def fit_gaussian(
         raise TypeError("allow_large_dense must be a boolean")
     if type(predictive_variances) is not bool:
         raise TypeError("predictive_variances must be a boolean")
+    if lml_directions is not None:
+        if not isinstance(lml_directions, tuple) or not all(
+            isinstance(d, tuple) and len(d) == 2 and (d[0] is None or issparse(d[0]))
+            and isinstance(d[1], (int, float)) and not isinstance(d[1], bool)
+            for d in lml_directions
+        ):
+            raise TypeError("lml_directions must be a tuple of (sparse dQ or None, float) pairs")
     if not allow_large_dense and _exceeds_dense_threshold(model):
         return _fit_sparse(model, predictive_variances=predictive_variances)
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            return _fit_dense(model, predictive_variances=predictive_variances)
+            return _fit_dense(
+                model, predictive_variances=predictive_variances, lml_directions=lml_directions
+            )
     except FloatingPointError as error:
         raise NumericalError("exact Gaussian numerical calculation was non-finite") from error

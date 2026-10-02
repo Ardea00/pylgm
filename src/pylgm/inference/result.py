@@ -52,6 +52,8 @@ def _readonly_diagnostics(value: Mapping[str, object]) -> Mapping[str, object]:
             raise TypeError("diagnostics keys must be strings")
         if isinstance(item, np.generic):
             item = _normalized_numpy_scalar(item)
+        elif type(item) is tuple and all(type(v) in _IMMUTABLE_DIAGNOSTIC_TYPES for v in item):
+            pass  # tuples of immutable scalars (e.g. lml_gradient) are immutable too
         elif type(item) not in _IMMUTABLE_DIAGNOSTIC_TYPES:
             raise TypeError("diagnostics values must be immutable scalar values")
         result[name] = item
