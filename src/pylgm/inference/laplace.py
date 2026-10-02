@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.linalg import cho_solve, solve_triangular
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, vstack
 
 from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference import gaussian as _gaussian
@@ -153,6 +153,40 @@ def _reported_predictions(model, mean, variances, wanted: bool):
     return predictive_variance, predictive_mean, fitted_mean
 
 
+def _curvature_rows(likelihood, design, eta: np.ndarray, y: np.ndarray, *, psd: bool = False):
+    """``(rows, weights)`` with ``rows^T diag(weights) rows`` the likelihood curvature.
+
+    A row-separable likelihood gives ``(design, working_weights)``. A coupled one
+    owns each pair's two rows outright, so its 2x2 curvature block
+    ``[[w_i, c], [c, w_j]]`` is replaced by its eigen-pair rows
+    ``cos t d_i + sin t d_j`` and ``-sin t d_i + cos t d_j`` (``tan 2t = 2c / (w_i - w_j)``),
+    weighted by the eigenvalues -- the same matrix, and every engine keeps its
+    ``(design, weights)`` form. ``psd`` clips negative eigenvalues: a Newton
+    direction for an iterate where the (not log-concave) block is indefinite.
+    """
+    weights = np.asarray(likelihood.working_weights(eta, y), dtype=float)
+    coupled = getattr(likelihood, "cross_weights", None)
+    pairs = coupled(eta, y) if coupled is not None else None
+    if pairs is None:
+        return design, weights
+    i, j, c = pairs
+    w_i, w_j = weights[i], weights[j]
+    angle = 0.5 * np.arctan2(2.0 * c, w_i - w_j)
+    cos, sin = np.cos(angle), np.sin(angle)
+    first = w_i * cos * cos + w_j * sin * sin + 2.0 * c * sin * cos
+    second = w_i * sin * sin + w_j * cos * cos - 2.0 * c * sin * cos
+    if psd:
+        first, second = np.maximum(first, 0.0), np.maximum(second, 0.0)
+    weights = weights.copy()
+    weights[i] = weights[j] = 0.0
+    d_i, d_j = design[i], design[j]
+    return (
+        vstack([design, d_i.multiply(cos[:, None]) + d_j.multiply(sin[:, None]),
+                d_j.multiply(cos[:, None]) - d_i.multiply(sin[:, None])], format="csr"),
+        np.concatenate([weights, first, second]),
+    )
+
+
 def _prior_data_log_density(model: CompiledLGM, latent_size: int, precision) -> float:
     """``log p(e)``: the density of the data rows ``A x = e`` under the prior.
 
@@ -221,8 +255,9 @@ def _fit_laplace_dense(
         pulled = np.asarray(observed_design.T @ values).reshape(-1)
         return pulled if identity else basis.T @ pulled
 
-    def curvature(weights):
-        data = (observed_design.T @ observed_design.multiply(weights[:, None])).toarray()
+    def curvature(eta, psd=False):
+        rows, weights = _curvature_rows(lk_obs, observed_design, eta, y_obs, psd=psd)
+        data = (rows.T @ rows.multiply(weights[:, None])).toarray()
         return reduced_precision + (data if identity else basis.T @ data @ basis)
 
     reduced_precision = basis.T @ precision @ basis
@@ -266,14 +301,18 @@ def _fit_laplace_dense(
         for iterations in range(1, max_iterations + 1):
             eta = predictor(z)
             grad_ll = lk_obs.gradient(eta, y_obs)
-            weights = lk_obs.working_weights(eta, y_obs)
             gradient = reduced_precision @ z + prior_linear - pulled_back(grad_ll)
             gradient_norm = float(np.max(np.abs(gradient)))
             if gradient_norm < tolerance:
                 converged = True
                 break
-            hessian = curvature(weights)
-            factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
+            try:
+                factor, _ = _factor_positive_definite(curvature(eta), "reduced posterior precision")
+            except NumericalError:
+                # Only a coupled likelihood changes under psd; any other re-raises.
+                factor, _ = _factor_positive_definite(
+                    curvature(eta, psd=True), "reduced posterior precision"
+                )
             step = cho_solve(factor, -gradient)
             slope = float(gradient @ step)
             scale = 1.0
@@ -315,8 +354,7 @@ def _fit_laplace_dense(
                 # decrement inside the loop cures the same stalls but stops earlier
                 # than the gradient test on well-scaled problems, relocating the
                 # mode; here, every fit that converges today is untouched.
-                weights = lk_obs.working_weights(eta, y_obs)
-                hessian = curvature(weights)
+                hessian = curvature(eta)
                 factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
                 decrement = -0.5 * float(gradient @ cho_solve(factor, -gradient))
                 if decrement >= tolerance:
@@ -326,13 +364,11 @@ def _fit_laplace_dense(
         # Polish: one more Newton step from the accepted point (see _polished).
         eta = predictor(z)
         gradient = reduced_precision @ z + prior_linear - pulled_back(lk_obs.gradient(eta, y_obs))
-        weights = lk_obs.working_weights(eta, y_obs)
-        hessian = curvature(weights)
+        hessian = curvature(eta)
         polish_factor, _ = _factor_positive_definite(hessian, "reduced posterior precision")
         z = _polished(objective, z, z + cho_solve(polish_factor, -gradient))
         eta = predictor(z)
-        weights = lk_obs.working_weights(eta, y_obs)
-        hessian = curvature(weights)
+        hessian = curvature(eta)
         factor, logdet_posterior = _factor_positive_definite(hessian, "reduced posterior precision")
         loglik_mode = lk_obs.log_likelihood(eta, y_obs)
     else:
@@ -452,17 +488,21 @@ def _fit_laplace_sparse(
         eta = design @ x + offset_obs
         return -lk_obs.log_likelihood(eta, y_obs) + 0.5 * float(x @ (q @ x))
 
-    def weighted_solve(x: np.ndarray, *, final: bool = False):
+    def weighted_solve(x: np.ndarray, *, final: bool = False, psd: bool = False):
         eta = design @ x + offset_obs
-        weights = lk_obs.working_weights(eta, y_obs)
+        curvature_rows, weights = _curvature_rows(lk_obs, design, eta, y_obs, psd=psd)
         # final: score = H x, so the solve returns x itself and every kriging /
         # determinant term is evaluated at the mode, as the dense engine does.
         pull = q @ x if final else design.T @ lk_obs.gradient(eta, y_obs)
-        return _sparse_solve(model, weights, pull + design.T @ (weights * (design @ x)),
-                             final=final)
+        return _sparse_solve(model, weights, pull + curvature_rows.T @ (weights * (curvature_rows @ x)),
+                             final=final, observed_design=curvature_rows)
 
     def newton_step(x: np.ndarray) -> np.ndarray:
-        return weighted_solve(x).structural_mean - x
+        try:
+            return weighted_solve(x).structural_mean - x
+        except NumericalError:
+            # As the dense engine: clip an indefinite coupled block for the direction.
+            return weighted_solve(x, psd=True).structural_mean - x
 
     def reduced_gradient(x: np.ndarray) -> np.ndarray:
         eta = design @ x + offset_obs

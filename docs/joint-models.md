@@ -319,6 +319,57 @@ see the caveat below). Model criteria (DIC/WAIC/CPO/PIT) cover the
 in stacked order (NaN at unobserved rows) followed by one entry per
 observation row, each read on its original `sigma` scale.
 
+## Censored registers: `CensoredHurdle`
+
+A credit register reports a lender-borrower exposure only when it reaches a
+threshold `c`. For a candidate edge absent from the register, two things could
+be true: the edge does not exist, or it exists below `c`. `CensoredHurdle`
+models exactly that, coupling a Bernoulli **link** outcome and a Gaussian
+outcome on the **log amount**:
+
+\[
+\ell(a, b) = \log\big[(1-p) + p\,\Phi\big((\log c - b)/\sigma\big)\big],
+\qquad p = \operatorname{expit}(a),
+\]
+
+with `a` the link predictor, `b` the log-amount predictor and `sigma` the
+amount outcome's Gaussian sigma (fixed or estimated, shared with the reported
+amounts).
+
+```python
+from pylgm import IID, LGM, Bernoulli, CensoredHurdle, Fixed, Gaussian, Joint
+
+link = LGM(response="linked", likelihood=Bernoulli(), panel=("firm", "bank"),
+           predictor=Fixed("1") + IID("firm_l", index="firm") + IID("bank_l", index="bank"))
+amount = LGM(response="log_amount", likelihood=Gaussian(0.8), panel=("firm", "bank"),
+             predictor=Fixed("1") + IID("firm_a", index="firm"))
+joint = Joint([link, amount], censoring=CensoredHurdle(
+    link="linked", amount="log_amount", censored="unreported", threshold=np.log(30_000),
+))
+result = joint.fit(edges)
+```
+
+One row per candidate edge. A reported edge has `linked = 1` and its log
+amount; a known non-edge has `linked = 0` and no amount; an edge absent from
+the register has `unreported = True` and NaN in both. `threshold` is a float or
+a column, for a threshold that changed over time.
+
+The term is not separable in its two rows, so the Laplace engines take its
+2x2 curvature block per edge as two extra rotated design rows; it is not
+log-concave, so an iterate whose block is indefinite takes a direction with
+the negative eigenvalue clipped, while the Hessian at the mode stays exact.
+Validated against an independent numpy optimisation of the exact posterior
+(mode) and a finite-difference Laplace approximation (evidence).
+
+**Identification.** With only reported and censored edges, "no link" and "a
+link below `c`" are separated by the parametric amount tail alone, and the
+link intercept is weakly identified. Known non-edges, or margins on the
+below-threshold mass, are what pin it down.
+
+**Unsupported:** `mean_correction`, `latent_strategy="simplified_laplace"` /
+`"laplace"`, per-row criteria (WAIC, CPO, PIT: an observation spans two rows),
+and `update()` with new censored edges. Each is refused, not approximated.
+
 ## Outcomes at different frequencies
 
 A higher-frequency outcome (several releases per lower-frequency period) can

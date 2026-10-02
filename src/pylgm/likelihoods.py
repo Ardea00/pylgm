@@ -5,10 +5,13 @@ from dataclasses import dataclass, field
 import math
 
 import numpy as np
-from scipy.special import gammaln, erf, gammaincc, gammainc, betainc, digamma, polygamma, gamma as gamma_fn
+from scipy.special import (
+    betainc, digamma, erf, gamma as gamma_fn, gammainc, gammaincc, gammaln, log_expit, log_ndtr,
+    polygamma,
+)
 
 from pylgm.links import IdentityLink, LogLink, LogitLink
-from pylgm.exceptions import DataContractError, ModelValidationError
+from pylgm.exceptions import DataContractError, ModelValidationError, UnsupportedEngineError
 from pylgm.parameters import Hyperparameter
 from pylgm._checks import positive_real as _positive_real
 
@@ -603,6 +606,9 @@ class CompiledMixture(_CompiledLikelihood):
         # via `for_observations` over the whole sub-frame, not the full stack.
         # `observed[mask]` re-expresses the stacked `observed` flags in that same
         # per-part space, so it's what re-slices the aux vectors correctly.
+        for mask, lk in self.parts:
+            if hasattr(lk, "cross_weights") and not observed[mask].all():
+                raise ModelValidationError("a coupled likelihood part must keep all its rows")
         return CompiledMixture(
             tuple(
                 (mask[observed], _restrict_bound_aux(lk, observed[mask]))
@@ -641,6 +647,18 @@ class CompiledMixture(_CompiledLikelihood):
     def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return self._scatter("third_derivative", eta, y)
 
+    def cross_weights(self, eta: np.ndarray, y: np.ndarray):
+        """Off-diagonal curvature ``(rows_i, rows_j, -d2l / deta_i deta_j)`` of coupled parts."""
+        pairs = [
+            (rows[i], rows[j], c)
+            for mask, lk in self.parts if hasattr(lk, "cross_weights")
+            for rows in (np.flatnonzero(mask),)
+            for i, j, c in (lk.cross_weights(eta[mask], y[mask]),)
+        ]
+        if not pairs:
+            return None
+        return tuple(np.concatenate(column) for column in zip(*pairs, strict=True))
+
     def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
         return self._scatter("pointwise_log_density", eta, y)
 
@@ -658,6 +676,102 @@ class CompiledMixture(_CompiledLikelihood):
     def validate_response(self, y: np.ndarray) -> None:
         for mask, likelihood in self.parts:
             likelihood.validate_response(y[mask])
+
+
+@dataclass(frozen=True)
+class CompiledCensoredHurdle(_CompiledLikelihood):
+    """One term per edge coupling a link predictor ``a`` and a log-amount ``b``.
+
+    For an edge absent from a register that reports amounts ``W >= c`` only, the
+    edge either does not exist or exists below the threshold:
+
+        l(a, b) = log[(1 - p) + p Phi((t - b) / sigma)] = log(1 - p S),
+        p = expit(a),  S = Phi(w),  w = (b - t) / sigma,  t = log c.
+
+    As a mixture part it owns ``2K`` rows: ``link_rows`` and ``amount_rows`` are
+    the part-local rows of each pair. The term is not separable in its rows, so
+    besides the diagonal ``working_weights`` it reports the cross curvature
+    ``-d2l / da db`` through ``cross_weights``. With ``q = pS / (1 - pS)`` and
+    ``m = p phi(w) / (sigma (1 - pS))``, both formed as exponentials of log
+    differences so neither cancels:
+
+        l_a  = -(1-p) q,                     l_b  = -m,
+        l_aa = -(1-p)(1-2p) q - (1-p)^2 q^2,  l_bb = (w / sigma) m - m^2,
+        l_ab = -(1-p) m (1 + q).
+
+    It is not log-concave jointly in ``(a, b)``; Newton's line search and the
+    prior's curvature carry the fit.
+    """
+
+    link_rows: np.ndarray
+    amount_rows: np.ndarray
+    threshold: np.ndarray
+    sigma: float
+
+    def _terms(self, eta):
+        eta = np.asarray(eta, dtype=float)
+        a, b = eta[self.link_rows], eta[self.amount_rows]
+        w = (b - self.threshold) / self.sigma
+        log_p = log_expit(a)
+        log_absent = np.logaddexp(log_expit(-a), log_p + log_ndtr(-w))  # log(1 - pS)
+        q = np.exp(log_p + log_ndtr(w) - log_absent)
+        m = np.exp(log_p - 0.5 * w * w - 0.5 * np.log(2 * np.pi) - np.log(self.sigma) - log_absent)
+        return eta, w, np.exp(log_expit(-a)), log_absent, q, m
+
+    def log_likelihood(self, eta: np.ndarray, y: np.ndarray) -> float:
+        return float(self._terms(eta)[3].sum())
+
+    def gradient(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta, _, one_minus_p, _, q, m = self._terms(eta)
+        out = np.empty_like(eta)
+        out[self.link_rows] = -one_minus_p * q
+        out[self.amount_rows] = -m
+        return out
+
+    def working_weights(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        eta, w, one_minus_p, _, q, m = self._terms(eta)
+        out = np.empty_like(eta)
+        out[self.link_rows] = one_minus_p * (1.0 - 2.0 * (1.0 - one_minus_p)) * q + (one_minus_p * q) ** 2
+        out[self.amount_rows] = m * m - (w / self.sigma) * m
+        return out
+
+    def cross_weights(self, eta: np.ndarray, y: np.ndarray):
+        _, _, one_minus_p, _, q, m = self._terms(eta)
+        return self.link_rows, self.amount_rows, one_minus_p * m * (1.0 + q)
+
+    def third_derivative(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        raise UnsupportedEngineError(
+            "a censored hurdle supports latent_strategy='gaussian' without "
+            "mean_correction: its third derivatives couple rows"
+        )
+
+    def pointwise_log_density(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        # One observation spans two rows; per-row criteria (WAIC, CPO, PIT) do
+        # not apply to it, and NaN says so rather than splitting it arbitrarily.
+        return np.full(np.asarray(eta).shape, np.nan)
+
+    def cdf(self, eta: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.full(np.asarray(eta).shape, np.nan)
+
+    def response_mean(self, eta: np.ndarray) -> np.ndarray:
+        out = np.array(eta, dtype=float)
+        out[self.link_rows] = np.exp(log_expit(out[self.link_rows]))
+        return out
+
+    def response_prediction(self, eta_mean: np.ndarray, eta_variance: np.ndarray) -> np.ndarray:
+        return self.response_mean(eta_mean)
+
+    def validate_response(self, y: np.ndarray) -> None:
+        """Its rows carry no response: the absence from the register is the datum."""
+
+
+def require_separable(likelihood, eta: np.ndarray, y: np.ndarray, what: str) -> None:
+    """Refuse a row-separable-only computation on a likelihood with coupled rows."""
+    coupled = getattr(likelihood, "cross_weights", None)
+    if coupled is not None and coupled(eta, y) is not None:
+        raise UnsupportedEngineError(
+            f"{what} needs a row-separable likelihood; a censored hurdle couples rows"
+        )
 
 
 def _restrict_bound_aux(likelihood, local_observed: np.ndarray):

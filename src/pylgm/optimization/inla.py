@@ -14,7 +14,7 @@ from scipy.special import logsumexp
 from scipy.stats import norm
 
 from pylgm.exceptions import NumericalError, OptimizationError, UnsupportedEngineError
-from pylgm.likelihoods import CompiledMixture
+from pylgm.likelihoods import CompiledMixture, require_separable
 from pylgm.inference import LaplaceResult, fit_gaussian
 from pylgm.inference.result import (
     GaussianMarginals,
@@ -188,6 +188,8 @@ def _full_laplace_marginals(design, offset, y, grid, *,
     offset = np.asarray(offset, float)
     y = np.asarray(y, float)
     points = list(grid)
+    for _, fit, likelihood, _ in points:
+        require_separable(likelihood, offset, y, "latent_strategy='laplace'")
     p = points[0][1].mean.shape[0]
     std_nodes = np.polynomial.hermite.hermgauss(n_abscissae)[0] * np.sqrt(2.0)  # ~N(0,1) abscissae
 
@@ -939,21 +941,23 @@ def _integrate_inla(
     y_obs = kept[0][4].y[observed]
     theta_grid = [(w, cond, compiled.likelihood.restrict(observed))
                   for (_, _, cond, _, compiled), w in zip(kept, weights, strict=True)]
-    crit = _model_criteria(*_criteria_inputs(kept, weights, observed))
+    criteria = None
+    if getattr(theta_grid[0][2], "cross_weights", lambda *_: None)(offset_obs, y_obs) is None:
+        crit = _model_criteria(*_criteria_inputs(kept, weights, observed))
 
-    # crit.cpo/pit are computed in canonical order over observed rows only (length
-    # n_observed); scatter them into full-length canonical arrays aligned with every
-    # row (NaN at unobserved/prediction-target rows) so they can be reordered like
-    # predictive_mean/predictive_variance below.
-    cpo_full = np.full(observed.size, np.nan)
-    pit_full = np.full(observed.size, np.nan)
-    cpo_full[observed] = crit.cpo
-    pit_full[observed] = crit.pit
-    criteria = ModelCriteria(
-        crit.dic, crit.dic_effective_parameters,
-        crit.waic, crit.waic_effective_parameters,
-        cpo_full, pit_full, crit.cpo_failures, crit.log_cpo_sum,
-    )
+        # crit.cpo/pit are computed in canonical order over observed rows only
+        # (length n_observed); scatter them into full-length canonical arrays
+        # aligned with every row (NaN at unobserved/prediction-target rows) so
+        # they can be reordered like predictive_mean/predictive_variance below.
+        cpo_full = np.full(observed.size, np.nan)
+        pit_full = np.full(observed.size, np.nan)
+        cpo_full[observed] = crit.cpo
+        pit_full[observed] = crit.pit
+        criteria = ModelCriteria(
+            crit.dic, crit.dic_effective_parameters,
+            crit.waic, crit.waic_effective_parameters,
+            cpo_full, pit_full, crit.cpo_failures, crit.log_cpo_sum,
+        )
 
     latent_marginal_table = None
     if latent_strategy == "simplified_laplace":

@@ -198,13 +198,89 @@ def _hold_out(self: "Joint", argument, rows: int) -> dict:
 
 
 @dataclass(frozen=True)
+class CensoredHurdle:
+    """Edges absent from a register that reports amounts at or above a threshold.
+
+    ``link`` names a Bernoulli outcome (1 for an edge in the register) and
+    ``amount`` a Gaussian outcome on its log amount. A row where the boolean
+    column ``censored`` is true is a candidate edge *absent* from the register:
+    it either does not exist or exists below the threshold, so both responses
+    must be NaN there and the row contributes
+
+        log[(1 - p) + p Phi((threshold - eta_amount) / sigma)],  p = expit(eta_link),
+
+    with ``sigma`` the amount outcome's (fixed or estimated) Gaussian sigma.
+    ``threshold`` is the log reporting threshold: a float, or a column name.
+    The two outcomes must share their predictor grid row for row, which they do
+    when both come from the same frame.
+    """
+
+    link: str
+    amount: str
+    censored: str
+    threshold: float | str
+
+    def __post_init__(self) -> None:
+        for name in ("link", "amount", "censored"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"CensoredHurdle {name} must be a non-empty column name")
+        if self.link == self.amount:
+            raise ValueError("CensoredHurdle link and amount must be different outcomes")
+        if not isinstance(self.threshold, str) and not np.isfinite(self.threshold):
+            raise ValueError("CensoredHurdle threshold must be finite or a column name")
+
+    def rows(self, frame) -> tuple[np.ndarray, np.ndarray]:
+        """The censored mask and the per-row log threshold, validated on ``frame``."""
+        from pylgm.exceptions import DataContractError
+
+        if self.censored not in frame.columns:
+            raise DataContractError(f"censored column {self.censored!r} is missing")
+        censored = frame[self.censored]
+        if censored.dtype != bool:
+            raise DataContractError(f"censored column {self.censored!r} must be boolean")
+        censored = censored.to_numpy(copy=True)
+        for outcome in (self.link, self.amount):
+            if outcome in frame.columns and frame.loc[censored, outcome].notna().any():
+                raise DataContractError(
+                    f"outcome {outcome!r} must be NaN on censored rows: absence from "
+                    "the register is the only datum there"
+                )
+        if isinstance(self.threshold, str):
+            if self.threshold not in frame.columns:
+                raise DataContractError(f"threshold column {self.threshold!r} is missing")
+            threshold = frame[self.threshold].to_numpy(dtype=float)
+        else:
+            threshold = np.full(len(frame), float(self.threshold))
+        if not np.isfinite(threshold[censored]).all():
+            raise DataContractError("CensoredHurdle threshold must be finite on censored rows")
+        return censored, threshold
+
+
+def _validate_censoring(censoring, submodels) -> None:
+    from pylgm.likelihoods import Bernoulli, Gaussian
+
+    if not isinstance(censoring, CensoredHurdle):
+        raise TypeError("Joint censoring must be a CensoredHurdle")
+    by_response = {model.response: model for model in submodels}
+    for role, kind in (("link", Bernoulli), ("amount", Gaussian)):
+        outcome = getattr(censoring, role)
+        if outcome not in by_response:
+            raise ModelValidationError(f"CensoredHurdle {role} {outcome!r} is not an outcome")
+        if not isinstance(by_response[outcome].likelihood, kind):
+            raise ModelValidationError(
+                f"CensoredHurdle {role} outcome {outcome!r} needs a {kind.__name__} likelihood"
+            )
+
+
+@dataclass(frozen=True)
 class Joint:
     """Several `LGM` sub-models fitted as one stacked latent Gaussian model."""
 
     submodels: tuple = ()
     shared: tuple = ()
+    censoring: "CensoredHurdle | None" = None
 
-    def __init__(self, submodels, shared=()) -> None:
+    def __init__(self, submodels, shared=(), censoring=None) -> None:
         submodels = tuple(submodels)
         if len(submodels) < 2:
             raise ValueError("Joint requires at least two sub-models")
@@ -219,8 +295,11 @@ class Joint:
         shared_names = [entry.name for entry in shared]
         if len(shared_names) != len(set(shared_names)):
             raise ValueError("Joint shared effect names must be unique")
+        if censoring is not None:
+            _validate_censoring(censoring, submodels)
         object.__setattr__(self, "submodels", submodels)
         object.__setattr__(self, "shared", shared)
+        object.__setattr__(self, "censoring", censoring)
 
     @property
     def outcomes(self) -> tuple[str, ...]:
@@ -232,6 +311,7 @@ class Joint:
         obj = object.__new__(cls)
         object.__setattr__(obj, "submodels", tuple(submodels))
         object.__setattr__(obj, "shared", tuple(shared))
+        object.__setattr__(obj, "censoring", None)
         return obj
 
     def fit(self, frame, engine: str = "laplace", *, hyperparameters: str = "optimize",
@@ -309,6 +389,10 @@ class Joint:
                         item.operator, len(frame),
                         f"{type(item).__name__} operator for outcome {outcome!r}",
                     )
+        hurdle = self.censoring
+        censored_mask = threshold = None
+        if hurdle is not None:
+            censored_mask, threshold = hurdle.rows(frame)
         panels = {}
         positions = {}
         for model in self.submodels:
@@ -337,6 +421,9 @@ class Joint:
                 operator.eliminate_zeros()
                 keep[np.unique(operator.indices)] = True
             keep |= hold_out.get(response, False)
+            censored_role = hurdle is not None and response in (hurdle.link, hurdle.amount)
+            if censored_role:
+                keep |= censored_mask
             positions[response] = np.flatnonzero(keep)
             sub = frame.iloc[positions[response]].reset_index(drop=True)
             if response not in sub.columns:
@@ -346,7 +433,7 @@ class Joint:
                 sub = sub.assign(**{time: range(len(sub))})
             panels[model.response] = CanonicalPanel.from_frame(
                 sub, DataConfig(time=time, response=model.response, panel=model.panel),
-                require_observed=not named,
+                require_observed=not (named or censored_role),
             )
 
         for model in self.submodels:
@@ -364,26 +451,37 @@ class Joint:
                     "sigma instead"
                 )
 
+        sizes = [len(panels[outcome].frame) for outcome in self.outcomes]
+        starts, total = [], 0
+        for size in sizes:
+            starts.append(total)
+            total += size
+
+        def original_rows(outcome):
+            """The caller's frame row behind each canonical row of ``outcome``."""
+            return positions[outcome][panels[outcome].source_positions]
+
+        censoring = None
+        if hurdle is not None:
+            # Pair the link and amount rows of each censored edge by its frame row.
+            pairs = []
+            for outcome in (hurdle.link, hurdle.amount):
+                original = original_rows(outcome)
+                local = np.flatnonzero(censored_mask[original])
+                local = local[np.argsort(original[local], kind="stable")]
+                pairs.append((starts[self.outcomes.index(outcome)] + local, original[local]))
+            (link_rows, link_original), (amount_rows, _) = pairs
+            censoring = (link_rows, amount_rows, threshold[link_original])
+
         linear = bool(observations or constraints)
         stacked_observations: tuple = ()
         stacked_constraints: tuple = ()
         if linear:
-            sizes = [len(panels[outcome].frame) for outcome in self.outcomes]
-            starts, total = [], 0
-            for size in sizes:
-                starts.append(total)
-                total += size
-
             selections = {}
             for index, outcome in enumerate(self.outcomes):
-                p_k = positions[outcome]
-                s_k = panels[outcome].source_positions
-                n_k = len(s_k)
+                n_k = sizes[index]
                 selections[outcome] = csr_matrix(
-                    (
-                        np.ones(n_k),
-                        (p_k[s_k], starts[index] + np.arange(n_k)),
-                    ),
+                    (np.ones(n_k), (original_rows(outcome), starts[index] + np.arange(n_k))),
                     shape=(len(frame), total),
                 )
 
@@ -400,10 +498,10 @@ class Joint:
                 for item in constraints.get(outcome, ())
             )
 
-        compiled = compile_joint(self, panels)
+        compiled = compile_joint(self, panels, censoring=censoring)
         if any(item.scale == "log" for item in (*stacked_observations, *stacked_constraints)):
             family = project_gaussian_family(
-                compile_joint_family(self, panels), stacked_observations, stacked_constraints,
+                compile_joint_family(self, panels, censoring=censoring), stacked_observations, stacked_constraints,
                 base_model=compiled,
                 family_type=partial(
                     _RelinearizedFamily, project=project_mixture_model, inner_fit=fit_laplace,
@@ -413,7 +511,7 @@ class Joint:
             def direct():
                 return family.materialize({})
         else:
-            family = compile_joint_family(self, panels)
+            family = compile_joint_family(self, panels, censoring=censoring)
             if observation_hyperparameters(stacked_observations):
                 family = project_gaussian_family(
                     family, stacked_observations, stacked_constraints,

@@ -36,6 +36,7 @@ from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.special import logsumexp
 
 from pylgm.exceptions import InferenceConvergenceError, NumericalError, UnsupportedEngineError
+from pylgm.likelihoods import require_separable
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ def _psd_factor(covariance: np.ndarray) -> np.ndarray:
 
 def _rows_mode(m: np.ndarray, s0: np.ndarray, y: np.ndarray, likelihood):
     """Mode of ``p(y | eta) N(eta; m, S0)``: ``(a, W^1/2, cho(B), log p(y))`` (module doc)."""
+    require_separable(likelihood, m, y, "update()")
     k = m.size
 
     def curvature(eta):

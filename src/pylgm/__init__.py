@@ -28,7 +28,7 @@ from pylgm.effects import (
     load_graph_file,
 )
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
-from pylgm.joint import Joint, Shared
+from pylgm.joint import CensoredHurdle, Joint, Shared
 from pylgm.likelihoods import (
     Bernoulli,
     Beta,
@@ -67,6 +67,7 @@ __all__ = [
     "Binomial",
     "BYM2",
     "CandidateFailure",
+    "CensoredHurdle",
     "ComparisonResult",
     "compose",
     "Copy",

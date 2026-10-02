@@ -98,6 +98,7 @@ from pylgm.likelihoods import (
     Beta,
     Binomial,
     CompiledGaussian,
+    CompiledCensoredHurdle,
     CompiledMixture,
     ExponentialSurv,
     Gamma,
@@ -825,7 +826,32 @@ def _levels_frame(index: str, levels: tuple, dtype=None) -> "pd.DataFrame":
     return pd.DataFrame({index: pd.Series(list(levels), dtype=dtype)})
 
 
-def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledLGM:
+def _censored_parts(parts, observed, total: int, censoring, amount_position: int):
+    """Move the censored edges' rows out of their outcomes into one coupled part.
+
+    ``censoring`` is ``(link_rows, amount_rows, log_threshold)`` in stacked rows,
+    paired by position. The coupled rows count as observed: absence from the
+    register is their datum. The coupled part reads ``sigma`` off the amount
+    outcome's materialized Gaussian, so an estimated sigma moves both together.
+    """
+    if censoring is None:
+        return parts, observed
+    link_rows, amount_rows, threshold = censoring
+    coupled = np.zeros(total, dtype=bool)
+    coupled[link_rows] = coupled[amount_rows] = True
+    local = np.flatnonzero(coupled)
+    sigma = parts[amount_position][1].sigma
+    hurdle = CompiledCensoredHurdle(
+        np.searchsorted(local, link_rows), np.searchsorted(local, amount_rows),
+        np.asarray(threshold, dtype=float), float(sigma),
+    )
+    parts = [(mask & ~coupled, lk) for mask, lk in parts] + [(coupled, hurdle)]
+    return parts, observed | coupled
+
+
+def compile_joint(
+    joint: "Joint", panels: "dict[str, CanonicalPanel]", censoring=None,
+) -> CompiledLGM:
     """Compile a Joint into one stacked CompiledLGM.
 
     Row slices follow sub-model declaration order. Block order is every
@@ -894,6 +920,8 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
         except DataContractError as error:
             raise DataContractError(f"{error} for outcome {outcome!r}") from error
         parts.append((mask, compiled.for_observations(aux)))
+    amount_position = outcomes.index(joint.censoring.amount) if censoring is not None else None
+    parts, observed = _censored_parts(parts, observed, total, censoring, amount_position)
     likelihood = CompiledMixture(tuple(parts), total)
 
     width = sum(block.design.shape[1] for block in blocks)
@@ -2130,7 +2158,9 @@ def _restack_family_block(item, outcome: str, before: int, after: int):
     return ScalableBlock(padded, item.parameter, item.scale)
 
 
-def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledFamily | None:
+def compile_joint_family(
+    joint: "Joint", panels: "dict[str, CanonicalPanel]", censoring=None,
+) -> CompiledFamily | None:
     """Family form of compile_joint: rebuild scale-dependent designs per draw."""
     outcomes = joint.outcomes
     frames = [panels[name].frame for name in outcomes]
@@ -2238,6 +2268,9 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         _offset_vector(model, frame) for model, frame in zip(joint.submodels, frames, strict=False)
     ])
 
+    amount_position = outcomes.index(joint.censoring.amount) if censoring is not None else None
+    if censoring is not None:
+        observed[censoring[0]] = observed[censoring[1]] = True
     masks = []
     for position in range(len(outcomes)):
         mask = np.zeros(total, dtype=bool)
@@ -2269,6 +2302,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
             )
             compiled = model.likelihood.materialize(resolved)
             parts.append((mask, compiled.for_observations(_likelihood_columns(model, frame))))
+        parts, _ = _censored_parts(parts, observed, total, censoring, amount_position)
         return CompiledMixture(tuple(parts), total)
 
     return CompiledFamily(

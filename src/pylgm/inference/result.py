@@ -1286,8 +1286,9 @@ class INLAResult(_BaseResult):
     def criteria(self) -> ModelCriteria:
         if self._criteria is None:
             raise ValueError(
-                "criteria score the originally fitted rows and are not carried through "
-                "update(); refit on all rows to compare models"
+                "criteria score row-separable fitted rows: update() does not carry "
+                "them through (refit on all rows to compare models), and a censored "
+                "hurdle, whose observations span two rows, has none"
             )
         return self._criteria
 
