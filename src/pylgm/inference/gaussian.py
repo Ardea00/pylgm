@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from functools import lru_cache
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve, null_space, solve_triangular
@@ -69,7 +70,16 @@ def _factor_positive_definite(
     return factor, float(2.0 * np.log(np.diag(factor[0])).sum())
 
 
-def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndarray:
+def _frozen(array: np.ndarray) -> np.ndarray:
+    array.setflags(write=False)
+    return array
+
+
+# ponytail: constraint rows are hyperparameter-free, so EB re-hits the same few
+# keys; maxsize 8 is a ceiling, raise it if models with many constraint sets thrash.
+@lru_cache(maxsize=8)
+def _null_space_cached(shape: tuple, raw: bytes, latent_size: int) -> np.ndarray:
+    constraints = np.frombuffer(raw, dtype=float).reshape(shape)
     normalized_rows = []
     for row in constraints:
         scale = np.abs(row).max()
@@ -79,8 +89,31 @@ def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndar
         normalized_rows.append(scaled_row / np.linalg.norm(scaled_row))
 
     if not normalized_rows:
-        return np.eye(latent_size)
-    return null_space(np.asarray(normalized_rows))
+        return _frozen(np.eye(latent_size))
+    return _frozen(null_space(np.asarray(normalized_rows)))
+
+
+def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndarray:
+    """``null(constraints)``, memoised on content; the result is read-only."""
+    constraints = np.ascontiguousarray(constraints, dtype=float)
+    return _null_space_cached(constraints.shape, constraints.tobytes(), latent_size)
+
+
+# ponytail: same ceiling as the null-space cache.
+@lru_cache(maxsize=8)
+def _data_row_svd_cached(shape: tuple, raw: bytes):
+    rows = np.frombuffer(raw, dtype=float).reshape(shape)
+    left, singular, right = np.linalg.svd(rows)
+    null = right[shape[0]:].T
+    pinv_right = right[: shape[0]].T
+    logdet_gram = float(2.0 * np.log(singular).sum())
+    return _frozen(left), _frozen(singular), _frozen(pinv_right), _frozen(null), logdet_gram
+
+
+def _data_row_svd(rows: np.ndarray):
+    """``(left, singular, right[:k].T, null(rows), logdet(rows rows^T))``, memoised on ``rows``."""
+    rows = np.ascontiguousarray(rows, dtype=float)
+    return _data_row_svd_cached(rows.shape, rows.tobytes())
 
 
 def _constraint_particular_solution(
@@ -159,10 +192,8 @@ def _condition_on_data_constraints(
     """
     # One SVD gives null(rows), the least-norm particular solution and the gram
     # logdet; the rows are full rank (redundant ones were dropped at projection).
-    left, singular, right = np.linalg.svd(rows)
-    null = right[rows.shape[0]:].T
-    particular = right[: rows.shape[0]].T @ ((left.T @ rhs) / singular)
-    logdet_gram = float(2.0 * np.log(singular).sum())
+    left, singular, pinv_right, null, logdet_gram = _data_row_svd(rows)
+    particular = pinv_right @ ((left.T @ rhs) / singular)
     null_factor, logdet_null = _factor_positive_definite(
         null.T @ precision @ null, "data-constrained posterior precision"
     )

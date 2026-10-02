@@ -470,3 +470,34 @@ def test_constrained_gaussian_matches_independent_one_coordinate_solution() -> N
     np.testing.assert_allclose(result.mean, expected_mean)
     np.testing.assert_allclose(result.covariance, expected_covariance)
     np.testing.assert_allclose(result.log_marginal_likelihood, expected_log_marginal)
+
+
+def test_constraint_null_space_is_cached_across_hyperparameter_changes() -> None:
+    from scipy.linalg import null_space
+
+    gaussian._null_space_cached.cache_clear()
+
+    def fit(variance: float, scale: float):
+        model = CompiledLGM(
+            y=np.array([1.0, -1.0, 0.5]),
+            observed=np.array([True, True, True]),
+            offset=np.zeros(3),
+            design=csr_matrix(np.eye(3)),
+            precision=csr_matrix(scale * (3 * np.eye(3) - np.ones((3, 3)) + 0.1 * np.eye(3))),
+            constraints=np.ones((1, 3)),
+            labels=("a", "b", "c"),
+            likelihood=CompiledGaussian(variance),
+            blocks=(),
+        )
+        return model, fit_gaussian(model)
+
+    model, first = fit(1.0, 1.0)
+    _, second = fit(2.0, 3.0)
+
+    info = gaussian._null_space_cached.cache_info()
+    assert (info.misses, info.hits) == (1, 1)
+    basis = gaussian._constraint_null_space(model.constraints, 3)
+    assert not basis.flags.writeable
+    # ponytail: same SVD routine on the same normalised row, so exact equality.
+    np.testing.assert_array_equal(basis, null_space(np.ones((1, 3)) / np.sqrt(3)))
+    assert first.mean.shape == second.mean.shape == (3,)
