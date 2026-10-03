@@ -421,6 +421,12 @@ class CompiledLGM:
         )
         return result
 
+    def _structural_data_rows(self) -> "CompiledLGM":
+        """This model with its data constraint rows treated as structural ones."""
+        result = object.__new__(CompiledLGM)
+        result.__dict__.update(self.__dict__, data_constraint_count=0)
+        return result
+
     @property
     def sigma(self) -> float:
         if not isinstance(self.likelihood, CompiledGaussian):

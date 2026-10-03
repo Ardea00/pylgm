@@ -5,6 +5,25 @@ honest map of what's shipped, what's next, and what's deliberately deferred.
 For the precise semantics of each shipped feature, follow the links into the
 [guide](index.md).
 
+## Unreleased (research-tier, after 0.7.0rc6)
+
+Network reconstruction — see [research status](research-status.md) for what is
+and is not verified:
+
+- **Linear observations and exact constraints for any likelihood.** A
+  `LinearConstraint` on a non-Gaussian model now gives the exact constrained
+  mode (`log p(e) + log p(y | e)`), not a conditioning of the unconstrained one.
+- **`CensoredHurdle`** for registers that report amounts at or above a
+  threshold, and **`scale="below_threshold"` margins** on the mass below it. A
+  nonlinear aggregate enters the Laplace iteration directly: exact mode and
+  evidence, no relinearization loop.
+- **`Correlated`** k-variate IID effects (sender/receiver, reciprocity via
+  `dyad_columns`, `Shared(Correlated(...))` across outcomes) with an LKJ prior.
+- **Reconstruction metrics** in `pylgm.evaluation` (`link_auc`,
+  `precision_at_k`, `weighted_cosine`, `weighted_jaccard`).
+- Performance: the sparse selected inverse orders with COLAMD (linear on
+  bipartite hub graphs).
+
 ## Shipped in 0.7
 
 New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):

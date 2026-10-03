@@ -53,7 +53,7 @@ _OPTIONAL_FIELDS = (
     "index", "space", "time", "unit", "columns", "precision", "graph",
     "graph_file", "graphs", "graph_files", "rho", "phi", "scale", "group",
     "period", "order", "ridge", "kernel", "interaction", "gamma", "eta",
-    "over", "effect", "structure",
+    "over", "effect", "structure", "correlation", "lkj",
 )
 
 
@@ -102,6 +102,7 @@ _ALLOWED_FIELDS = {
                             "gamma", "eta", "precision"},
     "midas": {"columns", "precision", "order", "ridge"},
     "midas_parametric": {"columns", "kernel"},
+    "correlated": {"index", "precision", "correlation", "lkj"},
 }
 
 
@@ -111,18 +112,22 @@ class EffectConfig(StrictModel):
     name: str = ""
     type: Literal["iid", "rw1", "rw2", "besag", "proper_car", "bym2", "sar",
                   "ar1", "seasonal", "spacetime", "dynamicspatialpanel",
-                  "midas", "midas_parametric", "grouped"]
-    # Most effects are indexed by a single column; MIDAS uses a list of HF lag
-    # columns instead, spacetime a (space, time) pair, and dynamicspatialpanel a
+                  "midas", "midas_parametric", "grouped", "correlated"]
+    # Most effects are indexed by a single column; correlated uses a list of
+    # k >= 2 columns, MIDAS a list of HF lag columns instead, spacetime a (space, time) pair, and dynamicspatialpanel a
     # (unit, time) pair. Which fields each type accepts is _ALLOWED_FIELDS above.
-    index: str | None = None
+    index: str | tuple[str, ...] | None = None
     space: str | None = None
     time: str | None = None
     unit: str | None = None
     # Fixed values only; estimating precision/rho/phi (a Hyperparameter) stays
     # Python-API-only. Spatial effects default precision in the builder, so it is
     # optional here and required for the simple effects via the validator below.
-    precision: FinitePositiveFloat | None = None
+    precision: FinitePositiveFloat | tuple[FinitePositiveFloat, ...] | None = None
+    # correlated: k precisions and k(k-1)/2 partial correlations, fixed values;
+    # the lengths and the (-1, 1) range are the Correlated spec's job.
+    correlation: float | tuple[float, ...] | None = None
+    lkj: FinitePositiveFloat | None = None
     graph: dict | None = None
     graph_file: str | None = None
     # DynamicSpatialPanel per-period networks: inline {period: graph} or a
@@ -172,6 +177,10 @@ class EffectConfig(StrictModel):
         # Single-index effects (simple, temporal, spatial).
         if self.index is None:
             raise ValueError(f"index is required for effect type {self.type!r}")
+        if self.type == "correlated":
+            return self
+        if isinstance(self.index, tuple) or isinstance(self.precision, tuple):
+            raise ValueError(f"index and precision must be scalars for effect type {self.type!r}")
         if self.type in _SIMPLE_EFFECTS:
             return self
         if self.type in _TEMPORAL_EFFECTS:
@@ -252,7 +261,7 @@ def build_structure(config: StructureConfig, base_dir: Path) -> object:
 
 def build_effect(config: EffectConfig, base_dir: Path) -> object:
     from pylgm.effects import (
-        AR1, IID, RW1, RW2, SAR, Besag, BYM2, DynamicSpatialPanel, Grouped, MIDAS,
+        AR1, IID, RW1, RW2, SAR, Besag, BYM2, Correlated, DynamicSpatialPanel, Grouped, MIDAS,
         MIDASParametric, ProperCAR, Seasonal, SpaceTime, load_graph_file,
     )
 
@@ -269,6 +278,14 @@ def build_effect(config: EffectConfig, base_dir: Path) -> object:
         if config.scale is not None:
             return simple[config.type](config.name, config.index, precision, scale=config.scale)
         return simple[config.type](config.name, config.index, precision)
+
+    if config.type == "correlated":
+        # Omitted precision/correlation default inside Correlated (ones/zeros).
+        return Correlated(
+            config.name, config.index, () if config.precision is None else config.precision,
+            () if config.correlation is None else config.correlation,
+            1.0 if config.lkj is None else config.lkj,
+        )
 
     if config.type == "ar1":
         precision = 1.0 if config.precision is None else config.precision

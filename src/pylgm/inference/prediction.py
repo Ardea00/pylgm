@@ -405,6 +405,30 @@ def _copied_block(entry, new_data: pd.DataFrame) -> np.ndarray:
     return design
 
 
+def _correlated_block(payload, new_data: pd.DataFrame) -> np.ndarray:
+    """``Correlated``: component ``c``'s one-hot in its own column block (NaN: absent)."""
+    name, columns, levels = payload
+    n = len(levels)
+    # Matched by value, not str: an index column holding a NaN turns 0 into 0.0.
+    index = pd.Index(levels)
+    out = np.zeros((len(new_data), len(columns) * n))
+    for c, column in enumerate(columns):
+        if column is None:  # a shared component that enters another outcome
+            continue
+        if column not in new_data.columns:
+            raise ValueError(f"predict() new_data is missing index column {column!r} of {name!r}")
+        present = new_data[column].notna().to_numpy()
+        values = new_data.loc[present, column]
+        codes = index.get_indexer(values)
+        if np.any(codes < 0):
+            raise ValueError(
+                f"predict() new_data has an unseen level {values[codes < 0].iloc[0]!r} in "
+                f"{column!r} for effect {name!r}; predict reuses the fitted latent posterior"
+            )
+        out[np.flatnonzero(present), c * n + codes] = 1.0
+    return out
+
+
 def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.ndarray:
     """Rebuild the dense predict-time design block for one ``(kind, payload)`` entry."""
     kind, payload = entry
@@ -412,6 +436,8 @@ def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.n
         return _fixed_block(payload, new_data)
     elif kind == "structured":
         return _structured_block(payload, new_data)
+    elif kind == "correlated":
+        return _correlated_block(payload, new_data)
     elif kind == "midas":
         return _midas_block(payload, new_data)
     elif kind == "midas_parametric":

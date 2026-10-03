@@ -1,7 +1,7 @@
 # Linear observations
 
 `LinearObservation` fits Gaussian data that observe sums or other linear
-combinations of a finer prediction grid. This covers temporal disaggregation,
+combinations of a finer prediction grid, under any row likelihood. This covers temporal disaggregation,
 geographical reconciliation and benchmarked nowcasting without inventing a
 pseudo-response at the fine level.
 
@@ -253,9 +253,35 @@ should be declared as a `LinearObservation` rather than a
 
 ## Scope
 
-Linear observations currently support Gaussian `LGM` models with pandas input.
-They work with fixed fits, empirical-Bayes optimization and INLA integration.
-Exact constraints run on both the dense and the sparse Gaussian paths; on the
+Linear observations and constraints work with any `LGM` likelihood on pandas
+input, and with fixed fits, empirical-Bayes optimization and INLA integration.
+A Gaussian model folds them into one exact Gaussian projection. Any other
+likelihood keeps its own rows and fits on the Laplace engine: each
+`LinearObservation` row becomes a Gaussian pseudo-row, and a `LinearConstraint`
+enters as `log p(y, e) = log p(e) + log p(y | e)` -- the exact prior density of
+`A x` at `e`, plus a Laplace step on the prior conditioned on `A x = e`, so the
+reported mode is the exact constrained mode.
+
+Nonlinear items (`scale="log"`, and a joint's `scale="below_threshold"`) are
+fitted two ways. On the Laplace engines (any non-Gaussian likelihood, and
+every `Joint`) a nonlinear `LinearObservation` enters the Newton iteration as
+it is: its Gauss-Newton curvature as extra design rows, and the residual term
+`-sum_k r_k / sigma_k^2 grad^2 (C_k g)` exactly at the mode (clipped to its
+positive part only to choose a Newton direction). The mode and the Laplace
+evidence are therefore exact, and a mode whose exact Hessian is indefinite --
+a saddle, e.g. a predictor with no intercept far from the aggregates' level --
+fails to factor rather than being reported. A nonlinear `LinearConstraint`, and
+any nonlinear item on the Gaussian `exact_gaussian` engine, is fitted by
+relinearization instead: a fixed point of Gauss-Newton tangents, line-searched
+on the exact objective when no nonlinear constraint is present. Its mode is
+exact, but its evidence keeps the Gauss-Newton curvature, so it is approximate
+when the aggregates are not fitted exactly.
+
+Exact constraints on a non-Gaussian model need dense `c x latent` workspace
+for `c` constraint rows. For many aggregates -- one per node of a network --
+prefer a `LinearObservation` with a small `sigma`: its pseudo-rows stay sparse.
+
+Exact constraints run on both the dense and the sparse paths; on the
 sparse path a `LinearConstraint` row may span several latent blocks (label
 constraints passed to `LGM(constraints=...)` must still touch a single block).
 A `Joint` model accepts them too, per outcome — see

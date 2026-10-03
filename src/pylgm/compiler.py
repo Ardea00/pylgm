@@ -24,6 +24,7 @@ from pylgm.effects import (
     Besag,
     BYM2,
     Copy,
+    Correlated,
     DynamicSpatialPanel,
     Fixed,
     Grouped,
@@ -63,6 +64,7 @@ from pylgm.effects.replicate import (
     replicated_block,
 )
 from pylgm.effects.ar1 import ar1_structure
+from pylgm.effects.correlated import build_correlated, component_precision, correlated_levels
 from pylgm.effects.directed_graph import normalize_directed_graph, row_standardize
 from pylgm.effects.sar import (
     build_dynamic_spatial_panel, _panel_networks, _sdpd_operator,
@@ -98,6 +100,7 @@ from pylgm.likelihoods import (
     Beta,
     Binomial,
     CompiledGaussian,
+    CompiledCensoredHurdle,
     CompiledMixture,
     ExponentialSurv,
     Gamma,
@@ -244,6 +247,15 @@ def _config_lgm(data: DataConfig, model: ModelConfig, optimized) -> "LGM":
             built = build_effect(effect, Path("."))
         except (ConfigurationError, ModelValidationError, KeyError, TypeError, ValueError) as error:
             raise CompilationError(f"failed to compile effect {effect.name!r}: {error}") from error
+        if isinstance(built, Correlated):
+            # k precisions and correlations: one ``<name>.precision`` cannot name them.
+            if f"{effect.name}.precision" in optimized:
+                raise CompilationError(
+                    f"effect {effect.name!r} is correlated: estimate its precisions and "
+                    "correlations through the Python API (Hyperparameter entries)"
+                )
+            predictor = predictor + built
+            continue
         precision = declared(f"{effect.name}.precision", _configured_precision(effect))
         if isinstance(precision, Hyperparameter):
             if isinstance(built, Grouped):
@@ -735,6 +747,8 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
     if isinstance(effect, Fixed):
         return [effect.prior_precision] if isinstance(effect.prior_precision, Hyperparameter) else []
+    if isinstance(effect, Correlated):
+        return effect.hyperparameters
     found: list[Hyperparameter] = []
     precision = getattr(effect, "precision", None)
     if isinstance(precision, Hyperparameter):
@@ -785,8 +799,32 @@ def _realign_shared_incidences(entry, levels, template, incidences) -> list:
     return [incidence[:, reorder] for incidence in incidences]
 
 
+def _correlated_stacked(effect, frames, starts, total: int, outcomes):
+    """A shared ``Correlated`` as an ordinary one over the stacked rows.
+
+    Component ``c`` enters outcome ``c`` only: column ``outcomes[c]`` of the
+    stacked frame holds that outcome's ``index[c]`` values on its rows and NaN
+    elsewhere, so the single-model builder applies unchanged.
+    """
+    if len(effect.index) != len(frames):
+        raise CompilationError(
+            f"shared Correlated {effect.name!r} has {len(effect.index)} components; "
+            f"a shared one needs one per outcome ({len(frames)})"
+        )
+    columns = {}
+    for outcome, column, frame, start in zip(outcomes, effect.index, frames, starts, strict=True):
+        values = np.full(total, np.nan, dtype=object)
+        values[start:start + len(frame)] = frame[column].to_numpy(dtype=object)
+        columns[outcome] = values
+    return pd.DataFrame(columns), replace(effect, index=tuple(outcomes))
+
+
 def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> LatentBlock:
     """Build the shared latent block: design = sum_k scale_k * A_k over the union index."""
+    if isinstance(entry.effect, Correlated):
+        return _effect_block(*reversed(_correlated_stacked(
+            entry.effect, frames, starts, total, joint.outcomes,
+        )))
     own_hyperparameters = _effect_hyperparameters(entry.effect)
     if own_hyperparameters:
         names = ", ".join(sorted({hp.name for hp in own_hyperparameters}))
@@ -825,7 +863,32 @@ def _levels_frame(index: str, levels: tuple, dtype=None) -> "pd.DataFrame":
     return pd.DataFrame({index: pd.Series(list(levels), dtype=dtype)})
 
 
-def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledLGM:
+def _censored_parts(parts, observed, total: int, censoring, amount_position: int):
+    """Move the censored edges' rows out of their outcomes into one coupled part.
+
+    ``censoring`` is ``(link_rows, amount_rows, log_threshold)`` in stacked rows,
+    paired by position. The coupled rows count as observed: absence from the
+    register is their datum. The coupled part reads ``sigma`` off the amount
+    outcome's materialized Gaussian, so an estimated sigma moves both together.
+    """
+    if censoring is None:
+        return parts, observed
+    link_rows, amount_rows, threshold = censoring
+    coupled = np.zeros(total, dtype=bool)
+    coupled[link_rows] = coupled[amount_rows] = True
+    local = np.flatnonzero(coupled)
+    sigma = parts[amount_position][1].sigma
+    hurdle = CompiledCensoredHurdle(
+        np.searchsorted(local, link_rows), np.searchsorted(local, amount_rows),
+        np.asarray(threshold, dtype=float), float(sigma),
+    )
+    parts = [(mask & ~coupled, lk) for mask, lk in parts] + [(coupled, hurdle)]
+    return parts, observed | coupled
+
+
+def compile_joint(
+    joint: "Joint", panels: "dict[str, CanonicalPanel]", censoring=None,
+) -> CompiledLGM:
     """Compile a Joint into one stacked CompiledLGM.
 
     Row slices follow sub-model declaration order. Block order is every
@@ -894,6 +957,8 @@ def compile_joint(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> Compil
         except DataContractError as error:
             raise DataContractError(f"{error} for outcome {outcome!r}") from error
         parts.append((mask, compiled.for_observations(aux)))
+    amount_position = outcomes.index(joint.censoring.amount) if censoring is not None else None
+    parts, observed = _censored_parts(parts, observed, total, censoring, amount_position)
     likelihood = CompiledMixture(tuple(parts), total)
 
     width = sum(block.design.shape[1] for block in blocks)
@@ -1210,6 +1275,10 @@ def _append_family_blocks(
         )
         for position in range(first, len(scalable)):
             scalable[position] = _weighted_family_block(scalable[position], weights)
+        return
+    if isinstance(effect, Correlated):
+        _append_correlated_block(effect, frame, scalable, parameter_names, parameter_bounds,
+                                 parameter_priors)
         return
     if isinstance(effect, Fixed):
         if isinstance(effect.prior_precision, Hyperparameter):
@@ -1667,6 +1736,47 @@ def _append_family_blocks(
         parameter_bounds[precision.name] = _log_bounds(precision)
 
 
+def _append_correlated_block(
+    effect, frame, scalable, parameter_names, parameter_bounds, parameter_priors,
+) -> None:
+    """``Correlated``: precision ``Sigma(precision, correlation)^-1 ⊗ I_n``."""
+    def resolve(entry, values):
+        return values[entry.name] if isinstance(entry, Hyperparameter) else entry
+
+    def components(values):
+        return component_precision(
+            [resolve(p, values) for p in effect.precision],
+            [resolve(c, values) for c in effect.correlation],
+        )
+
+    initial = {hp.name: hp.initial for hp in effect.hyperparameters}
+    template = _compiled_block(
+        effect.name, build_correlated, frame, effect.name, effect.index, components(initial),
+    )
+    if not effect.hyperparameters:
+        scalable.append(ScalableBlock(template, None, 1.0))
+        return
+    n = template.precision.shape[0] // len(effect.index)
+    level_identity = identity(n, format="csr")
+
+    def build(values):
+        return kron(csr_matrix(components(values)), level_identity, format="csr")
+
+    for hp in effect.precision:
+        if isinstance(hp, Hyperparameter):
+            parameter_bounds[hp.name] = _log_bounds(hp)
+    for hp in effect.correlation:
+        if isinstance(hp, Hyperparameter):
+            parameter_bounds[hp.name] = _bounded_parameter(
+                hp, -1.0, 1.0, label="Correlated correlation", inset=1e-6,
+            )
+    for hp in effect.hyperparameters:
+        parameter_names.append(hp.name)
+        if hp.prior is not None:
+            parameter_priors[hp.name] = hp.prior
+    scalable.append(ParametricBlock(template, tuple(hp.name for hp in effect.hyperparameters), build))
+
+
 def _copied_family_block(item, copy, incidence):
     """Fold a copy into one family block, rebuilding per draw when needed.
 
@@ -1863,6 +1973,9 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
     if isinstance(effect, Fixed):
         spec = model_matrix(effect.formula, panel.frame).model_spec
         return ("fixed", spec)
+    if isinstance(effect, Correlated):
+        return ("correlated", (effect.name, effect.index,
+                               correlated_levels(panel.frame, effect.index)))
     if isinstance(effect, MIDAS):
         # No index/one-hot: the design is the raw lag columns, rebuilt directly.
         return ("midas", (effect.name, effect.columns))
@@ -2026,6 +2139,20 @@ def build_joint_prediction_contexts(joint: "Joint", panels, compiled: CompiledLG
 
         for entry in joint.shared:
             block = next(b for b in compiled.blocks if b.name == entry.name)
+            if isinstance(entry.effect, Correlated):
+                position = joint.outcomes.index(outcome)
+                frames = [panels[name].frame for name in joint.outcomes]
+                starts = np.cumsum([0] + [len(f) for f in frames[:-1]]).tolist()
+                stacked, effect = _correlated_stacked(
+                    entry.effect, frames, starts, sum(len(f) for f in frames), joint.outcomes,
+                )
+                own = tuple(column if c == position else None
+                            for c, column in enumerate(entry.effect.index))
+                entries.append(("correlated", (entry.name, own,
+                                               correlated_levels(stacked, effect.index))))
+                slices.append(spans[block.name])
+                used_blocks.append(block.name)
+                continue
             scales = entry.scales_for(len(joint.submodels))
             scale = scales[joint.outcomes.index(outcome)]
             if isinstance(scale, Hyperparameter):
@@ -2130,7 +2257,9 @@ def _restack_family_block(item, outcome: str, before: int, after: int):
     return ScalableBlock(padded, item.parameter, item.scale)
 
 
-def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") -> CompiledFamily | None:
+def compile_joint_family(
+    joint: "Joint", panels: "dict[str, CanonicalPanel]", censoring=None,
+) -> CompiledFamily | None:
     """Family form of compile_joint: rebuild scale-dependent designs per draw."""
     outcomes = joint.outcomes
     frames = [panels[name].frame for name in outcomes]
@@ -2187,6 +2316,18 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
                 parameter_priors[name] = sub_family.parameter_priors[name]
 
     for entry in joint.shared:
+        if isinstance(entry.effect, Correlated):
+            stacked, effect = _correlated_stacked(entry.effect, frames, starts, total, outcomes)
+            clashing = [hp.name for hp in effect.hyperparameters if hp.name in registered]
+            if clashing:
+                raise CompilationError(
+                    f"hyperparameter name(s) {clashing} are declared more than once; Joint "
+                    "hyperparameters share one namespace"
+                )
+            registered.update({hp.name: hp for hp in effect.hyperparameters})
+            _append_correlated_block(effect, stacked, scalable, parameter_names,
+                                     parameter_bounds, parameter_priors)
+            continue
         scales = entry.scales_for(len(joint.submodels))
         estimated = [s for s in scales if isinstance(s, Hyperparameter)]
         template = _shared_block(entry, joint, frames, starts, sizes, total, resolved={})
@@ -2238,6 +2379,9 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
         _offset_vector(model, frame) for model, frame in zip(joint.submodels, frames, strict=False)
     ])
 
+    amount_position = outcomes.index(joint.censoring.amount) if censoring is not None else None
+    if censoring is not None:
+        observed[censoring[0]] = observed[censoring[1]] = True
     masks = []
     for position in range(len(outcomes)):
         mask = np.zeros(total, dtype=bool)
@@ -2269,6 +2413,7 @@ def compile_joint_family(joint: "Joint", panels: "dict[str, CanonicalPanel]") ->
             )
             compiled = model.likelihood.materialize(resolved)
             parts.append((mask, compiled.for_observations(_likelihood_columns(model, frame))))
+        parts, _ = _censored_parts(parts, observed, total, censoring, amount_position)
         return CompiledMixture(tuple(parts), total)
 
     return CompiledFamily(

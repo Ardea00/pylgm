@@ -635,9 +635,12 @@ def selected_inverse(matrix) -> csr_matrix:
     recursion on the SuperLU fill pattern. Entries off that pattern are not
     stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own.
 
-    Symmetric-mode ``splu`` (``MMD_AT_PLUS_A`` + ``SymmetricMode`` +
-    ``diag_pivot_thresh=0.0``) yields ``perm_r == perm_c`` and a unit-lower ``L``
-    with ``U == D·Lᵀ``. A reverse column sweep over the *symbolic* fill pattern
+    Symmetric-mode ``splu`` (``COLAMD`` + ``SymmetricMode`` +
+    ``diag_pivot_thresh=0.0``, as ``SparseSpdFactor``) yields ``perm_r == perm_c``
+    and a unit-lower ``L`` with ``U == D·Lᵀ``. Not ``MMD_AT_PLUS_A``: on a
+    bipartite network precision (borrowers x a few hub lenders) it finds the
+    same fill but its ordering time grows quadratically (4.6s against 0.04s at
+    20 000 borrowers), and this one call dominated the whole fit. A reverse column sweep over the *symbolic* fill pattern
     (``_symbolic_fill``) reconstructs the selected inverse exactly; SuperLU's
     stored pattern is not enough, because it drops entries that cancel to zero.
     Result is in the original ordering.
@@ -646,7 +649,7 @@ def selected_inverse(matrix) -> csr_matrix:
     n = q_csc.shape[0]
     lu = splu(
         q_csc,
-        permc_spec="MMD_AT_PLUS_A",
+        permc_spec="COLAMD",
         options=dict(SymmetricMode=True),
         diag_pivot_thresh=0.0,
     )
@@ -1015,14 +1018,7 @@ def _sparse_solve(
     constraint_count = model.constraints.shape[0]
     structural_count = constraint_count - model.data_constraint_count
     structural = model.constraints[:structural_count]
-    if not final:
-        logdet_prior = float("nan")
-    else:
-        spans = _block_column_confinement(model, structural)
-        logdet_prior = (
-            _prior_logdet(model, structural, spans) if spans is not None
-            else _coupled_prior_logdet(model, structural)
-        )
+    logdet_prior = _reduced_prior_logdet(model, structural) if final else float("nan")
 
     w_constraint = None
     cap_factor_ref = None
@@ -1068,16 +1064,8 @@ def _sparse_solve(
                     "sparse posterior precision is singular: the constrained solve "
                     f"misses its constraints by {gap:.2e}"
                 )
-            # nu = argmin_{A x = e} x^T Q x (zero for homogeneous constraints).
-            # ponytail: when e is nonzero AND a connected-intrinsic sum-to-zero row
-            # is present, a_sp.T @ a_sp is a dense rank-1 n x n block, so this
-            # augmented factor densifies. Correct, but defeats sparsity: nonzero-rhs
-            # extra-constraints do not scale on this path.
-            if final and np.any(e_s):
-                a_sp = csr_matrix(rows_s)
-                aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
-                w_aug = aug.solve(rows_s.T)
-                nu = w_aug @ np.linalg.solve(rows_s @ w_aug, e_s)
+            if final:
+                nu = _minimum_energy_point(q, rows_s, e_s)
 
         if structural_count < constraint_count:
             # log p(e_D | y, structural) = log N(e_D; A_D mu_S, K_DD - K_DS K_SS^-1 K_SD),
@@ -1111,6 +1099,59 @@ def _sparse_solve(
         posterior=posterior, unconstrained=unconstrained, structural_mean=structural_mean,
         mean=mean, logdet_posterior=logdet_posterior, logdet_prior=logdet_prior, nu=nu,
         data_log_density=data_log_density, sparse_dimension=int(n_s), dense_dimension=int(m),
+    )
+
+
+def _reduced_prior_logdet(model: CompiledLGM, rows: np.ndarray) -> float:
+    """``logdet(N^T Q N)`` for an orthonormal basis ``N`` of ``null(rows)``."""
+    spans = _block_column_confinement(model, rows)
+    return (
+        _prior_logdet(model, rows, spans) if spans is not None
+        else _coupled_prior_logdet(model, rows)
+    )
+
+
+def _minimum_energy_point(q, rows: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    """``nu = argmin_{rows x = rhs} x^T Q x``: the prior mean conditioned on the rows.
+
+    ponytail: when ``rhs`` is nonzero AND a connected-intrinsic sum-to-zero row is
+    present, ``rows^T rows`` is a dense rank-1 n x n block, so this augmented
+    factor densifies. Correct, but defeats sparsity: nonzero-rhs constraints on
+    an intrinsic field do not scale on this path (soft ``LinearObservation``
+    rows do).
+    """
+    if not np.any(rhs):
+        return np.zeros(q.shape[0])
+    a_sp = csr_matrix(rows)
+    aug = SparseSpdFactor((q + a_sp.T @ a_sp).tocsr(), "augmented prior precision")
+    w_aug = aug.solve(rows.T)
+    return w_aug @ np.linalg.solve(rows @ w_aug, rhs)
+
+
+def prior_data_log_density(model: CompiledLGM, logdet_all: float, nu_all: np.ndarray) -> float:
+    """``log p(e_D | structural)`` under the prior: the evidence of the data rows.
+
+    With ``logdet_X = logdet(N_X^T Q N_X)`` on ``null`` of the rows ``X``, the
+    data rows' prior covariance ``K = A_D Sigma_S A_D^T`` has
+    ``logdet K = logdet_all - logdet_S + logdet G`` with
+    ``G = A_D (I - P_S) A_D^T`` (the SPD reduction identity), and since
+    ``Sigma_S Q Sigma_S = Sigma_S`` the quadratic ``r^T K^-1 r`` equals
+    ``(nu_all - nu_S)^T Q (nu_all - nu_S)``. Only ``c x c`` matrices are dense.
+    ``logdet_all`` and ``nu_all`` are the all-rows terms a fit already has.
+    """
+    structural = model.constraints.shape[0] - model.data_constraint_count
+    rows_s, e_s = model.constraints[:structural], model.constraint_rhs[:structural]
+    rows_d = model.constraints[structural:]
+    q = model.precision
+    projected = rows_d
+    if structural:
+        projected = rows_d - (rows_d @ rows_s.T) @ np.linalg.solve(rows_s @ rows_s.T, rows_s)
+    _, logdet_gram = _factor_positive_definite(projected @ projected.T, "data constraint gram")
+    gap = nu_all - _minimum_energy_point(q, rows_s, e_s)
+    return -0.5 * (
+        rows_d.shape[0] * np.log(2 * np.pi)
+        + logdet_all - _reduced_prior_logdet(model, rows_s) + logdet_gram
+        + float(gap @ (q @ gap))
     )
 
 

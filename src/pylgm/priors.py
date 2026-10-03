@@ -70,6 +70,28 @@ class GaussianPrior:
 
 
 @dataclass(frozen=True)
+class SymmetricBeta:
+    """``Beta(shape, shape)`` rescaled to ``(-1, 1)``: the LKJ prior's law for one
+    canonical partial correlation (``Correlated`` attaches it by default)."""
+
+    shape: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "shape", _positive_real(self.shape, "shape"))
+
+    def logpdf(self, value: float) -> float:
+        value = _finite_real(value, "value")
+        if not -1.0 < value < 1.0:
+            return -math.inf
+        b = self.shape
+        return (
+            (b - 1.0) * (math.log1p(value) + math.log1p(-value))
+            - (2.0 * b - 1.0) * _LOG_TWO
+            - (2.0 * math.lgamma(b) - math.lgamma(2.0 * b))
+        )
+
+
+@dataclass(frozen=True)
 class PCPrecision:
     """Penalised-complexity prior for a Gaussian precision."""
 

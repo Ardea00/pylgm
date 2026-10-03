@@ -7,6 +7,7 @@ from pylgm.effects import (
     BesagStructure,
     BYM2,
     Copy,
+    Correlated,
     DynamicSpatialPanel,
     Fixed,
     forecast_dynamic_spatial_panel,
@@ -28,7 +29,7 @@ from pylgm.effects import (
     load_graph_file,
 )
 from pylgm.experiment import CandidateFailure, ComparisonResult, Experiment, FailureCause
-from pylgm.joint import Joint, Shared
+from pylgm.joint import CensoredHurdle, Joint, Shared
 from pylgm.likelihoods import (
     Bernoulli,
     Beta,
@@ -52,7 +53,8 @@ from pylgm.operators import (
 )
 from pylgm.parameters import Hyperparameter
 from pylgm.pipeline import Pipeline
-from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision
+from pylgm.effects.correlated import dyad_columns
+from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision, SymmetricBeta
 
 __version__ = "0.7.0rc6"
 
@@ -67,11 +69,14 @@ __all__ = [
     "Binomial",
     "BYM2",
     "CandidateFailure",
+    "CensoredHurdle",
     "ComparisonResult",
     "compose",
     "Copy",
+    "Correlated",
     "cumulation_operator",
     "difference_operator",
+    "dyad_columns",
     "DynamicSpatialPanel",
     "Experiment",
     "ExponentialSurv",
@@ -106,6 +111,7 @@ __all__ = [
     "SAR",
     "Seasonal",
     "Shared",
+    "SymmetricBeta",
     "SpaceTime",
     "Weighted",
     "WeibullSurv",
