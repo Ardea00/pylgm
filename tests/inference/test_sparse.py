@@ -716,3 +716,137 @@ def test_intrinsic_field_against_a_vague_intercept_keeps_sparse_variances_exact(
     np.testing.assert_allclose(
         sparse.latent_marginals().variance, np.diag(dense.covariance), rtol=1e-6
     )
+
+
+# --- analytic LML gradient on the sparse path -------------------------------------
+
+_CHAIN = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j < 6] for i in range(6)}
+
+
+def _gradient_frame():
+    import pandas as pd
+
+    rng = np.random.default_rng(4)
+    frame = pd.DataFrame(
+        [(str(r), t, str(g)) for r in range(6) for t in range(5) for g in range(3)],
+        columns=["region", "t", "g"],
+    )
+    frame["y"] = rng.normal(size=len(frame))
+    frame.loc[rng.random(len(frame)) < 0.2, "y"] = np.nan
+    return frame
+
+
+def _compile(model):
+    from pylgm.compiler import compile_lgm
+    from pylgm.config.schema import DataConfig
+    from pylgm.data import CanonicalPanel
+
+    prepared = _gradient_frame()
+    prepared["__pylgm_row__"] = np.arange(len(prepared), dtype=np.int64)
+    panel = CanonicalPanel.from_frame(
+        prepared, DataConfig(time="__pylgm_row__", response="y"), require_observed=False
+    )
+    return compile_lgm(model, panel)
+
+
+def _gradient_model(kind, theta):
+    """theta = (field precision, field rho, iid precision, variance)."""
+    from pylgm import IID, LGM, RW1, Besag, Fixed, Gaussian, ProperCAR
+
+    prec, rho, iid, var = map(float, theta)
+    field = {
+        "rw1": RW1("f", index="t", precision=prec),
+        "besag": Besag("f", index="region", graph=_CHAIN, precision=prec),
+        "car": ProperCAR("f", index="region", graph=_CHAIN, rho=rho, precision=prec),
+    }[kind]
+    return _compile(LGM(
+        response="y", likelihood=Gaussian(float(np.sqrt(var))),
+        predictor=Fixed("1") + field + IID("g", index="g", precision=iid),
+    ))
+
+
+def _with_extra_row(model, extra):
+    """Append a nonzero-rhs row on the field's columns (a data row if ``extra == "data"``)."""
+    from pylgm.ir.model import CompiledLGM
+
+    start = [i for i, label in enumerate(model.labels) if label.startswith("f:")][0]
+    row = np.zeros((1, model.precision.shape[0]))
+    row[0, start + 1] = 1.0
+    row[0, start + 2] = 0.5
+    return CompiledLGM(
+        y=model.y, observed=model.observed, offset=model.offset, design=model.design,
+        precision=model.precision, constraints=np.vstack([model.constraints, row]),
+        labels=model.labels, likelihood=model.likelihood, blocks=model.blocks,
+        extra_constraints=row, extra_constraint_rhs=np.array([0.8]),
+        data_constraint_count=int(extra == "data"),
+    )
+
+
+@pytest.fixture
+def force_sparse(monkeypatch):
+    import pylgm.inference.gaussian as gaussian_engine
+
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+
+
+@pytest.mark.parametrize("kind", ["rw1", "besag", "car"])
+@pytest.mark.parametrize("extra", [None, "rhs", "data"])
+def test_sparse_lml_gradient_matches_central_difference_and_dense(force_sparse, kind, extra):
+    theta0 = np.array([1.3, 0.6, 0.8, 0.7])
+    h = 1e-3
+
+    def build(theta):
+        model = _gradient_model(kind, theta)
+        return model if extra is None else _with_extra_row(model, extra)
+
+    def lml(theta):
+        # Central difference of the dense LML. A vague intercept (precision 1e-6)
+        # against an intrinsic field leaves both engines' LML ~1e-8 of rounding
+        # noise, so the step is large and the tolerance 2e-5; the exact sparse-vs-
+        # dense agreement (rtol 1e-8) below is the sharp check.
+        return fit_gaussian(
+            build(theta), predictive_variances=False, allow_large_dense=True
+        ).log_marginal_likelihood
+
+    index = {"prec": 0, "rho": 1, "iid": 2, "var": 3}
+    names = ["prec", "rho", "iid", "var"] if kind == "car" else ["prec", "iid", "var"]
+    directions, fd = [], []
+    for name in names:
+        e = np.zeros(4)
+        e[index[name]] = 1.0
+        fd.append((lml(theta0 + h * e) - lml(theta0 - h * e)) / (2 * h))
+        if name == "var":
+            directions.append((None, 1.0))
+        else:  # Q is linear in each of these
+            dq = (build(theta0 + h * e).precision - build(theta0 - h * e).precision) / (2 * h)
+            directions.append((csr_matrix(dq), 0.0))
+    model = build(theta0)
+    sparse = fit_gaussian(model, lml_directions=tuple(directions))
+    assert sparse._sparse_posterior is not None
+    np.testing.assert_allclose(
+        sparse.log_marginal_likelihood, lml(theta0), rtol=1e-8
+    )
+    grad = sparse.diagnostics["lml_gradient"]
+    np.testing.assert_allclose(grad, fd, rtol=2e-5)
+    dense = fit_gaussian(model, allow_large_dense=True, lml_directions=tuple(directions))
+    assert dense._sparse_posterior is None
+    np.testing.assert_allclose(grad, dense.diagnostics["lml_gradient"], rtol=1e-8)
+
+
+def test_sparse_lml_gradient_iid_diagonal_and_absent_key(force_sparse):
+    from pylgm import IID, LGM, Fixed, Gaussian
+
+    def build(prec):
+        return _compile(LGM(
+            response="y", likelihood=Gaussian(0.9),
+            predictor=Fixed("1") + IID("g", index="g", precision=prec),
+        ))
+
+    def lml(prec):
+        return fit_gaussian(build(prec), predictive_variances=False).log_marginal_likelihood
+
+    h = 1e-5
+    dq = csr_matrix((build(1 + h).precision - build(1 - h).precision) / (2 * h))
+    (grad,) = fit_gaussian(build(1.0), lml_directions=((dq, 0.0),)).diagnostics["lml_gradient"]
+    np.testing.assert_allclose(grad, (lml(1 + h) - lml(1 - h)) / (2 * h), rtol=1e-6)
+    assert "lml_gradient" not in fit_gaussian(build(1.0)).diagnostics

@@ -347,6 +347,63 @@ class SparsePosterior:
             var = var - np.einsum("ij,ji->i", mw, cw)
         return np.clip(var, 0.0, None)
 
+    @cached_property
+    def _dense_coupling(self):
+        """``(V, S^-1 V^T)`` with ``Sigma_unc[i, j] = (A_ss^-1 part) + V_i S^-1 V_j^T``: ``V`` is
+        ``W`` on sparse rows and ``-I`` on dense rows (``None`` without a dense block)."""
+        d = self.dense_index
+        if not d.size:
+            return None
+        v = np.zeros((self.latent_size, d.size))
+        if self.sparse_index.size:
+            v[self.sparse_index] = self._w_dense
+        v[d] = -np.eye(d.size)
+        factor = self.schur_factor if self.sparse_index.size else self.d_factor
+        return v, cho_solve(factor, v.T)
+
+    def covariance_entries(self, rows, cols, *, structural_only: bool = False) -> np.ndarray:
+        """``Sigma_c[rows, cols]`` for index pairs, exact, without forming ``Sigma_c``.
+
+        The same decomposition as ``predictive_variances`` (selected inverse of
+        ``A_ss`` minus the Woodbury part, Schur coupling, kriging correction),
+        applied per pair. Pairs off the factor's fill pattern (none for entries
+        of ``Q`` or ``Z^T Z``) fall back to one solve per distinct column.
+        ``structural_only`` conditions on the structural rows alone.
+        """
+        rows, cols = np.asarray(rows, dtype=int), np.asarray(cols, dtype=int)
+        out = np.zeros(rows.size)
+        s = self.sparse_index
+        if s.size:
+            position = np.full(self.latent_size, -1)
+            position[s] = np.arange(s.size)
+            i, j = position[rows], position[cols]
+            both = (i >= 0) & (j >= 0)
+            i, j = i[both], j[both]
+            value, found = _stored_entries(self._selected_ss, i, j)
+            if not found.all():
+                distinct = np.unique(j[~found])
+                basis = np.zeros((s.size, distinct.size))
+                basis[distinct, np.arange(distinct.size)] = 1.0
+                columns = self._base_ss.solve(basis)
+                value[~found] = columns[i[~found], np.searchsorted(distinct, j[~found])]
+            if isinstance(self.a_ss, _LowRankSpdFactor):
+                w = self.a_ss.w
+                value -= np.einsum(
+                    "ik,ki->i", w[i], cho_solve(self.a_ss.m_factor, w.T)[:, j]
+                )
+            out[both] = value
+        coupling = self._dense_coupling
+        if coupling is not None:
+            v, sinv_vt = coupling
+            out += np.einsum("ik,ki->i", v[rows], sinv_vt[:, cols])
+        if self.w_constraint is not None:
+            count = self.structural_count if structural_only else self.w_constraint.shape[1]
+            if count:
+                w = self.w_constraint[:, :count]
+                factor = (self.cap_factor[0][:count, :count], self.cap_factor[1])
+                out -= np.einsum("ik,ki->i", w[rows], cho_solve(factor, w.T)[:, cols])
+        return out
+
     def linear_combination_variances(self, weights) -> np.ndarray:
         """diag(M Σ_c Mᵀ) — same quadratic form as predictive_variances."""
         return self.predictive_variances(weights)
@@ -756,6 +813,20 @@ def sparse_row_quadratic(a, dense: np.ndarray, max_row_nnz: int = 64) -> np.ndar
     return value
 
 
+def _stored_entries(stored: csr_matrix, rows: np.ndarray, cols: np.ndarray):
+    """``(values, found)``: ``stored[rows, cols]`` where stored, ``0`` and ``False`` elsewhere."""
+    width = stored.shape[1]
+    stored = stored.tocsr()
+    stored.sort_indices()
+    keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
+    wanted = np.asarray(rows) * width + np.asarray(cols)
+    if not keys.size:
+        return np.zeros(wanted.size), np.zeros(wanted.size, bool)
+    position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
+    found = keys[position] == wanted
+    return np.where(found, stored.data[position], 0.0), found
+
+
 def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64):
     """``(a_iᵀ M a_i over stored pairs, small_i, missing)`` per row of ``a``.
 
@@ -764,18 +835,8 @@ def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64)
     added. Rows with more than ``max_row_nnz`` nonzeros are not enumerated
     (``small_i`` False).
     """
-    width = a.shape[1]
     first, second, pair_row, small = _row_pairs(a, max_row_nnz)
-    stored = stored.tocsr()
-    stored.sort_indices()
-    keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
-    wanted = a.indices[first] * width + a.indices[second]
-    if keys.size:
-        position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
-        found = keys[position] == wanted
-        entry = np.where(found, stored.data[position], 0.0)
-    else:
-        found, entry = np.zeros(wanted.size, bool), np.zeros(wanted.size)
+    entry, found = _stored_entries(stored, a.indices[first], a.indices[second])
     contribution = a.data[first] * a.data[second] * entry
     value = np.bincount(pair_row, contribution, minlength=a.shape[0])
     lost = ~found
@@ -1164,7 +1225,49 @@ def _refactored(model, observed_design, weights, rows: np.ndarray) -> SparsePost
     ).posterior
 
 
-def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
+def _trace(posterior: SparsePosterior, matrix, **kwargs) -> float:
+    """``tr(Sigma_c M)`` for sparse ``M``, from ``Sigma_c`` on ``nnz(M)`` only."""
+    coo = csr_matrix(matrix).tocoo()
+    return float(coo.data @ posterior.covariance_entries(coo.row, coo.col, **kwargs))
+
+
+def _lml_gradient(model, solve, directions, variance, residual_sq, n_observed):
+    """Directional derivatives of the log marginal likelihood (Fisher's identity);
+    the formula and notation of ``gaussian._lml_gradient``.
+
+    Posterior traces come from ``Sigma_c`` on ``nnz(dQ)`` and ``nnz(Z^T Z)``. The
+    prior covariance on the constraint set is the *same* object computed with no
+    data: ``_sparse_solve`` at zero observations (``H = Q`` plus the intrinsic
+    regularisation, exact on the constraint set), read through the structural
+    rows only. So every prior structure the posterior supports (proper, intrinsic,
+    BYM2, coupled constraints) is exact, with no finite differences.
+    """
+    latent = model.precision.shape[0]
+    observed_design = model.design[model.observed]
+    x_hat = solve.mean
+    noise_term = n_observed - (
+        _trace(solve.posterior, observed_design.T @ observed_design) + residual_sq
+    ) / variance
+    needs_q = any(d_q is not None for d_q, _ in directions)
+    prior = None
+    if needs_q:
+        prior = _sparse_solve(
+            model, np.zeros(0), np.zeros(latent), final=False,
+            observed_design=csr_matrix((0, latent)),
+        ).posterior
+    out = []
+    for d_q, d_v in directions:
+        value = (d_v / variance) * noise_term
+        if d_q is not None:
+            value += (
+                _trace(solve.posterior, d_q) - _trace(prior, d_q, structural_only=True)
+                + float(x_hat @ (d_q @ x_hat)) - float(solve.nu @ (d_q @ solve.nu))
+            )
+        out.append(float(-0.5 * value))
+    return tuple(out)
+
+
+def sparse_constrained_gaussian(model: CompiledLGM, lml_directions=None) -> SparseFit:
     """Exact Gaussian posterior on the partitioned sparse solver, matching
     ``gaussian._fit_dense``: ``_sparse_solve`` with ``W = I / sigma^2``."""
     variance = float(model.likelihood.variance)
@@ -1199,17 +1302,27 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     predictive_mean = np.asarray(
         model.prediction_offset + model.prediction_design @ solve.mean
     ).reshape(-1)
+    diagnostics = {
+        "latent_dimension": int(model.precision.shape[0]),
+        "observed_count": n_observed,
+        "constraint_count": int(model.constraints.shape[0]),
+        "sparse_dimension": solve.sparse_dimension,
+        "dense_dimension": solve.dense_dimension,
+    }
+    if lml_directions is not None:
+        final_residual = residual - np.asarray(observed_design @ solve.mean).reshape(-1)
+        try:
+            diagnostics["lml_gradient"] = _lml_gradient(
+                model, solve, lml_directions, variance,
+                float(final_residual @ final_residual), n_observed,
+            )
+        except NumericalError:
+            pass  # key stays absent: callers finite-difference
     return SparseFit(
         mean=solve.mean,
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         block_slices=_block_slices(model),
-        diagnostics={
-            "latent_dimension": int(model.precision.shape[0]),
-            "observed_count": n_observed,
-            "constraint_count": int(model.constraints.shape[0]),
-            "sparse_dimension": solve.sparse_dimension,
-            "dense_dimension": solve.dense_dimension,
-        },
+        diagnostics=diagnostics,
         posterior=solve.posterior,
     )
