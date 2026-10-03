@@ -5,7 +5,7 @@ honest map of what's shipped, what's next, and what's deliberately deferred.
 For the precise semantics of each shipped feature, follow the links into the
 [guide](index.md).
 
-## Unreleased (research-tier, after 0.7.0rc6)
+## New in 0.7.0rc7 (research-tier)
 
 Network reconstruction — see [research status](research-status.md) for what is
 and is not verified:
@@ -23,6 +23,20 @@ and is not verified:
   `precision_at_k`, `weighted_cosine`, `weighted_jaccard`).
 - Performance: the sparse selected inverse orders with COLAMD (linear on
   bipartite hub graphs).
+
+Faster empirical Bayes:
+
+- **Analytic hyperparameter gradients.** The optimizer gets the derivative of
+  the log marginal likelihood from Fisher's identity instead of two refits per
+  hyperparameter: dense exact-Gaussian fits (including nonzero-rhs and data
+  constraints), sparse exact-Gaussian fits from three hyperparameters up, and
+  dense Laplace fits, for precision and likelihood hyperparameters alike.
+  Anything else falls back to finite differences, per parameter.
+- **Supernodal selected inverse**, 7-50x faster; it backs sparse predictive
+  variances on every sparse fit.
+- Constraint null spaces are computed once per fit, and the dense posterior
+  covariance is only formed when read. A 3-hyperparameter dense fit with 1403
+  latents drops from 23.3 s to 5.2 s.
 
 ## Shipped in 0.7
 
