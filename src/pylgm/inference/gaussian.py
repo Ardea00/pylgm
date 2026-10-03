@@ -236,14 +236,18 @@ def _sparse_trace(factor: np.ndarray, matrix) -> float:
 
 
 def _lml_gradient(
-    directions, *, variance, n_observed, residual_sq, gram, x_hat,
+    directions, *, variance, n_observed, residual_sq, gram, x_hat, prior_mean,
     prior_factor, prior_basis_t, post_factor,
 ) -> tuple[float, ...]:
-    """Directional derivatives of the log marginal likelihood (envelope theorem).
+    """Directional derivatives of the log marginal likelihood (Fisher's identity).
 
-    ``dl = -1/2 [n dv/v - tr(S0 dQ) + tr(S dQ) - (tr(S G) + r'r) dv/v^2 + x' dQ x]``
-    with ``S0 = B Q_r^-1 B'`` (prior) and ``S = B P^-1 B'`` (posterior) covariances
-    and ``r`` the residual at the posterior mean.
+    ``dl = E_post[d log p(y, x)]``, which for the Gaussian prior restricted to the
+    affine constraint set and the Gaussian likelihood is
+    ``-1/2 [n dv/v - tr(S0 dQ) + tr(S dQ) - (tr(S G) + r'r) dv/v^2 + x' dQ x - m' dQ m]``
+    with ``S0 = B Q_r^-1 B'`` and ``m`` the prior covariance and mean, ``S`` and
+    ``x`` the posterior covariance and mean, and ``r`` the residual at ``x``. Exact
+    data rows ``A_D x = e`` only change the posterior moments: ``e`` is a function
+    of ``x``, so ``d log p(y, e) = E_{x | y, e}[d log p(y, x)]``.
     """
     f_prior = (
         np.zeros((x_hat.size, 0)) if prior_factor is None
@@ -258,6 +262,7 @@ def _lml_gradient(
             value += (
                 _sparse_trace(post_factor, d_q) - _sparse_trace(f_prior, d_q)
                 + float(x_hat @ (d_q @ x_hat))
+                - (0.0 if prior_mean is None else float(prior_mean @ (d_q @ prior_mean)))
             )
         out.append(float(-0.5 * value))
     return tuple(out)
@@ -389,13 +394,18 @@ def _fit_dense(
         "observed_count": int(np.count_nonzero(observed)),
         "constraint_count": int(model.constraints.shape[0]),
     }
-    # Unsupported (caller finite-differences): nonzero-rhs and data constraints.
     # log_likelihood_normalization is constant in (Q, sigma^2): only -sum log(sigma_i).
-    if lml_directions is not None and x_p is None and not model.data_constraint_count:
+    if lml_directions is not None:
+        # The residual at the final (data-conditioned) mean, not the pre-conditioning one.
+        final_residual = y[observed] - offset[observed] - np.asarray(
+            observed_design @ mean
+        ).reshape(-1)
         diagnostics["lml_gradient"] = _lml_gradient(
             lml_directions, variance=variance, n_observed=n_observed,
-            residual_sq=float(posterior_residual @ posterior_residual),
-            gram=gram, x_hat=mean, prior_factor=prior_factor,
+            residual_sq=float(final_residual @ final_residual),
+            gram=gram, x_hat=mean,
+            prior_mean=None if x_p is None else x_p + basis @ prior_mean,
+            prior_factor=prior_factor,
             prior_basis_t=basis.T, post_factor=covariance_factor.get(),
         )
     prediction_design = model.prediction_design

@@ -525,22 +525,28 @@ def test_covariance_is_materialised_lazily_and_matches_the_eager_fit() -> None:
     assert not lazy.covariance.flags.writeable
 
 
-def _chain_model(q, variance, constrained, n=12, observed_count=9, rhs=None):
+def _chain_model(q, variance, constrained, n=12, observed_count=9, extra=None):
+    """``extra``: None, or "rhs"/"data" for one nonzero-rhs structural/data row."""
     rng = np.random.default_rng(3)
-    extra = {} if rhs is None else {
-        "extra_constraints": np.ones((1, n)), "extra_constraint_rhs": np.asarray(rhs, dtype=float)
-    }
+    block_rows = np.ones((1, n)) if constrained else np.empty((0, n))
+    kwargs = {}
+    if extra is not None:
+        row = np.zeros((1, n))
+        row[0, :3] = 1.0
+        block_rows = np.vstack([block_rows, row])
+        kwargs = {"extra_constraints": row, "extra_constraint_rhs": np.array([0.8]),
+                  "data_constraint_count": int(extra == "data")}
     return CompiledLGM(
         y=rng.normal(size=n),
         observed=np.arange(n) < observed_count,
         offset=0.1 * rng.normal(size=n),
         design=csr_matrix(np.eye(n) + 0.2 * np.eye(n, k=1)),
         precision=csr_matrix(q),
-        constraints=np.ones((1, n)) if constrained or rhs is not None else np.empty((0, n)),
+        constraints=block_rows,
         labels=tuple(str(i) for i in range(n)),
         likelihood=CompiledGaussian(float(np.sqrt(variance))),
         blocks=(),
-        **extra,
+        **kwargs,
     )
 
 
@@ -562,7 +568,8 @@ def _gradient_case(kind):
 @pytest.mark.parametrize("kind", ["iid", "rw1", "car"])
 @pytest.mark.parametrize("d_variance", [0.0, 1.0])
 @pytest.mark.parametrize("with_q", [True, False])
-def test_lml_gradient_matches_central_difference(kind, d_variance, with_q) -> None:
+@pytest.mark.parametrize("extra", [None, "rhs", "data"])
+def test_lml_gradient_matches_central_difference(kind, d_variance, with_q, extra) -> None:
     build, d_q, constrained = _gradient_case(kind)
     if not with_q and d_variance == 0.0:
         pytest.skip("zero direction")
@@ -570,24 +577,23 @@ def test_lml_gradient_matches_central_difference(kind, d_variance, with_q) -> No
     base_v, h = 0.7, 1e-5
 
     def lml(t):
-        model = _chain_model(build(t * with_q), base_v + t * d_variance, constrained)
+        model = _chain_model(build(t * with_q), base_v + t * d_variance, constrained, extra=extra)
         return fit_gaussian(model, predictive_variances=False).log_marginal_likelihood
 
     result = fit_gaussian(
-        _chain_model(build(0.0), base_v, constrained), lml_directions=((d_q, d_variance),)
+        _chain_model(build(0.0), base_v, constrained, extra=extra),
+        lml_directions=((d_q, d_variance),),
     )
     (grad,) = result.diagnostics["lml_gradient"]
     assert type(grad) is float
     np.testing.assert_allclose(grad, (lml(h) - lml(-h)) / (2 * h), rtol=1e-6)
 
 
-def test_lml_gradient_unsupported_cases_and_validation() -> None:
+def test_lml_gradient_key_and_validation() -> None:
     direction = ((csr_matrix(np.eye(12)), 1.0),)
     model = _chain_model(2 * np.eye(12), 0.7, False)
     assert "lml_gradient" in fit_gaussian(model, lml_directions=direction).diagnostics
     assert "lml_gradient" not in fit_gaussian(model).diagnostics
-    data_constrained = _chain_model(2 * np.eye(12), 0.7, False, rhs=[1.0])
-    assert "lml_gradient" not in fit_gaussian(data_constrained, lml_directions=direction).diagnostics
     for bad in ([(None, 1.0)], ((np.eye(12), 1.0),), ((None, "x"),)):
         with pytest.raises(TypeError, match="lml_directions"):
             fit_gaussian(model, lml_directions=bad)
