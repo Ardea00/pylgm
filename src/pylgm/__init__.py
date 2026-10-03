@@ -56,7 +56,7 @@ from pylgm.pipeline import Pipeline
 from pylgm.effects.correlated import dyad_columns
 from pylgm.priors import GaussianPrior, PCBYM2Phi, PCPrecision, SymmetricBeta
 
-__version__ = "0.7.0rc6"
+__version__ = "0.7.0rc7"
 
 __all__ = [
     "AR1",
