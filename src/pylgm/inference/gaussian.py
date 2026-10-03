@@ -442,7 +442,9 @@ def _fit_dense(
     )
 
 
-def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
+def _fit_sparse(
+    model: CompiledLGM, *, predictive_variances: bool = True, lml_directions=None
+) -> GaussianResult:
     # ponytail: import sparse_constrained_gaussian lazily here, NOT at module
     # top. sparse.py imports _block_slices/_factor_positive_definite from this
     # module at its top level; a top-level back-import would be circular and
@@ -451,7 +453,7 @@ def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> Gau
     from pylgm.inference.sparse import sparse_constrained_gaussian
 
     variance = float(model.likelihood.variance)
-    fit = sparse_constrained_gaussian(model)
+    fit = sparse_constrained_gaussian(model, lml_directions)
     predictive_variance = (
         fit.posterior.predictive_variances(model.prediction_design)
         if predictive_variances else None
@@ -501,8 +503,9 @@ def fit_gaussian(
     dominate the per-evaluation cost.
 
     ``lml_directions`` is ``None`` or a tuple of ``(dQ, d_variance)`` pairs (``dQ`` a
-    sparse latent x latent matrix or ``None``). On the dense path with homogeneous
-    structural constraints, ``diagnostics["lml_gradient"]`` then holds the exact
+    sparse latent x latent matrix or ``None``). On the dense path and on the sparse
+    path (``sparse.py``: exact traces from the Takahashi selected inverse),
+    ``diagnostics["lml_gradient"]`` then holds the exact
     directional derivatives of ``log_marginal_likelihood``; otherwise the key is
     absent and callers should finite-difference.
     """
@@ -520,7 +523,9 @@ def fit_gaussian(
         ):
             raise TypeError("lml_directions must be a tuple of (sparse dQ or None, float) pairs")
     if not allow_large_dense and _exceeds_dense_threshold(model):
-        return _fit_sparse(model, predictive_variances=predictive_variances)
+        return _fit_sparse(
+            model, predictive_variances=predictive_variances, lml_directions=lml_directions
+        )
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
             return _fit_dense(
