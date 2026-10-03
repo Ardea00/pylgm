@@ -77,7 +77,9 @@ def test_poisson_log_observation_is_the_mode():
         _negative_log_posterior, np.zeros(CELLS + 1), args=(True,), jac=True, method="BFGS",
         options={"gtol": 1e-9},
     )
-    assert oracle.success
+    # BFGS can stop on "precision loss" (status 2) at the optimum on some BLAS
+    # builds; what the comparison needs is a stationary oracle, so check that.
+    assert oracle.success or np.linalg.norm(oracle.jac) < 1e-6
     np.testing.assert_allclose(result.predictive_mean, _eta(oracle.x), atol=1e-6)
 
 
