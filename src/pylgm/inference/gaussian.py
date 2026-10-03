@@ -442,6 +442,13 @@ def _fit_dense(
     )
 
 
+# ponytail: off by default. The sparse gradient is exact but its two Takahashi
+# sweeps (selected_inverse is a per-column Python loop) cost more than the 2d
+# plain fits finite differences need below ~7 hyperparameters, and far more on
+# high-fill graphs. Turn on once selected_inverse is vectorised/supernodal.
+_SPARSE_LML_GRADIENT = False
+
+
 def _fit_sparse(
     model: CompiledLGM, *, predictive_variances: bool = True, lml_directions=None
 ) -> GaussianResult:
@@ -453,7 +460,9 @@ def _fit_sparse(
     from pylgm.inference.sparse import sparse_constrained_gaussian
 
     variance = float(model.likelihood.variance)
-    fit = sparse_constrained_gaussian(model, lml_directions)
+    fit = sparse_constrained_gaussian(
+        model, lml_directions if _SPARSE_LML_GRADIENT else None
+    )
     predictive_variance = (
         fit.posterior.predictive_variances(model.prediction_design)
         if predictive_variances else None
