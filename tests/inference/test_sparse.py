@@ -712,7 +712,7 @@ def test_intrinsic_field_against_a_vague_intercept_keeps_sparse_variances_exact(
                 + IID("level", index="region", precision=1.0))
     dense = model.fit(frame)
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
-    monkeypatch.setattr(gaussian_engine, "_SPARSE_LML_GRADIENT", True)
+    monkeypatch.setattr(gaussian_engine, "_SPARSE_GRADIENT_MIN_DIRECTIONS", 1)
     sparse = model.fit(frame)
     assert sparse._sparse_posterior is not None
     np.testing.assert_allclose(
@@ -789,7 +789,7 @@ def force_sparse(monkeypatch):
     import pylgm.inference.gaussian as gaussian_engine
 
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
-    monkeypatch.setattr(gaussian_engine, "_SPARSE_LML_GRADIENT", True)
+    monkeypatch.setattr(gaussian_engine, "_SPARSE_GRADIENT_MIN_DIRECTIONS", 1)
 
 
 @pytest.mark.parametrize("kind", ["rw1", "besag", "car"])

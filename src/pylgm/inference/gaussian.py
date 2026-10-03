@@ -442,12 +442,12 @@ def _fit_dense(
     )
 
 
-# ponytail: off by default. The sparse gradient is exact; its two Takahashi
-# sweeps (supernodal selected_inverse) now cost about the same as the 2d plain
-# fits finite differences need at 3 hyperparameters on a 20k-latent RW1+IID fit
-# (~0.14s against ~0.17s) and about half on a high-fill random graph; flip once
-# a margin at typical hyperparameter counts is measured on real models.
-_SPARSE_LML_GRADIENT = False
+# ponytail: the sparse gradient is exact and its cost (two supernodal Takahashi
+# sweeps) is flat in the direction count, while finite differences cost 2 plain
+# fits per direction: ~5x a plain fit on a 20k-latent RW1+IID model and ~3x on a
+# high-fill random graph, so it breaks even between 2 and 3 directions. Fewer
+# than this: omit the key and let the caller finite-difference.
+_SPARSE_GRADIENT_MIN_DIRECTIONS = 3
 
 
 def _fit_sparse(
@@ -462,7 +462,10 @@ def _fit_sparse(
 
     variance = float(model.likelihood.variance)
     fit = sparse_constrained_gaussian(
-        model, lml_directions if _SPARSE_LML_GRADIENT else None
+        model,
+        lml_directions
+        if lml_directions is not None and len(lml_directions) >= _SPARSE_GRADIENT_MIN_DIRECTIONS
+        else None,
     )
     predictive_variance = (
         fit.posterior.predictive_variances(model.prediction_design)
