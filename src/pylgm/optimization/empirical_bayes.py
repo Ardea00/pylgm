@@ -37,7 +37,7 @@ _FINITE_DIFFERENCE_STEP = 1e-3
 # almost flat in one hyperparameter) is not a plateau.
 _PLATEAU_STEP_TOLERANCE = 1e-2
 # Analytic LML gradient: when `fit` accepts `lml_directions`, the engine returns
-# directional derivatives of the LML along (dQ, d sigma^2) supplied here, built
+# directional derivatives of the LML along (dQ, d likelihood) supplied here, built
 # from the family itself by differencing the *materialised* precision/variance
 # (no factorisation involved, hence noise-free). Parameters whose perturbation
 # changes anything else fall back to finite differences of the full fit. A
@@ -72,23 +72,28 @@ def _same(a: object, b: object) -> bool:
 
 
 def _precision_variance_direction(minus: object, plus: object, span: float):
-    """``((Q_plus - Q_minus)/span, (v_plus - v_minus)/span)`` or ``None``.
+    """``(dQ, d_lik)`` or ``None``: the two models differ only in precision and likelihood.
 
-    ``None`` unless the two models differ only in precision and Gaussian variance.
+    ``dQ = (Q_plus - Q_minus)/span`` (an empty sparse matrix if unchanged). ``d_lik`` is the float
+    ``d sigma^2`` when all three Gaussian likelihoods are compiled Gaussians, the
+    triple ``(likelihood_minus, likelihood_plus, span)`` for any other likelihood
+    change, ``None`` if the likelihood is unchanged.
     """
-    if not (
-        isinstance(minus.likelihood, CompiledGaussian)
-        and isinstance(plus.likelihood, CompiledGaussian)
-    ):
-        return None
     for name in _FIXED_MODEL_FIELDS:
         if not _same(getattr(minus, name, None), getattr(plus, name, None)):
             return None
     dq = (plus.precision - minus.precision) / span
     if not np.isfinite(dq.data).all():
         return None
-    dv = (plus.likelihood.variance - minus.likelihood.variance) / span
-    return (dq, float(dv)) if np.isfinite(dv) else None
+    lk_minus, lk_plus = minus.likelihood, plus.likelihood
+    if isinstance(lk_minus, CompiledGaussian) and isinstance(lk_plus, CompiledGaussian):
+        dv = (lk_plus.variance - lk_minus.variance) / span
+        return (dq, float(dv)) if np.isfinite(dv) else None
+    try:
+        unchanged = lk_minus is lk_plus or bool(lk_minus == lk_plus)
+    except ValueError:  # array-valued fields: treat as changed
+        unchanged = False
+    return (dq, None if unchanged else (lk_minus, lk_plus, span))
 
 
 def _ordinary_number(value: object, name: str) -> float:
@@ -323,7 +328,7 @@ def optimize_empirical_bayes(
         return forward, backward, forward[index] - backward[index]
 
     def _directions(point: np.ndarray, center: object) -> dict[int, tuple]:
-        """Index -> (dQ, dv) for every parameter whose perturbation is a pure
+        """Index -> (dQ, d_lik) for every parameter whose perturbation is a pure
         precision/variance change (one-sided at a bound). Zero-span indices and
         any failure just omit the index (finite differences handle it)."""
         found: dict[int, tuple] = {}

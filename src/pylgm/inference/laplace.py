@@ -5,6 +5,7 @@ from scipy.sparse import csr_matrix, vstack
 from pylgm.exceptions import InferenceConvergenceError, NumericalError
 from pylgm.inference import gaussian as _gaussian
 from pylgm.inference.gaussian import (
+    _sparse_trace,
     _block_slices,
     _condition_on_data_constraints,
     _constraint_null_space,
@@ -15,6 +16,7 @@ from pylgm.inference.gaussian import (
 from pylgm.inference.result import LaplaceResult, quadratic_form_diagonal
 from pylgm.inference.sampling import GridSampler
 from pylgm.ir.model import CompiledLGM
+from pylgm.likelihoods import CompiledGaussian
 
 
 # Latent dimension above which the sparse engine beats the dense one (measured,
@@ -59,8 +61,10 @@ def _variational_mean_shift(reduced_design, reduced_covariance, factor, eta, y, 
     return cho_solve(factor, reduced_design.T @ (0.5 * eta_variance * third))
 
 
-def _observed_likelihood(model: CompiledLGM):
+def _observed_likelihood(model: CompiledLGM, likelihood=None):
     """The likelihood bound to the observed rows, response validated.
+
+    ``likelihood`` substitutes for ``model.likelihood`` (a perturbed copy).
 
     Binomial carries a per-row trials vector; the fit loop works on the observed
     rows, so bind their trials. For every other likelihood this returns self.
@@ -70,7 +74,7 @@ def _observed_likelihood(model: CompiledLGM):
     runs over every row.
     """
     observed = model.observed
-    observed_likelihood = model.likelihood.restrict(observed)
+    observed_likelihood = (model.likelihood if likelihood is None else likelihood).restrict(observed)
     _trials = getattr(observed_likelihood, "trials", None)
     lk_obs = observed_likelihood.for_observations(
         {"trials": _trials[observed]} if _trials is not None else None
@@ -210,9 +214,78 @@ def _prior_data_log_density(model: CompiledLGM, latent_size: int, precision) -> 
     return log_density
 
 
+def _curvature_trace(lk, design, eta, y, covariance) -> float:
+    """``tr(Sigma Z' W(eta) Z)`` for the likelihood's (possibly block) curvature."""
+    rows, weights = _curvature_rows(lk, design, eta, y)
+    return float(weights @ quadratic_form_diagonal(rows, covariance))
+
+
+def _gaussian_triple(likelihood, d_variance: float):
+    """Perturbed ``(minus, plus, span)`` Gaussians for a ``d sigma^2`` direction."""
+    h = 1e-4 * likelihood.variance / abs(d_variance)
+    return (
+        type(likelihood)(float(np.sqrt(likelihood.variance - h * d_variance))),
+        type(likelihood)(float(np.sqrt(likelihood.variance + h * d_variance))),
+        2.0 * h,
+    )
+
+
+def _lml_gradient_laplace(
+    model, directions, *, lk_obs, observed_design, y_obs, eta, x_hat, prior_mean,
+    prior_factor, basis, covariance_factor, covariance,
+) -> tuple[float, ...]:
+    """Directional derivatives of the Laplace log marginal likelihood at the mode.
+
+    With ``l = log p(y | eta) - 1/2 (x - mu)' Q (x - mu) + 1/2 log|Q_r| - 1/2 log|H|``
+    (``H = Q_r + Bt Zt W Z B``), the mode being stationary kills ``d x`` in the
+    first bracket (envelope theorem), leaving
+
+        dl = d_phi log p(y | eta) - 1/2 x' dQ x + 1/2 mu' dQ mu
+             + 1/2 tr(S0 dQ) - 1/2 tr(S dQ)
+             - 1/2 d_phi tr(S Zt W Z) - 1/2 d/de tr(S Zt W(eta + e Z dx) Z),
+
+    ``S0``/``S`` the prior/posterior covariances and ``dx = S (Zt d_phi g - dQ x)``
+    the implicit-function shift of the mode. Every ``d_phi`` is a central
+    difference of the perturbed likelihoods at the FIXED ``eta`` (no factorisation);
+    the last term differences W along ``Z dx`` (curvature evaluations only).
+    """
+    f_prior = solve_triangular(prior_factor[0], basis.T, lower=True).T
+    out = []
+    for d_q, d_lik in directions:
+        value = 0.0
+        d_grad = None
+        if d_lik is not None:
+            lk_minus, lk_plus, span = d_lik
+            lo, hi = (_observed_likelihood(model, item) for item in (lk_minus, lk_plus))
+            value += (hi.log_likelihood(eta, y_obs) - lo.log_likelihood(eta, y_obs)) / span
+            d_grad = (hi.gradient(eta, y_obs) - lo.gradient(eta, y_obs)) / span
+            value -= 0.5 * (
+                _curvature_trace(hi, observed_design, eta, y_obs, covariance)
+                - _curvature_trace(lo, observed_design, eta, y_obs, covariance)
+            ) / span
+        pull = np.zeros(x_hat.size) if d_grad is None else np.asarray(observed_design.T @ d_grad).reshape(-1)
+        if d_q is not None:
+            value += 0.5 * (
+                _sparse_trace(f_prior, d_q) - _sparse_trace(covariance_factor, d_q)
+                - float(x_hat @ (d_q @ x_hat)) + float(prior_mean @ (d_q @ prior_mean))
+            )
+            pull = pull - d_q @ x_hat
+        d_eta = np.asarray(observed_design @ (covariance @ pull)).reshape(-1)
+        peak = float(np.max(np.abs(d_eta))) if d_eta.size else 0.0
+        if peak > 0.0:
+            step = 1e-4 / peak
+            value -= 0.5 * (
+                _curvature_trace(lk_obs, observed_design, eta + step * d_eta, y_obs, covariance)
+                - _curvature_trace(lk_obs, observed_design, eta - step * d_eta, y_obs, covariance)
+            ) / (2.0 * step)
+        out.append(float(value))
+    return tuple(out)
+
+
 def _fit_laplace_dense(
     model: CompiledLGM, max_iterations: int, tolerance: float, mean_correction: bool = False,
     initial_mode: np.ndarray | None = None, predictive_variances: bool = True,
+    lml_directions=None,
 ) -> LaplaceResult:
     likelihood = model.likelihood
     precision = model.precision.toarray()
@@ -403,6 +476,20 @@ def _fit_laplace_dense(
     mean = basis @ z_mean if x_p is None else x_p + basis @ z_mean
     covariance = covariance_factor @ covariance_factor.T
 
+    lml_gradient = None
+    if lml_directions is not None and reduced_dim and not model.data_constraint_count:
+        mode = basis @ z if x_p is None else x_p + basis @ z
+        try:
+            lml_gradient = _lml_gradient_laplace(
+                model, lml_directions, lk_obs=lk_obs, observed_design=observed_design,
+                y_obs=y_obs, eta=predictor(z), x_hat=mode,
+                prior_mean=np.zeros(latent_size) if x_p is None else x_p + basis @ prior_mean,
+                prior_factor=prior_factor, basis=basis,
+                covariance_factor=covariance_factor, covariance=covariance,
+            )
+        except (FloatingPointError, NumericalError, ValueError):
+            lml_gradient = None  # callers finite-difference
+
     prediction_design = model.prediction_design
     prediction_offset = model.prediction_offset
     predictive_variance, predictive_mean, fitted_mean = _reported_predictions(
@@ -436,6 +523,7 @@ def _fit_laplace_dense(
             # Set only when the gradient test failed and the decrement carried
             # the fit, so a rescued mode is auditable in the field.
             "newton_decrement": newton_decrement,
+            **({} if lml_gradient is None else {"lml_gradient": lml_gradient}),
         },
         sampler=GridSampler(
             mean, csr_matrix(prediction_design), prediction_offset, factor=covariance_factor
@@ -618,6 +706,7 @@ def fit_laplace(
     mean_correction: bool = False,
     initial_mode: np.ndarray | None = None,
     predictive_variances: bool = True,
+    lml_directions=None,
 ) -> LaplaceResult:
     """Fit a latent Gaussian model by a Laplace approximation at fixed hyperparameters.
 
@@ -641,9 +730,27 @@ def fit_laplace(
     leaves the covariance and the log marginal likelihood alone, the latter
     because that is a Laplace approximation *at the mode* and would stop being
     one if evaluated anywhere else.
+
+    ``lml_directions`` is ``None`` or a tuple of ``(dQ, d_lik)`` pairs: ``dQ`` a
+    sparse latent x latent precision derivative or ``None``; ``d_lik`` a float
+    ``d sigma^2`` (Gaussian likelihood), a triple ``(likelihood_minus,
+    likelihood_plus, span)`` of perturbed compiled likelihoods, or ``None``. On the
+    dense engine (no data constraints) ``diagnostics["lml_gradient"]`` then holds
+    the exact directional derivatives of ``log_marginal_likelihood``; otherwise the
+    key is absent and callers should finite-difference.
     """
     if type(allow_large_dense) is not bool:
         raise TypeError("allow_large_dense must be a boolean")
+    if lml_directions is not None:
+        directions = []
+        for d_q, d_lik in lml_directions:
+            if isinstance(d_lik, (int, float)) and not isinstance(d_lik, bool):
+                if not isinstance(model.likelihood, CompiledGaussian):
+                    directions = None  # a float means d sigma^2 of a Gaussian: unsupported here
+                    break
+                d_lik = _gaussian_triple(model.likelihood, float(d_lik)) if d_lik else None
+            directions.append((d_q, d_lik))
+        lml_directions = None if directions is None else tuple(directions)
     # Route to the sparse engine past the dense memory guard (as the exact
     # Gaussian engine does) and, since Laplace refactors every Newton step and
     # grid point, from the measured crossover on (Poisson + Besag: dense 64 s vs
@@ -654,9 +761,10 @@ def fit_laplace(
         or model.precision.shape[0] > _SPARSE_LAPLACE_MIN_LATENT
     )
     fit = _fit_laplace_sparse if sparse and not allow_large_dense else _fit_laplace_dense
+    extra = {"lml_directions": lml_directions} if fit is _fit_laplace_dense else {}
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
             return fit(model, max_iterations, tolerance, mean_correction,
-                       initial_mode, predictive_variances)
+                       initial_mode, predictive_variances, **extra)
     except FloatingPointError as error:
         raise NumericalError("Laplace numerical calculation was non-finite") from error
