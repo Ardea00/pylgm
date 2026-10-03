@@ -1,11 +1,13 @@
 from collections.abc import Mapping
+from functools import lru_cache
 
 import numpy as np
+from scipy.sparse import issparse
 from scipy.linalg import cho_factor, cho_solve, null_space, solve_triangular
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, UnsupportedEngineError
 from pylgm.inference.result import GaussianResult, quadratic_form_diagonal
-from pylgm.inference.sampling import GridSampler
+from pylgm.inference.sampling import GridSampler, LazyArray
 from pylgm.ir.model import CompiledLGM
 from pylgm.likelihoods import CompiledGaussian
 
@@ -69,7 +71,17 @@ def _factor_positive_definite(
     return factor, float(2.0 * np.log(np.diag(factor[0])).sum())
 
 
-def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndarray:
+def _frozen(array: np.ndarray) -> np.ndarray:
+    array.setflags(write=False)
+    return array
+
+
+# ponytail: constraint rows are hyperparameter-free, so EB re-hits the same few
+# keys; maxsize 2 because entries can be p x p (~134 MB at the dense limit);
+# raise it if models alternating many constraint sets thrash.
+@lru_cache(maxsize=2)
+def _null_space_cached(shape: tuple, raw: bytes, latent_size: int) -> np.ndarray:
+    constraints = np.frombuffer(raw, dtype=float).reshape(shape)
     normalized_rows = []
     for row in constraints:
         scale = np.abs(row).max()
@@ -79,8 +91,31 @@ def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndar
         normalized_rows.append(scaled_row / np.linalg.norm(scaled_row))
 
     if not normalized_rows:
-        return np.eye(latent_size)
-    return null_space(np.asarray(normalized_rows))
+        return _frozen(np.eye(latent_size))
+    return _frozen(null_space(np.asarray(normalized_rows)))
+
+
+def _constraint_null_space(constraints: np.ndarray, latent_size: int) -> np.ndarray:
+    """``null(constraints)``, memoised on content; the result is read-only."""
+    constraints = np.ascontiguousarray(constraints, dtype=float)
+    return _null_space_cached(constraints.shape, constraints.tobytes(), latent_size)
+
+
+# ponytail: same ceiling as the null-space cache.
+@lru_cache(maxsize=2)
+def _data_row_svd_cached(shape: tuple, raw: bytes):
+    rows = np.frombuffer(raw, dtype=float).reshape(shape)
+    left, singular, right = np.linalg.svd(rows)
+    null = right[shape[0]:].T
+    pinv_right = right[: shape[0]].T
+    logdet_gram = float(2.0 * np.log(singular).sum())
+    return _frozen(left), _frozen(singular), _frozen(pinv_right), _frozen(null), logdet_gram
+
+
+def _data_row_svd(rows: np.ndarray):
+    """``(left, singular, right[:k].T, null(rows), logdet(rows rows^T))``, memoised on ``rows``."""
+    rows = np.ascontiguousarray(rows, dtype=float)
+    return _data_row_svd_cached(rows.shape, rows.tobytes())
 
 
 def _constraint_particular_solution(
@@ -159,10 +194,8 @@ def _condition_on_data_constraints(
     """
     # One SVD gives null(rows), the least-norm particular solution and the gram
     # logdet; the rows are full rank (redundant ones were dropped at projection).
-    left, singular, right = np.linalg.svd(rows)
-    null = right[rows.shape[0]:].T
-    particular = right[: rows.shape[0]].T @ ((left.T @ rhs) / singular)
-    logdet_gram = float(2.0 * np.log(singular).sum())
+    left, singular, pinv_right, null, logdet_gram = _data_row_svd(rows)
+    particular = pinv_right @ ((left.T @ rhs) / singular)
     null_factor, logdet_null = _factor_positive_definite(
         null.T @ precision @ null, "data-constrained posterior precision"
     )
@@ -179,12 +212,70 @@ def _condition_on_data_constraints(
     return conditioned, null, null_factor, float(log_density)
 
 
-def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
+def _guarded(compute):
+    """Run a deferred dense computation under the same floating-point regime as the fit."""
+
+    def run():
+        try:
+            with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
+                return compute()
+        except FloatingPointError as error:
+            raise NumericalError("exact Gaussian numerical calculation was non-finite") from error
+
+    return run
+
+
+def _sparse_trace(factor: np.ndarray, matrix) -> float:
+    """``tr(F F^T M)`` for sparse ``M`` from the nnz entries only: O(nnz * rank)."""
+    coo = matrix.tocoo()
+    total, step = 0.0, 4096  # chunked so the gathered factor rows stay small
+    for lo in range(0, coo.nnz, step):
+        r, c, d = coo.row[lo:lo + step], coo.col[lo:lo + step], coo.data[lo:lo + step]
+        total += float(np.einsum("ij,ij,i->", factor[r], factor[c], d))
+    return total
+
+
+def _lml_gradient(
+    directions, *, variance, n_observed, residual_sq, gram, x_hat, prior_mean,
+    prior_factor, prior_basis_t, post_factor,
+) -> tuple[float, ...]:
+    """Directional derivatives of the log marginal likelihood (Fisher's identity).
+
+    ``dl = E_post[d log p(y, x)]``, which for the Gaussian prior restricted to the
+    affine constraint set and the Gaussian likelihood is
+    ``-1/2 [n dv/v - tr(S0 dQ) + tr(S dQ) - (tr(S G) + r'r) dv/v^2 + x' dQ x - m' dQ m]``
+    with ``S0 = B Q_r^-1 B'`` and ``m`` the prior covariance and mean, ``S`` and
+    ``x`` the posterior covariance and mean, and ``r`` the residual at ``x``. Exact
+    data rows ``A_D x = e`` only change the posterior moments: ``e`` is a function
+    of ``x``, so ``d log p(y, e) = E_{x | y, e}[d log p(y, x)]``.
+    """
+    f_prior = (
+        np.zeros((x_hat.size, 0)) if prior_factor is None
+        else solve_triangular(prior_factor[0], prior_basis_t, lower=True).T
+    )
+    # Factored as (dv/v) (n - (tr(S G) + r'r)/v): v**2 overflows at extreme sigma.
+    noise_term = n_observed - (_sparse_trace(post_factor, gram) + residual_sq) / variance
+    out = []
+    for d_q, d_v in directions:
+        value = (d_v / variance) * noise_term
+        if d_q is not None:
+            value += (
+                _sparse_trace(post_factor, d_q) - _sparse_trace(f_prior, d_q)
+                + float(x_hat @ (d_q @ x_hat))
+                - (0.0 if prior_mean is None else float(prior_mean @ (d_q @ prior_mean)))
+            )
+        out.append(float(-0.5 * value))
+    return tuple(out)
+
+
+def _fit_dense(
+    model: CompiledLGM, *, predictive_variances: bool = True, lml_directions=None
+) -> GaussianResult:
     variance = float(model.likelihood.variance)
     if not np.isfinite(variance) or variance <= 0:
         raise NumericalError("sigma squared must be finite and positive")
 
-    precision = model.precision.toarray()
+    precision = model.precision
     latent_size = precision.shape[0]
     design = model.design
     y = model.y
@@ -201,7 +292,17 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     observed_design = design[observed]
     # With no structural rows the basis is the identity: skip the O(p^3) products.
     identity = not constraints.shape[0]
-    reduced_precision = precision if identity else basis.T @ precision @ basis
+    # Q and the likelihood gram G stay sparse until the one dense product with B:
+    # B^T (Q B) costs a sparse-times-dense O(nnz p) plus one dense p^3 matmul,
+    # where B^T Q B on densified Q costs two.
+    gram = (observed_design.T @ observed_design).tocsr()
+    if identity:
+        reduced_precision = precision.toarray()
+        posterior_precision = reduced_precision + gram.toarray() / variance
+    else:
+        prior_basis = precision @ basis
+        reduced_precision = basis.T @ prior_basis
+        posterior_precision = reduced_precision + basis.T @ (gram @ basis) / variance
 
     # The observed design stays sparse: Z^T Z costs O(nnz(Z) * row width) and
     # B^T (Z^T Z) B O(p^2 d), where the dense reduced design Z B costs O(n d^2).
@@ -209,7 +310,6 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
         pulled = np.asarray(observed_design.T @ values).reshape(-1)
         return pulled if identity else basis.T @ pulled
 
-    gram = (observed_design.T @ observed_design).toarray()
     residual = y[observed] - offset[observed]
     # Nonzero-rhs constraint: x = x_p + basis @ z shifts the likelihood residual
     # by design @ x_p and adds the prior linear term b_p = basis.T @ (Q x_p),
@@ -219,7 +319,6 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     if x_p is not None:
         residual = residual - np.asarray(observed_design @ x_p).reshape(-1)
         prior_linear = basis.T @ (precision @ x_p)
-    posterior_precision = reduced_precision + (gram if identity else basis.T @ gram @ basis) / variance
 
     prior_factor, logdet_prior = _factor_positive_definite(
         reduced_precision, "reduced prior precision"
@@ -251,7 +350,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
         n_observed * np.log(2 * np.pi * variance) - logdet_prior + logdet_posterior + quadratic
     ) + model.log_likelihood_normalization
 
-    covariance_basis = basis
+    covariance_basis, covariance_rank = (lambda: basis), basis.shape[1]
     if model.data_constraint_count:
         # log p(y, e) = log p(y) + log p(e | y): the data rows are exact observations.
         data_rows = model.constraints[structural_count:]
@@ -263,27 +362,62 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
             data_rows if identity else data_rows @ basis, data_rhs,
         )
         log_marginal_likelihood += data_log_density
-        covariance_basis = null if identity else basis @ null
+        covariance_rank = null.shape[1]
+        covariance_basis = (lambda: null) if identity else (lambda: basis @ null)
 
     # Covariance = F F^T with F = basis L^-T: F doubles as the sampling factor, and
     # its columns span the constraint null space, so every draw meets A x = e.
-    covariance_factor = (
-        solve_triangular(factor[0], covariance_basis.T, lower=True).T
-        if covariance_basis.shape[1] else np.zeros((latent_size, 0))
-    )
+    # Both O(p^3) objects are built on first read, not per fit: the log marginal
+    # likelihood never needs them, and an empirical-Bayes objective evaluation
+    # discards the result. The finiteness guard therefore runs when the covariance
+    # is first read (NumericalError, as before) rather than inside fit_gaussian.
+    chol = factor[0] if covariance_rank else None
+
+    @_guarded
+    def build_factor():
+        if chol is None:
+            return np.zeros((latent_size, 0))
+        return solve_triangular(chol, covariance_basis().T, lower=True).T
+
+    @_guarded
+    def build_covariance():
+        covariance_f = covariance_factor.get()
+        covariance = covariance_f @ covariance_f.T
+        _require_finite("posterior covariance", covariance)
+        return covariance
+
+    covariance_factor = LazyArray(build_factor)
+    lazy_covariance = LazyArray(build_covariance)
     mean = basis @ reduced_mean if x_p is None else x_p + basis @ reduced_mean
-    covariance = covariance_factor @ covariance_factor.T
+    diagnostics = {
+        "latent_dimension": int(latent_size),
+        "observed_count": int(np.count_nonzero(observed)),
+        "constraint_count": int(model.constraints.shape[0]),
+    }
+    # log_likelihood_normalization is constant in (Q, sigma^2): only -sum log(sigma_i).
+    if lml_directions is not None:
+        # The residual at the final (data-conditioned) mean, not the pre-conditioning one.
+        final_residual = y[observed] - offset[observed] - np.asarray(
+            observed_design @ mean
+        ).reshape(-1)
+        diagnostics["lml_gradient"] = _lml_gradient(
+            lml_directions, variance=variance, n_observed=n_observed,
+            residual_sq=float(final_residual @ final_residual),
+            gram=gram, x_hat=mean,
+            prior_mean=None if x_p is None else x_p + basis @ prior_mean,
+            prior_factor=prior_factor,
+            prior_basis_t=basis.T, post_factor=covariance_factor.get(),
+        )
     prediction_design = model.prediction_design
     predictive_mean = np.asarray(
         model.prediction_offset + prediction_design @ mean
     ).reshape(-1)
     predictive_variance = (
-        quadratic_form_diagonal(prediction_design, covariance)
+        quadratic_form_diagonal(prediction_design, lazy_covariance.get())
         if predictive_variances else None
     )
 
     _require_finite("posterior mean", mean)
-    _require_finite("posterior covariance", covariance)
     _require_finite("log marginal likelihood", log_marginal_likelihood)
     _require_finite("predictive mean", predictive_mean)
     if predictive_variance is not None:
@@ -291,7 +425,7 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
     return GaussianResult(
         labels=model.labels,
         mean=mean,
-        covariance=covariance,
+        covariance=lazy_covariance,
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         predictive_variance=predictive_variance,
@@ -301,18 +435,24 @@ def _fit_dense(model: CompiledLGM, *, predictive_variances: bool = True) -> Gaus
             else model.prediction_observation_variance
         ),
         block_slices=_block_slices(model),
-        diagnostics={
-            "latent_dimension": int(latent_size),
-            "observed_count": int(np.count_nonzero(observed)),
-            "constraint_count": int(model.constraints.shape[0]),
-        },
+        diagnostics=diagnostics,
         sampler=GridSampler(
             mean, prediction_design, model.prediction_offset, factor=covariance_factor
         ),
     )
 
 
-def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> GaussianResult:
+# ponytail: the sparse gradient is exact and its cost (two supernodal Takahashi
+# sweeps) is flat in the direction count, while finite differences cost 2 plain
+# fits per direction: ~5x a plain fit on a 20k-latent RW1+IID model and ~3x on a
+# high-fill random graph, so it breaks even between 2 and 3 directions. Fewer
+# than this: omit the key and let the caller finite-difference.
+_SPARSE_GRADIENT_MIN_DIRECTIONS = 3
+
+
+def _fit_sparse(
+    model: CompiledLGM, *, predictive_variances: bool = True, lml_directions=None
+) -> GaussianResult:
     # ponytail: import sparse_constrained_gaussian lazily here, NOT at module
     # top. sparse.py imports _block_slices/_factor_positive_definite from this
     # module at its top level; a top-level back-import would be circular and
@@ -321,7 +461,12 @@ def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> Gau
     from pylgm.inference.sparse import sparse_constrained_gaussian
 
     variance = float(model.likelihood.variance)
-    fit = sparse_constrained_gaussian(model)
+    fit = sparse_constrained_gaussian(
+        model,
+        lml_directions
+        if lml_directions is not None and len(lml_directions) >= _SPARSE_GRADIENT_MIN_DIRECTIONS
+        else None,
+    )
     predictive_variance = (
         fit.posterior.predictive_variances(model.prediction_design)
         if predictive_variances else None
@@ -353,7 +498,11 @@ def _fit_sparse(model: CompiledLGM, *, predictive_variances: bool = True) -> Gau
 
 
 def fit_gaussian(
-    model: CompiledLGM, *, allow_large_dense: bool = False, predictive_variances: bool = True
+    model: CompiledLGM,
+    *,
+    allow_large_dense: bool = False,
+    predictive_variances: bool = True,
+    lml_directions=None,
 ) -> GaussianResult:
     """Fit the small/medium exact Gaussian dense reference engine.
 
@@ -365,6 +514,13 @@ def fit_gaussian(
     only need ``log_marginal_likelihood`` -- e.g. intermediate empirical-Bayes
     objective evaluations, where predictive variances are never read but can
     dominate the per-evaluation cost.
+
+    ``lml_directions`` is ``None`` or a tuple of ``(dQ, d_variance)`` pairs (``dQ`` a
+    sparse latent x latent matrix or ``None``). On the dense path and on the sparse
+    path (``sparse.py``: exact traces from the Takahashi selected inverse),
+    ``diagnostics["lml_gradient"]`` then holds the exact
+    directional derivatives of ``log_marginal_likelihood``; otherwise the key is
+    absent and callers should finite-difference.
     """
     if not isinstance(model.likelihood, CompiledGaussian):
         raise UnsupportedEngineError("exact Gaussian inference requires a Gaussian likelihood")
@@ -372,10 +528,21 @@ def fit_gaussian(
         raise TypeError("allow_large_dense must be a boolean")
     if type(predictive_variances) is not bool:
         raise TypeError("predictive_variances must be a boolean")
+    if lml_directions is not None:
+        if not isinstance(lml_directions, tuple) or not all(
+            isinstance(d, tuple) and len(d) == 2 and (d[0] is None or issparse(d[0]))
+            and isinstance(d[1], (int, float)) and not isinstance(d[1], bool)
+            for d in lml_directions
+        ):
+            raise TypeError("lml_directions must be a tuple of (sparse dQ or None, float) pairs")
     if not allow_large_dense and _exceeds_dense_threshold(model):
-        return _fit_sparse(model, predictive_variances=predictive_variances)
+        return _fit_sparse(
+            model, predictive_variances=predictive_variances, lml_directions=lml_directions
+        )
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            return _fit_dense(model, predictive_variances=predictive_variances)
+            return _fit_dense(
+                model, predictive_variances=predictive_variances, lml_directions=lml_directions
+            )
     except FloatingPointError as error:
         raise NumericalError("exact Gaussian numerical calculation was non-finite") from error

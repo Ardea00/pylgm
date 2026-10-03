@@ -7,6 +7,20 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 
+class LazyArray:
+    """An array computed on first ``get()`` and cached (shared by every holder)."""
+
+    def __init__(self, compute: Callable[[], np.ndarray]) -> None:
+        self._compute: Callable[[], np.ndarray] | None = compute
+        self._value: np.ndarray | None = None
+
+    def get(self) -> np.ndarray:
+        if self._compute is not None:
+            self._value = self._compute()
+            self._compute = None  # drop the closed-over inputs once materialised
+        return self._value
+
+
 @dataclass(frozen=True)
 class GridSampler:
     """One Gaussian latent posterior, mapped to ``eta = offset + design @ x``.
@@ -20,16 +34,20 @@ class GridSampler:
     mean: np.ndarray
     design: csr_matrix
     offset: np.ndarray
-    factor: np.ndarray | None = None
+    factor: "np.ndarray | LazyArray | None" = None
     posterior: object | None = None
     row_order: np.ndarray | None = None
+
+    def dense_factor(self) -> np.ndarray | None:
+        return self.factor.get() if isinstance(self.factor, LazyArray) else self.factor
 
     def reordered(self, order: np.ndarray) -> "GridSampler":
         return replace(self, row_order=order if self.row_order is None else self.row_order[order])
 
     def draw(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        if self.factor is not None:
-            deviations = rng.standard_normal((n, self.factor.shape[1])) @ self.factor.T
+        factor = self.dense_factor()
+        if factor is not None:
+            deviations = rng.standard_normal((n, factor.shape[1])) @ factor.T
         else:
             deviations = self.posterior.sample_deviations(n, rng)
         eta = self.offset + np.asarray(self.design @ (self.mean + deviations).T).T

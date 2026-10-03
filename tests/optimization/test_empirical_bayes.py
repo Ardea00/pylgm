@@ -7,6 +7,8 @@ import weakref
 import numpy as np
 import pytest
 from scipy.optimize import OptimizeResult
+from types import SimpleNamespace
+
 from scipy.sparse import csr_matrix, eye
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError, OptimizationError
@@ -16,6 +18,7 @@ from pylgm.ir import (
     CompiledFamily,
     CompiledLGM,
     LatentBlock,
+    ParametricDesignBlock,
     ScalableBlock,
 )
 from pylgm.likelihoods import CompiledGaussian, CompiledPoisson
@@ -1374,3 +1377,122 @@ def test_real_scipy_plateau_stop_is_converged() -> None:
     )
     assert result.diagnostics.converged
     assert result.parameters["tau"] == pytest.approx(1.7, abs=5e-2)
+
+
+def two_block_family(*, design_parameter: bool = False) -> CompiledFamily:
+    """y ~ N(0, 1/a + w^2/b + sigma^2); ``w`` rescales block b's DESIGN if asked."""
+    def block(name: str) -> LatentBlock:
+        return LatentBlock(name, (name,), csr_matrix(np.ones((3, 1))), csr_matrix([[1.0]]), np.empty((0, 1)))
+
+    second = (
+        ParametricDesignBlock(
+            block("b"), ("w",), lambda v: csr_matrix(np.full((3, 1), v["w"])), parameter="b.precision"
+        )
+        if design_parameter
+        else ScalableBlock(block("b"), "b.precision", 1.0)
+    )
+    names = ("a.precision", "b.precision", "sigma") + (("w",) if design_parameter else ())
+    return gaussian_family(
+        y=np.array([2.0, -1.5, 0.5]),
+        observed=np.ones(3, dtype=bool),
+        offset=np.zeros(3),
+        blocks=(ScalableBlock(block("a"), "a.precision", 1.0), second),
+        parameter_names=names,
+        sigma=1.0,
+    )
+
+
+def _bounds(family: CompiledFamily) -> dict[str, OptimizationBounds]:
+    return {n: OptimizationBounds(initial=1.0, lower=1e-3, upper=1e3) for n in family.parameter_names}
+
+
+class DirectionalFit:
+    """fit_gaussian plus ``lml_gradient`` from a high-accuracy FD along each direction."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.direction_counts: list[int] = []
+
+    def __call__(self, model, *, predictive_variances=True, lml_directions=None):
+        self.calls += 1
+        result = fit_gaussian(model, predictive_variances=False)
+        diagnostics = {}
+        if lml_directions is not None:
+            self.direction_counts.append(len(lml_directions))
+
+            def lml(eps: float, dq, dv) -> float:
+                variance = model.likelihood.variance + eps * dv
+                shifted = model._rebind(
+                    model.precision + eps * dq, CompiledGaussian(float(np.sqrt(variance))), model.blocks
+                )
+                return fit_gaussian(shifted, predictive_variances=False).log_marginal_likelihood
+
+            eps = 1e-5
+            diagnostics["lml_gradient"] = tuple(
+                (lml(eps, dq, dv) - lml(-eps, dq, dv)) / (2 * eps) for dq, dv in lml_directions
+            )
+        return SimpleNamespace(
+            log_marginal_likelihood=result.log_marginal_likelihood,
+            mean=np.asarray(result.mean),
+            diagnostics=diagnostics,
+        )
+
+
+def test_analytic_gradient_matches_finite_differences_with_far_fewer_fits(monkeypatch) -> None:
+    family = two_block_family()
+    analytic_fit, fd_fit = DirectionalFit(), DirectionalFit()
+    analytic = optimize_empirical_bayes(family, _bounds(family), fit=analytic_fit)
+    monkeypatch.setattr(empirical_bayes, "_ANALYTIC_GRADIENT", False)
+    reference = optimize_empirical_bayes(family, _bounds(family), fit=fd_fit)
+
+    assert analytic.diagnostics.objective == pytest.approx(reference.diagnostics.objective, abs=1e-4)
+    assert analytic_fit.direction_counts and set(analytic_fit.direction_counts) == {3}
+    assert not fd_fit.direction_counts
+    # the objective fit alone vs. one fit + 2 x 3 FD fits per gradient
+    assert analytic_fit.calls < fd_fit.calls / 3
+
+
+def test_analytic_gradient_at_a_point_matches_central_differences(monkeypatch) -> None:
+    family = two_block_family()
+    captured = {}
+
+    def fake_minimize(objective, start, *, jac, **_):
+        point = start + 0.3
+        objective(point)  # L-BFGS-B evaluates f before g at the same point
+        captured["g"] = jac(point)
+        h = 1e-4
+        captured["fd"] = np.array(
+            [(objective(point + h * e) - objective(point - h * e)) / (2 * h) for e in np.eye(3)]
+        )
+        return OptimizeResult(x=start, fun=0.0, success=True, message="ok")
+
+    monkeypatch.setattr(empirical_bayes.scipy.optimize, "minimize", fake_minimize)
+    optimize_empirical_bayes(family, _bounds(family), fit=DirectionalFit())
+    np.testing.assert_allclose(captured["g"], captured["fd"], rtol=1e-4, atol=1e-6)
+
+
+def test_design_parameter_falls_back_to_finite_differences_for_that_index_only(monkeypatch) -> None:
+    family = two_block_family(design_parameter=True)
+    fit = DirectionalFit()
+    analytic = optimize_empirical_bayes(family, _bounds(family), fit=fit)
+    # w moves the design -> never analytic; the other three always are
+    assert set(fit.direction_counts) == {3}
+
+    monkeypatch.setattr(empirical_bayes, "_ANALYTIC_GRADIENT", False)
+    reference = optimize_empirical_bayes(family, _bounds(family), fit=DirectionalFit())
+    assert analytic.diagnostics.objective == pytest.approx(reference.diagnostics.objective, abs=1e-4)
+
+
+def test_penalty_gradient_is_included_in_the_analytic_path(monkeypatch) -> None:
+    family = two_block_family()
+
+    def penalty(values):  # pulls log(sigma) towards log(0.3)
+        return -2.0 * (np.log(values["sigma"]) - np.log(0.3)) ** 2
+
+    analytic = optimize_empirical_bayes(family, _bounds(family), fit=DirectionalFit(), penalty=penalty)
+    monkeypatch.setattr(empirical_bayes, "_ANALYTIC_GRADIENT", False)
+    reference = optimize_empirical_bayes(
+        family, _bounds(family), fit=DirectionalFit(), penalty=penalty
+    )
+    assert analytic.diagnostics.objective == pytest.approx(reference.diagnostics.objective, abs=1e-4)
+    assert analytic.parameters["sigma"] == pytest.approx(reference.parameters["sigma"], rel=2e-2)

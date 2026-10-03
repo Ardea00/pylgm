@@ -347,6 +347,63 @@ class SparsePosterior:
             var = var - np.einsum("ij,ji->i", mw, cw)
         return np.clip(var, 0.0, None)
 
+    @cached_property
+    def _dense_coupling(self):
+        """``(V, S^-1 V^T)`` with ``Sigma_unc[i, j] = (A_ss^-1 part) + V_i S^-1 V_j^T``: ``V`` is
+        ``W`` on sparse rows and ``-I`` on dense rows (``None`` without a dense block)."""
+        d = self.dense_index
+        if not d.size:
+            return None
+        v = np.zeros((self.latent_size, d.size))
+        if self.sparse_index.size:
+            v[self.sparse_index] = self._w_dense
+        v[d] = -np.eye(d.size)
+        factor = self.schur_factor if self.sparse_index.size else self.d_factor
+        return v, cho_solve(factor, v.T)
+
+    def covariance_entries(self, rows, cols, *, structural_only: bool = False) -> np.ndarray:
+        """``Sigma_c[rows, cols]`` for index pairs, exact, without forming ``Sigma_c``.
+
+        The same decomposition as ``predictive_variances`` (selected inverse of
+        ``A_ss`` minus the Woodbury part, Schur coupling, kriging correction),
+        applied per pair. Pairs off the factor's fill pattern (none for entries
+        of ``Q`` or ``Z^T Z``) fall back to one solve per distinct column.
+        ``structural_only`` conditions on the structural rows alone.
+        """
+        rows, cols = np.asarray(rows, dtype=int), np.asarray(cols, dtype=int)
+        out = np.zeros(rows.size)
+        s = self.sparse_index
+        if s.size:
+            position = np.full(self.latent_size, -1)
+            position[s] = np.arange(s.size)
+            i, j = position[rows], position[cols]
+            both = (i >= 0) & (j >= 0)
+            i, j = i[both], j[both]
+            value, found = _stored_entries(self._selected_ss, i, j)
+            if not found.all():
+                distinct = np.unique(j[~found])
+                basis = np.zeros((s.size, distinct.size))
+                basis[distinct, np.arange(distinct.size)] = 1.0
+                columns = self._base_ss.solve(basis)
+                value[~found] = columns[i[~found], np.searchsorted(distinct, j[~found])]
+            if isinstance(self.a_ss, _LowRankSpdFactor):
+                w = self.a_ss.w
+                value -= np.einsum(
+                    "ik,ki->i", w[i], cho_solve(self.a_ss.m_factor, w.T)[:, j]
+                )
+            out[both] = value
+        coupling = self._dense_coupling
+        if coupling is not None:
+            v, sinv_vt = coupling
+            out += np.einsum("ik,ki->i", v[rows], sinv_vt[:, cols])
+        if self.w_constraint is not None:
+            count = self.structural_count if structural_only else self.w_constraint.shape[1]
+            if count:
+                w = self.w_constraint[:, :count]
+                factor = (self.cap_factor[0][:count, :count], self.cap_factor[1])
+                out -= np.einsum("ik,ki->i", w[rows], cho_solve(factor, w.T)[:, cols])
+        return out
+
     def linear_combination_variances(self, weights) -> np.ndarray:
         """diag(M Σ_c Mᵀ) — same quadratic form as predictive_variances."""
         return self.predictive_variances(weights)
@@ -611,39 +668,110 @@ def _coupled_prior_logdet(model: CompiledLGM, constraints: np.ndarray) -> float:
     return logdet_hat + logdet_cap - logdet_gram
 
 
-def _symbolic_fill(strict_lower) -> list:
-    """Row indices below the diagonal of each column of the Cholesky factor's
-    symbolic pattern: struct(L_j) = struct(A_j) + the structs of j's children
-    in the elimination tree, minus j. ``strict_lower`` is csc."""
+def _symbolic_fill(strict_lower) -> np.ndarray:
+    """Sorted keys ``column * n + row`` of the strictly-lower symbolic pattern of
+    the Cholesky factor: struct(L_j) = struct(A_j) + the structs of j's children
+    in the elimination tree, minus j (a child contributes ``struct \\ {parent}``
+    to its parent, the minimum of its own struct). ``strict_lower`` is csc."""
     n = strict_lower.shape[0]
-    children: list[list[int]] = [[] for _ in range(n)]
-    structure: list = [None] * n
+    pending: list[list[np.ndarray]] = [[] for _ in range(n)]
+    out = []
     for j in range(n):
-        rows = set(strict_lower.indices[strict_lower.indptr[j]:strict_lower.indptr[j + 1]].tolist())
-        for child in children[j]:
-            rows |= structure[child]
-        rows.discard(j)
-        structure[j] = rows
-        if rows:
-            children[min(rows)].append(j)
-    return [np.fromiter(sorted(rows), dtype=int, count=len(rows)) for rows in structure]
+        own = strict_lower.indices[strict_lower.indptr[j]:strict_lower.indptr[j + 1]]
+        rows = np.unique(np.concatenate([own, *pending[j]])) if pending[j] else np.sort(own)
+        pending[j] = []
+        if rows.size:
+            pending[rows[0]].append(rows[1:])
+            out.append(j * n + rows.astype(np.int64))
+    return np.concatenate(out) if out else np.zeros(0, np.int64)
+
+
+def _close_pattern(keys: np.ndarray, n: int, max_passes: int = 100) -> np.ndarray | None:
+    """Least elimination-closed superset of the sorted strictly-lower ``keys``
+    (``column * n + row``): every column's struct minus its minimum must lie in
+    the struct of the column of that minimum. Each pass adds the missing entries
+    in numpy; ``None`` if ``max_passes`` do not reach the fixed point."""
+    for _ in range(max_passes):
+        if not keys.size:
+            return keys
+        cols = keys // n
+        rows = keys - cols * n
+        first = np.r_[True, cols[1:] != cols[:-1]]
+        parent = np.zeros(n, np.int64)
+        parent[cols[first]] = rows[first]
+        par = parent[cols]
+        need = par[rows > par] * n + rows[rows > par]
+        if not need.size:
+            return keys
+        found = keys[np.minimum(np.searchsorted(keys, need), keys.size - 1)] == need
+        if found.all():
+            return keys
+        keys = np.union1d(keys, need[~found])
+    return None
+
+
+def _supernodes(colptr: np.ndarray, rows: np.ndarray, n: int):
+    """Supernodes ``(start, width, count)`` of a closed pattern (diagonal first in
+    each csc column): fundamental ones (column j's struct is j+1 plus column
+    j+1's), then amalgamated with a parent that follows them directly while the
+    explicit zeros this adds stay a small fraction of the merged block (relaxed
+    supernodes: bigger dense blocks for a little exact-zero fill)."""
+    below = np.diff(colptr) - 1
+    parent = np.full(n, -1, np.int64)
+    has = below > 0
+    parent[has] = rows[colptr[:-1][has] + 1]
+    merge = (parent[:-1] == np.arange(1, n)) & (below[:-1] == below[1:] + 1)
+    start = np.flatnonzero(np.r_[True, ~merge])
+    width = np.diff(np.r_[start, n])
+    count = below[start + width - 1]
+    first, wide, cnt = [int(start[0])], [int(width[0])], [int(count[0])]
+    stored = width * (width + 1) // 2 + width * count  # entries of each fundamental block
+    kept = int(stored[0])
+    for s in range(1, start.size):
+        w, c = wide[-1] + int(width[s]), int(count[s])
+        total = w * (w + 1) // 2 + w * c
+        zeros = (total - kept - int(stored[s])) / total
+        limit = 0.2 if w <= 4 else 0.1 if w <= 16 else 0.05 if w <= 48 else 0.01
+        if parent[start[s] - 1] == start[s] and zeros <= limit:
+            wide[-1], cnt[-1], kept = w, c, kept + int(stored[s])
+        else:
+            first.append(int(start[s]))
+            wide.append(int(width[s]))
+            cnt.append(c)
+            kept = int(stored[s])
+    return np.array(first), np.array(wide), np.array(cnt)
 
 
 def selected_inverse(matrix) -> csr_matrix:
     """Entries of ``matrix⁻¹`` on the fill pattern of its factor (``L + Lᵀ``),
     for a sparse SPD matrix — the exact selected inverse via Takahashi
     recursion on the SuperLU fill pattern. Entries off that pattern are not
-    stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own.
+    stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own
+    (and, from relaxed supernodes, may carry a few more exact entries).
 
     Symmetric-mode ``splu`` (``COLAMD`` + ``SymmetricMode`` +
     ``diag_pivot_thresh=0.0``, as ``SparseSpdFactor``) yields ``perm_r == perm_c``
-    and a unit-lower ``L`` with ``U == D·Lᵀ``. Not ``MMD_AT_PLUS_A``: on a
+    and a unit-lower ``L`` with ``A = L D Lᵀ``. Not ``MMD_AT_PLUS_A``: on a
     bipartite network precision (borrowers x a few hub lenders) it finds the
     same fill but its ordering time grows quadratically (4.6s against 0.04s at
-    20 000 borrowers), and this one call dominated the whole fit. A reverse column sweep over the *symbolic* fill pattern
-    (``_symbolic_fill``) reconstructs the selected inverse exactly; SuperLU's
-    stored pattern is not enough, because it drops entries that cancel to zero.
-    Result is in the original ordering.
+    20 000 borrowers), and this one call dominated the whole fit.
+
+    The pattern must be *symbolic*: SuperLU drops L entries that cancel to
+    exactly zero, and reading Sigma as 0 off its stored pattern is wrong. We take
+    SuperLU's pattern plus ``matrix``'s own and close it under elimination
+    (``_close_pattern``; the least closed pattern containing ``matrix`` is the
+    symbolic one, and any closed pattern containing the factor is exact), with
+    L's value 0 where SuperLU dropped it. The sweep is supernodal
+    (``_supernodes``): a supernode ``J`` with below-rows ``R`` has, with
+    ``Y = L_RJ L_JJ⁻¹``,
+
+        Sigma_RJ = -Sigma_RR Y,   Sigma_JJ = L_JJ⁻ᵀ D_J⁻¹ L_JJ⁻¹ - Sigma_JR Y,
+
+    where ``Sigma_RR`` (all on the pattern, by closure) is gathered once: from a
+    sorted-key lookup for small ``R``, or from the dense Sigma block of the parent
+    supernode when ``R`` is large. Supernodes of equal shape and etree height are
+    independent and are swept as one batched dense product, parents (greater
+    height) before children. Result is in the original ordering.
     """
     q_csc = matrix.tocsc()
     n = q_csc.shape[0]
@@ -658,47 +786,145 @@ def selected_inverse(matrix) -> csr_matrix:
         raise NumericalError("selected inversion expected a symmetric factorization")
     diag_u = lu.U.diagonal().astype(float)
     original = np.argsort(pc)  # permuted index p is original index original[p]
-    # Takahashi needs the SYMBOLIC fill pattern: SuperLU drops L entries that
-    # cancel to exactly zero (integer Laplacians do this), and reading Sigma as 0
-    # off the stored pattern is wrong. Build it from the elimination tree of the
-    # permuted matrix; L's value is 0 exactly where SuperLU dropped it.
-    below = _symbolic_fill(tril(q_csc[original][:, original], k=-1, format="csc"))
-    lower = lu.L.tocsc()
-    stored = np.repeat(np.arange(n), np.diff(lower.indptr)) * n + lower.indices
-    order = np.argsort(stored)
-    stored, stored_values = stored[order], lower.data.astype(float)[order]
 
-    def l_values(column: int, rows: np.ndarray) -> np.ndarray:
-        wanted = column * n + rows
-        position = np.minimum(np.searchsorted(stored, wanted), stored.size - 1)
-        return np.where(stored[position] == wanted, stored_values[position], 0.0)
+    lower = lu.L.tocoo()
+    keep = lower.row > lower.col
+    l_keys = lower.col[keep].astype(np.int64) * n + lower.row[keep]
+    l_data = lower.data[keep].astype(float)
+    if (np.diff(l_keys) <= 0).any():
+        order = np.argsort(l_keys)
+        l_keys, l_data = l_keys[order], l_data[order]
+    a_low = tril(q_csc[original][:, original], k=-1, format="csc")
+    a_coo = a_low.tocoo()
+    a_keys = a_coo.col.astype(np.int64) * n + a_coo.row
+    # A's own entries are in L's pattern unless they cancelled; skip the big union then.
+    lost = a_keys[l_keys[np.minimum(np.searchsorted(l_keys, a_keys), max(l_keys.size - 1, 0))] != a_keys] if l_keys.size else a_keys
+    keys = np.union1d(l_keys, lost) if lost.size else l_keys
+    closed = _close_pattern(keys, n)
+    if closed is None:  # long cancellation cascade: build the symbolic pattern directly
+        closed = _symbolic_fill(a_low)
+    # Full pattern, diagonal first in every column: key = column * n + row.
+    diagonal = np.arange(n, dtype=np.int64) * (n + 1)
+    keys = np.insert(closed, np.searchsorted(closed, diagonal), diagonal)
+    colptr = np.searchsorted(keys, np.arange(n + 1, dtype=np.int64) * n)
+    cols = np.repeat(np.arange(n), np.diff(colptr))
+    rows = keys - cols * n
+    first, width, count = _supernodes(colptr, rows, n)
+    ng = first.size
+    group = np.repeat(np.arange(ng), width)
+    span = (first + width)[group] - np.arange(n)  # rows of column j inside its supernode
+    size = span + count[group]
+    # Rows below each supernode (those of its last column), concatenated.
+    r_off = np.r_[0, np.cumsum(count)]
+    r_flat = rows[np.repeat(colptr[first + width - 1] + 1 - r_off[:-1], count) + np.arange(r_off[-1])]
+    if (np.diff(colptr) != size).any():  # relaxed supernodes: pad every column with R
+        colptr = np.r_[0, np.cumsum(size)]
+        col = np.repeat(np.arange(n), size)
+        q = np.arange(colptr[-1]) - colptr[col]
+        in_r = q >= span[col]
+        rows = col + q
+        rows[in_r] = r_flat[r_off[group[col[in_r]]] + q[in_r] - span[col[in_r]]]
+        keys, cols = col * n + rows, col
+    l_val = np.zeros(keys.size)
+    if keys.size == l_keys.size + n:  # pattern is L's plus the diagonal
+        l_val[rows != cols] = l_data
+    elif l_keys.size:
+        at = np.minimum(np.searchsorted(l_keys, keys), l_keys.size - 1)
+        l_val = np.where(l_keys[at] == keys, l_data[at], 0.0)
 
-    # Sigma lives on the lower symbolic pattern plus the diagonal, keyed col * n + row:
-    # sorted keys make every sub-block gather one searchsorted per column.
-    keys = np.sort(np.r_[
-        np.concatenate([i * n + rows for i, rows in enumerate(below)] or [np.zeros(0, int)]),
-        np.arange(n) * (n + 1),
-    ])
+    # Supernodal etree: parent supernode owns the first below-row.
+    g_parent = np.full(ng, -1, np.int64)
+    g_parent[count > 0] = group[r_flat[r_off[:-1][count > 0]]]
+    height = [0] * ng
+    for g, p in enumerate(g_parent.tolist()):  # children precede their parent
+        if p >= 0 and height[p] <= height[g]:
+            height[p] = height[g] + 1
+    height = np.array(height)
+    sweep = np.lexsort((count, width, -height))
+    shape = np.c_[height[sweep], width[sweep], count[sweep]]
+    cuts = np.r_[0, np.flatnonzero((shape[1:] != shape[:-1]).any(axis=1)) + 1, sweep.size]
+    # A big supernode reads Sigma_RR off its parent's dense block instead of searching keys.
+    wide = count >= _DENSE_GATHER
+    waiting = np.bincount(g_parent[wide & (g_parent >= 0)], minlength=ng)
+    fronts: dict[int, np.ndarray] = {}
+
     sig = np.zeros(keys.size)
-    diagonal = np.searchsorted(keys, np.arange(n) * (n + 1))
-    for i in range(n - 1, -1, -1):
-        rows = below[i]
-        if not rows.size:
-            sig[diagonal[i]] = 1.0 / diag_u[i]
-            continue
-        values = l_values(i, rows)
-        wanted = np.minimum.outer(rows, rows) * n + np.maximum.outer(rows, rows)
-        # Every pair of a column's below-rows is on the symbolic pattern (closure).
-        sub = sig[np.searchsorted(keys, wanted)]
-        sig_below = -sub @ values
-        sig[np.searchsorted(keys, i * n + rows)] = sig_below
-        sig[diagonal[i]] = 1.0 / diag_u[i] - values @ sig_below
-    rows, cols = original[keys % n], original[keys // n]
+    for lo, hi in zip(cuts[:-1], cuts[1:]):
+        w, c = int(width[sweep[lo]]), int(count[sweep[lo]])
+        step = max(1, 2_000_000 // (c * c + w * w + 1))
+        for a in range(lo, hi, step):
+            ids = sweep[a:min(a + step, hi)]
+            fi = first[ids]
+            k = np.arange(w)
+            diag_at = colptr[fi[:, None] + k]  # (m, w) position of each column's diagonal
+            r = np.arange(c)
+            r_rows = r_flat[r_off[ids][:, None] + r]  # (m, c) the below-rows R
+            if c >= _DENSE_GATHER:
+                s_rr = np.empty((ids.size, c, c))
+                for i, g in enumerate(ids.tolist()):
+                    p = int(g_parent[g])
+                    f_rows = rows[colptr[first[p]]:colptr[first[p] + 1]]
+                    at = np.searchsorted(f_rows, r_rows[i])
+                    s_rr[i] = fronts[p][np.ix_(at, at)]
+            elif c:
+                lo_r = np.minimum(r_rows[:, :, None], r_rows[:, None, :])
+                hi_r = np.maximum(r_rows[:, :, None], r_rows[:, None, :])
+                s_rr = sig[np.searchsorted(keys, lo_r * n + hi_r)]  # keys: column * n + row
+            else:
+                s_rr = np.zeros((ids.size, 0, 0))
+            block = _takahashi_block(
+                s_rr, l_val[diag_at[:, None, :] + (w - k) + r[:, None]],
+                _unit_lower(l_val, diag_at, w), diag_u[fi[:, None] + k],
+            )  # (m, w + c, w)
+            t = np.arange(w + c)[:, None]
+            mask = t >= k
+            sig[(diag_at[:, None, :] + (t - k))[:, mask]] = block[:, mask]
+            for i, g in enumerate(ids.tolist()):
+                if waiting[g]:
+                    f = np.empty((w + c, w + c))
+                    f[:w, :w], f[w:, :w], f[:w, w:], f[w:, w:] = (
+                        block[i, :w], block[i, w:], block[i, w:].T, s_rr[i] if c else 0.0
+                    )
+                    fronts[g] = f
+                p = int(g_parent[g])
+                if c >= _DENSE_GATHER:
+                    waiting[p] -= 1
+                    if not waiting[p]:
+                        del fronts[p]
     off = rows != cols
+    r_o, c_o = original[rows], original[cols]
     return coo_matrix(
-        (np.r_[sig, sig[off]], (np.r_[rows, cols[off]], np.r_[cols, rows[off]])),
+        (np.r_[sig, sig[off]], (np.r_[r_o, c_o[off]], np.r_[c_o, r_o[off]])),
         shape=(n, n),
     ).tocsr()
+
+
+_DENSE_GATHER = 32  # below-rows from which Sigma_RR is read off the parent's dense block
+
+
+def _unit_lower(l_val, diag_at, w) -> np.ndarray:
+    """``(m, w, w)`` dense unit-lower diagonal blocks of the supernodes' ``L``."""
+    k = np.arange(w)
+    t = np.arange(w)[:, None]
+    strict = t > k
+    block = np.where(strict, l_val[diag_at[:, None, :] + np.where(strict, t - k, 0)], 0.0)
+    return block + np.eye(w)
+
+
+def _takahashi_block(s_rr, l_rj, l_jj, d) -> np.ndarray:
+    """``[Sigma_JJ; Sigma_RJ]`` of a batch of supernodes from ``Sigma_RR`` (m, c, c),
+    ``L_RJ`` (m, c, w), the unit-lower ``L_JJ`` (m, w, w) and ``D_J`` (m, w)."""
+    m, c, w = l_rj.shape
+    if w == 1:
+        z = np.ones((m, 1, 1))
+    else:
+        z = np.stack([solve_triangular(a, np.eye(w), lower=True, unit_diagonal=True) for a in l_jj])
+    y = l_rj @ z
+    s_jj = np.swapaxes(z, 1, 2) @ (z / d[:, :, None])
+    s_rj = -(s_rr @ y)
+    s_jj = s_jj - np.swapaxes(s_rj, 1, 2) @ y
+    s_jj = 0.5 * (s_jj + np.swapaxes(s_jj, 1, 2))
+    return np.concatenate([s_jj, s_rj], axis=1)
 
 
 # Row pairs depend on the sparsity pattern alone (indptr), and a model's frozen
@@ -756,6 +982,20 @@ def sparse_row_quadratic(a, dense: np.ndarray, max_row_nnz: int = 64) -> np.ndar
     return value
 
 
+def _stored_entries(stored: csr_matrix, rows: np.ndarray, cols: np.ndarray):
+    """``(values, found)``: ``stored[rows, cols]`` where stored, ``0`` and ``False`` elsewhere."""
+    width = stored.shape[1]
+    stored = stored.tocsr()
+    stored.sort_indices()
+    keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
+    wanted = np.asarray(rows) * width + np.asarray(cols)
+    if not keys.size:
+        return np.zeros(wanted.size), np.zeros(wanted.size, bool)
+    position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
+    found = keys[position] == wanted
+    return np.where(found, stored.data[position], 0.0), found
+
+
 def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64):
     """``(a_iᵀ M a_i over stored pairs, small_i, missing)`` per row of ``a``.
 
@@ -764,18 +1004,8 @@ def _pattern_quadratic(a: csr_matrix, stored: csr_matrix, max_row_nnz: int = 64)
     added. Rows with more than ``max_row_nnz`` nonzeros are not enumerated
     (``small_i`` False).
     """
-    width = a.shape[1]
     first, second, pair_row, small = _row_pairs(a, max_row_nnz)
-    stored = stored.tocsr()
-    stored.sort_indices()
-    keys = np.repeat(np.arange(stored.shape[0]), np.diff(stored.indptr)) * width + stored.indices
-    wanted = a.indices[first] * width + a.indices[second]
-    if keys.size:
-        position = np.minimum(np.searchsorted(keys, wanted), keys.size - 1)
-        found = keys[position] == wanted
-        entry = np.where(found, stored.data[position], 0.0)
-    else:
-        found, entry = np.zeros(wanted.size, bool), np.zeros(wanted.size)
+    entry, found = _stored_entries(stored, a.indices[first], a.indices[second])
     contribution = a.data[first] * a.data[second] * entry
     value = np.bincount(pair_row, contribution, minlength=a.shape[0])
     lost = ~found
@@ -1164,7 +1394,49 @@ def _refactored(model, observed_design, weights, rows: np.ndarray) -> SparsePost
     ).posterior
 
 
-def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
+def _trace(posterior: SparsePosterior, matrix, **kwargs) -> float:
+    """``tr(Sigma_c M)`` for sparse ``M``, from ``Sigma_c`` on ``nnz(M)`` only."""
+    coo = csr_matrix(matrix).tocoo()
+    return float(coo.data @ posterior.covariance_entries(coo.row, coo.col, **kwargs))
+
+
+def _lml_gradient(model, solve, directions, variance, residual_sq, n_observed):
+    """Directional derivatives of the log marginal likelihood (Fisher's identity);
+    the formula and notation of ``gaussian._lml_gradient``.
+
+    Posterior traces come from ``Sigma_c`` on ``nnz(dQ)`` and ``nnz(Z^T Z)``. The
+    prior covariance on the constraint set is the *same* object computed with no
+    data: ``_sparse_solve`` at zero observations (``H = Q`` plus the intrinsic
+    regularisation, exact on the constraint set), read through the structural
+    rows only. So every prior structure the posterior supports (proper, intrinsic,
+    BYM2, coupled constraints) is exact, with no finite differences.
+    """
+    latent = model.precision.shape[0]
+    observed_design = model.design[model.observed]
+    x_hat = solve.mean
+    noise_term = n_observed - (
+        _trace(solve.posterior, observed_design.T @ observed_design) + residual_sq
+    ) / variance
+    needs_q = any(d_q is not None for d_q, _ in directions)
+    prior = None
+    if needs_q:
+        prior = _sparse_solve(
+            model, np.zeros(0), np.zeros(latent), final=False,
+            observed_design=csr_matrix((0, latent)),
+        ).posterior
+    out = []
+    for d_q, d_v in directions:
+        value = (d_v / variance) * noise_term
+        if d_q is not None:
+            value += (
+                _trace(solve.posterior, d_q) - _trace(prior, d_q, structural_only=True)
+                + float(x_hat @ (d_q @ x_hat)) - float(solve.nu @ (d_q @ solve.nu))
+            )
+        out.append(float(-0.5 * value))
+    return tuple(out)
+
+
+def sparse_constrained_gaussian(model: CompiledLGM, lml_directions=None) -> SparseFit:
     """Exact Gaussian posterior on the partitioned sparse solver, matching
     ``gaussian._fit_dense``: ``_sparse_solve`` with ``W = I / sigma^2``."""
     variance = float(model.likelihood.variance)
@@ -1199,17 +1471,27 @@ def sparse_constrained_gaussian(model: CompiledLGM) -> SparseFit:
     predictive_mean = np.asarray(
         model.prediction_offset + model.prediction_design @ solve.mean
     ).reshape(-1)
+    diagnostics = {
+        "latent_dimension": int(model.precision.shape[0]),
+        "observed_count": n_observed,
+        "constraint_count": int(model.constraints.shape[0]),
+        "sparse_dimension": solve.sparse_dimension,
+        "dense_dimension": solve.dense_dimension,
+    }
+    if lml_directions is not None:
+        final_residual = residual - np.asarray(observed_design @ solve.mean).reshape(-1)
+        try:
+            diagnostics["lml_gradient"] = _lml_gradient(
+                model, solve, lml_directions, variance,
+                float(final_residual @ final_residual), n_observed,
+            )
+        except NumericalError:
+            pass  # key stays absent: callers finite-difference
     return SparseFit(
         mean=solve.mean,
         log_marginal_likelihood=log_marginal_likelihood,
         predictive_mean=predictive_mean,
         block_slices=_block_slices(model),
-        diagnostics={
-            "latent_dimension": int(model.precision.shape[0]),
-            "observed_count": n_observed,
-            "constraint_count": int(model.constraints.shape[0]),
-            "sparse_dimension": solve.sparse_dimension,
-            "dense_dimension": solve.dense_dimension,
-        },
+        diagnostics=diagnostics,
         posterior=solve.posterior,
     )

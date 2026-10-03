@@ -627,6 +627,10 @@ def test_backing_fields_pairs_every_private_field_with_its_public_property():
             public_name = declared_field.name[1:]
             if isinstance(getattr(_BaseResult, public_name, None), property):
                 expected.add(public_name)
+    # The covariance field is stored as ``_covariance_store`` (possibly lazy); the
+    # ``_covariance`` materialising property and ``covariance`` read it, so both
+    # names must still be guarded.
+    expected |= {"_covariance", "covariance"}
     assert _BaseResult._BACKING_FIELDS == frozenset(expected)
 
 

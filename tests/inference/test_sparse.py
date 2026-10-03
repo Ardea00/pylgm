@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 from scipy.linalg import null_space
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, tril
+from scipy.sparse.linalg import splu
 
 from pylgm.exceptions import DenseReferenceLimitError, NumericalError
 from pylgm.inference.gaussian import _fit_dense, fit_gaussian
@@ -711,8 +712,290 @@ def test_intrinsic_field_against_a_vague_intercept_keeps_sparse_variances_exact(
                 + IID("level", index="region", precision=1.0))
     dense = model.fit(frame)
     monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    monkeypatch.setattr(gaussian_engine, "_SPARSE_GRADIENT_MIN_DIRECTIONS", 1)
     sparse = model.fit(frame)
     assert sparse._sparse_posterior is not None
     np.testing.assert_allclose(
         sparse.latent_marginals().variance, np.diag(dense.covariance), rtol=1e-6
     )
+
+
+# --- analytic LML gradient on the sparse path -------------------------------------
+
+_CHAIN = {str(i): [str(j) for j in (i - 1, i + 1) if 0 <= j < 6] for i in range(6)}
+
+
+def _gradient_frame():
+    import pandas as pd
+
+    rng = np.random.default_rng(4)
+    frame = pd.DataFrame(
+        [(str(r), t, str(g)) for r in range(6) for t in range(5) for g in range(3)],
+        columns=["region", "t", "g"],
+    )
+    frame["y"] = rng.normal(size=len(frame))
+    frame.loc[rng.random(len(frame)) < 0.2, "y"] = np.nan
+    return frame
+
+
+def _compile(model):
+    from pylgm.compiler import compile_lgm
+    from pylgm.config.schema import DataConfig
+    from pylgm.data import CanonicalPanel
+
+    prepared = _gradient_frame()
+    prepared["__pylgm_row__"] = np.arange(len(prepared), dtype=np.int64)
+    panel = CanonicalPanel.from_frame(
+        prepared, DataConfig(time="__pylgm_row__", response="y"), require_observed=False
+    )
+    return compile_lgm(model, panel)
+
+
+def _gradient_model(kind, theta):
+    """theta = (field precision, field rho, iid precision, variance)."""
+    from pylgm import IID, LGM, RW1, Besag, Fixed, Gaussian, ProperCAR
+
+    prec, rho, iid, var = map(float, theta)
+    field = {
+        "rw1": RW1("f", index="t", precision=prec),
+        "besag": Besag("f", index="region", graph=_CHAIN, precision=prec),
+        "car": ProperCAR("f", index="region", graph=_CHAIN, rho=rho, precision=prec),
+    }[kind]
+    return _compile(LGM(
+        response="y", likelihood=Gaussian(float(np.sqrt(var))),
+        predictor=Fixed("1") + field + IID("g", index="g", precision=iid),
+    ))
+
+
+def _with_extra_row(model, extra):
+    """Append a nonzero-rhs row on the field's columns (a data row if ``extra == "data"``)."""
+    from pylgm.ir.model import CompiledLGM
+
+    start = [i for i, label in enumerate(model.labels) if label.startswith("f:")][0]
+    row = np.zeros((1, model.precision.shape[0]))
+    row[0, start + 1] = 1.0
+    row[0, start + 2] = 0.5
+    return CompiledLGM(
+        y=model.y, observed=model.observed, offset=model.offset, design=model.design,
+        precision=model.precision, constraints=np.vstack([model.constraints, row]),
+        labels=model.labels, likelihood=model.likelihood, blocks=model.blocks,
+        extra_constraints=row, extra_constraint_rhs=np.array([0.8]),
+        data_constraint_count=int(extra == "data"),
+    )
+
+
+@pytest.fixture
+def force_sparse(monkeypatch):
+    import pylgm.inference.gaussian as gaussian_engine
+
+    monkeypatch.setattr(gaussian_engine, "_exceeds_dense_threshold", lambda model: True)
+    monkeypatch.setattr(gaussian_engine, "_SPARSE_GRADIENT_MIN_DIRECTIONS", 1)
+
+
+@pytest.mark.parametrize("kind", ["rw1", "besag", "car"])
+@pytest.mark.parametrize("extra", [None, "rhs", "data"])
+def test_sparse_lml_gradient_matches_central_difference_and_dense(force_sparse, kind, extra):
+    theta0 = np.array([1.3, 0.6, 0.8, 0.7])
+    h = 1e-3
+
+    def build(theta):
+        model = _gradient_model(kind, theta)
+        return model if extra is None else _with_extra_row(model, extra)
+
+    def lml(theta):
+        # Central difference of the dense LML. A vague intercept (precision 1e-6)
+        # against an intrinsic field leaves both engines' LML ~1e-8 of rounding
+        # noise, so the step is large and the tolerance 2e-5; the exact sparse-vs-
+        # dense agreement (rtol 1e-8) below is the sharp check.
+        return fit_gaussian(
+            build(theta), predictive_variances=False, allow_large_dense=True
+        ).log_marginal_likelihood
+
+    index = {"prec": 0, "rho": 1, "iid": 2, "var": 3}
+    names = ["prec", "rho", "iid", "var"] if kind == "car" else ["prec", "iid", "var"]
+    directions, fd = [], []
+    for name in names:
+        e = np.zeros(4)
+        e[index[name]] = 1.0
+        fd.append((lml(theta0 + h * e) - lml(theta0 - h * e)) / (2 * h))
+        if name == "var":
+            directions.append((None, 1.0))
+        else:  # Q is linear in each of these
+            dq = (build(theta0 + h * e).precision - build(theta0 - h * e).precision) / (2 * h)
+            directions.append((csr_matrix(dq), 0.0))
+    model = build(theta0)
+    sparse = fit_gaussian(model, lml_directions=tuple(directions))
+    assert sparse._sparse_posterior is not None
+    np.testing.assert_allclose(
+        sparse.log_marginal_likelihood, lml(theta0), rtol=1e-8
+    )
+    grad = sparse.diagnostics["lml_gradient"]
+    np.testing.assert_allclose(grad, fd, rtol=2e-5)
+    dense = fit_gaussian(model, allow_large_dense=True, lml_directions=tuple(directions))
+    assert dense._sparse_posterior is None
+    np.testing.assert_allclose(grad, dense.diagnostics["lml_gradient"], rtol=1e-8)
+
+
+def test_sparse_lml_gradient_iid_diagonal_and_absent_key(force_sparse):
+    from pylgm import IID, LGM, Fixed, Gaussian
+
+    def build(prec):
+        return _compile(LGM(
+            response="y", likelihood=Gaussian(0.9),
+            predictor=Fixed("1") + IID("g", index="g", precision=prec),
+        ))
+
+    def lml(prec):
+        return fit_gaussian(build(prec), predictive_variances=False).log_marginal_likelihood
+
+    h = 1e-5
+    dq = csr_matrix((build(1 + h).precision - build(1 - h).precision) / (2 * h))
+    (grad,) = fit_gaussian(build(1.0), lml_directions=((dq, 0.0),)).diagnostics["lml_gradient"]
+    np.testing.assert_allclose(grad, (lml(1 + h) - lml(1 - h)) / (2 * h), rtol=1e-6)
+    assert "lml_gradient" not in fit_gaussian(build(1.0)).diagnostics
+
+
+# Reference: the per-column Takahashi sweep selected_inverse replaced.
+def _reference_symbolic_fill(strict_lower) -> list:
+    """Row indices below the diagonal of each column of the Cholesky factor's
+    symbolic pattern: struct(L_j) = struct(A_j) + the structs of j's children
+    in the elimination tree, minus j. ``strict_lower`` is csc."""
+    n = strict_lower.shape[0]
+    children: list[list[int]] = [[] for _ in range(n)]
+    structure: list = [None] * n
+    for j in range(n):
+        rows = set(strict_lower.indices[strict_lower.indptr[j]:strict_lower.indptr[j + 1]].tolist())
+        for child in children[j]:
+            rows |= structure[child]
+        rows.discard(j)
+        structure[j] = rows
+        if rows:
+            children[min(rows)].append(j)
+    return [np.fromiter(sorted(rows), dtype=int, count=len(rows)) for rows in structure]
+
+
+def _selected_inverse_reference(matrix) -> csr_matrix:
+    """Entries of ``matrix⁻¹`` on the fill pattern of its factor (``L + Lᵀ``),
+    for a sparse SPD matrix — the exact selected inverse via Takahashi
+    recursion on the SuperLU fill pattern. Entries off that pattern are not
+    stored and are *not* zero in ``matrix⁻¹``; the pattern contains ``matrix``'s own.
+
+    Symmetric-mode ``splu`` (``COLAMD`` + ``SymmetricMode`` +
+    ``diag_pivot_thresh=0.0``, as ``SparseSpdFactor``) yields ``perm_r == perm_c``
+    and a unit-lower ``L`` with ``U == D·Lᵀ``. Not ``MMD_AT_PLUS_A``: on a
+    bipartite network precision (borrowers x a few hub lenders) it finds the
+    same fill but its ordering time grows quadratically (4.6s against 0.04s at
+    20 000 borrowers), and this one call dominated the whole fit. A reverse column sweep over the *symbolic* fill pattern
+    (``_symbolic_fill``) reconstructs the selected inverse exactly; SuperLU's
+    stored pattern is not enough, because it drops entries that cancel to zero.
+    Result is in the original ordering.
+    """
+    q_csc = matrix.tocsc()
+    n = q_csc.shape[0]
+    lu = splu(
+        q_csc,
+        permc_spec="COLAMD",
+        options=dict(SymmetricMode=True),
+        diag_pivot_thresh=0.0,
+    )
+    pc = lu.perm_c
+    if not np.array_equal(lu.perm_r, pc):
+        raise NumericalError("selected inversion expected a symmetric factorization")
+    diag_u = lu.U.diagonal().astype(float)
+    original = np.argsort(pc)  # permuted index p is original index original[p]
+    # Takahashi needs the SYMBOLIC fill pattern: SuperLU drops L entries that
+    # cancel to exactly zero (integer Laplacians do this), and reading Sigma as 0
+    # off the stored pattern is wrong. Build it from the elimination tree of the
+    # permuted matrix; L's value is 0 exactly where SuperLU dropped it.
+    below = _reference_symbolic_fill(tril(q_csc[original][:, original], k=-1, format="csc"))
+    lower = lu.L.tocsc()
+    stored = np.repeat(np.arange(n), np.diff(lower.indptr)) * n + lower.indices
+    order = np.argsort(stored)
+    stored, stored_values = stored[order], lower.data.astype(float)[order]
+
+    def l_values(column: int, rows: np.ndarray) -> np.ndarray:
+        wanted = column * n + rows
+        position = np.minimum(np.searchsorted(stored, wanted), stored.size - 1)
+        return np.where(stored[position] == wanted, stored_values[position], 0.0)
+
+    # Sigma lives on the lower symbolic pattern plus the diagonal, keyed col * n + row:
+    # sorted keys make every sub-block gather one searchsorted per column.
+    keys = np.sort(np.r_[
+        np.concatenate([i * n + rows for i, rows in enumerate(below)] or [np.zeros(0, int)]),
+        np.arange(n) * (n + 1),
+    ])
+    sig = np.zeros(keys.size)
+    diagonal = np.searchsorted(keys, np.arange(n) * (n + 1))
+    for i in range(n - 1, -1, -1):
+        rows = below[i]
+        if not rows.size:
+            sig[diagonal[i]] = 1.0 / diag_u[i]
+            continue
+        values = l_values(i, rows)
+        wanted = np.minimum.outer(rows, rows) * n + np.maximum.outer(rows, rows)
+        # Every pair of a column's below-rows is on the symbolic pattern (closure).
+        sub = sig[np.searchsorted(keys, wanted)]
+        sig_below = -sub @ values
+        sig[np.searchsorted(keys, i * n + rows)] = sig_below
+        sig[diagonal[i]] = 1.0 / diag_u[i] - values @ sig_below
+    rows, cols = original[keys % n], original[keys // n]
+    off = rows != cols
+    return coo_matrix(
+        (np.r_[sig, sig[off]], (np.r_[rows, cols[off]], np.r_[cols, rows[off]])),
+        shape=(n, n),
+    ).tocsr()
+
+
+def _spd_patterns():
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(7)
+
+    def laplacian(adj, ridge):
+        adj = ((adj + adj.T) > 0).astype(float)
+        adj.setdiag(0)
+        adj.eliminate_zeros()
+        return (sp.diags(np.asarray(adj.sum(axis=1)).ravel() + ridge) - adj).tocsc()
+
+    n = 400
+    random = sp.random(n, n, density=4 / n, random_state=3, format="csr")
+    random.data[:] = 1.0
+    nb, nl = 300, 6
+    lenders = np.vstack([rng.choice(nl, 3, replace=False) for _ in range(nb)])
+    inc = sp.csr_matrix(
+        (np.ones(3 * nb), (np.repeat(np.arange(nb), 3), lenders.ravel())), shape=(nb, nl)
+    )
+    hub = sp.bmat([[sp.identity(nb), inc], [inc.T, sp.identity(nl) * 3.0]])
+    path = sp.diags([1.0, 1.0], [-1, 1], shape=(200, 200))
+    side = sp.diags([1.0, 1.0], [-1, 1], shape=(18, 18))
+    grid = sp.kron(side, sp.identity(18)) + sp.kron(sp.identity(18), side)
+    yield "chain", laplacian(path, 0.5)
+    yield "grid", laplacian(grid, 0.1)
+    yield "hub", (hub.T @ hub + sp.identity(nb + nl)).tocsc()
+    yield "random", laplacian(random, 0.3)
+    yield "n1", sp.csc_matrix([[2.0]])
+    yield "diagonal", sp.diags(np.arange(1.0, 9.0)).tocsc()
+    # integer Laplacian: exact cancellation drops fill that the symbolic pattern keeps
+    yield "integer-grid", laplacian(grid, 1.0)
+
+
+@pytest.mark.parametrize("name,matrix", list(_spd_patterns()), ids=lambda v: v if isinstance(v, str) else "")
+def test_selected_inverse_matches_reference(name, matrix):
+    from pylgm.inference.sparse import selected_inverse
+
+    want = _selected_inverse_reference(matrix).tocoo()
+    got = selected_inverse(matrix).tocsr()
+    np.testing.assert_allclose(np.asarray(got[want.row, want.col]).ravel(), want.data, rtol=1e-10, atol=1e-12)
+
+
+def test_selected_inverse_matches_reference_on_cancelled_fill():
+    from pathlib import Path
+
+    from scipy.sparse import load_npz
+
+    from pylgm.inference.sparse import selected_inverse
+
+    matrix = load_npz(Path(__file__).parents[1] / "data" / "selinv_cancelled_fill.npz").tocsc()
+    want = _selected_inverse_reference(matrix).tocoo()
+    got = selected_inverse(matrix).tocsr()
+    np.testing.assert_allclose(np.asarray(got[want.row, want.col]).ravel(), want.data, rtol=1e-10, atol=1e-12)

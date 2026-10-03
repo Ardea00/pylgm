@@ -12,6 +12,7 @@ from pylgm.exceptions import (
 )
 from pylgm.inference import gaussian
 from pylgm.inference import fit_gaussian
+from pylgm.inference.sampling import LazyArray
 from pylgm.ir.model import CompiledLGM, LatentBlock
 from pylgm.likelihoods import CompiledGaussian
 
@@ -470,3 +471,129 @@ def test_constrained_gaussian_matches_independent_one_coordinate_solution() -> N
     np.testing.assert_allclose(result.mean, expected_mean)
     np.testing.assert_allclose(result.covariance, expected_covariance)
     np.testing.assert_allclose(result.log_marginal_likelihood, expected_log_marginal)
+
+
+def test_constraint_null_space_is_cached_across_hyperparameter_changes() -> None:
+    from scipy.linalg import null_space
+
+    gaussian._null_space_cached.cache_clear()
+
+    def fit(variance: float, scale: float):
+        model = CompiledLGM(
+            y=np.array([1.0, -1.0, 0.5]),
+            observed=np.array([True, True, True]),
+            offset=np.zeros(3),
+            design=csr_matrix(np.eye(3)),
+            precision=csr_matrix(scale * (3 * np.eye(3) - np.ones((3, 3)) + 0.1 * np.eye(3))),
+            constraints=np.ones((1, 3)),
+            labels=("a", "b", "c"),
+            likelihood=CompiledGaussian(float(np.sqrt(variance))),
+            blocks=(),
+        )
+        return model, fit_gaussian(model)
+
+    model, first = fit(1.0, 1.0)
+    _, second = fit(2.0, 3.0)
+
+    info = gaussian._null_space_cached.cache_info()
+    assert (info.misses, info.hits) == (1, 1)
+    basis = gaussian._constraint_null_space(model.constraints, 3)
+    assert not basis.flags.writeable
+    # ponytail: same SVD routine on the same normalised row, so exact equality.
+    np.testing.assert_array_equal(basis, null_space(np.ones((1, 3)) / np.sqrt(3)))
+    assert first.mean.shape == second.mean.shape == (3,)
+
+
+def test_covariance_is_materialised_lazily_and_matches_the_eager_fit() -> None:
+    model = CompiledLGM(
+        y=np.array([1.0, -0.5, 2.0]),
+        observed=np.array([True, True, True]),
+        offset=np.zeros(3),
+        design=csr_matrix(np.eye(3)),
+        precision=csr_matrix(2.0 * np.eye(3)),
+        constraints=np.ones((1, 3)),
+        labels=("a", "b", "c"),
+        likelihood=CompiledGaussian(0.5),
+        blocks=(),
+    )
+    lazy = fit_gaussian(model, predictive_variances=False)
+    assert isinstance(lazy._covariance_store, LazyArray)  # a fit that never reads it
+    assert lazy._sampler.factor._compute is not None  # nor the factor
+    eager = fit_gaussian(model)
+    np.testing.assert_allclose(lazy.covariance, eager.covariance, rtol=1e-12, atol=1e-14)
+    assert isinstance(lazy._covariance_store, np.ndarray)
+    assert not lazy.covariance.flags.writeable
+
+
+def _chain_model(q, variance, constrained, n=12, observed_count=9, extra=None):
+    """``extra``: None, or "rhs"/"data" for one nonzero-rhs structural/data row."""
+    rng = np.random.default_rng(3)
+    block_rows = np.ones((1, n)) if constrained else np.empty((0, n))
+    kwargs = {}
+    if extra is not None:
+        row = np.zeros((1, n))
+        row[0, :3] = 1.0
+        block_rows = np.vstack([block_rows, row])
+        kwargs = {"extra_constraints": row, "extra_constraint_rhs": np.array([0.8]),
+                  "data_constraint_count": int(extra == "data")}
+    return CompiledLGM(
+        y=rng.normal(size=n),
+        observed=np.arange(n) < observed_count,
+        offset=0.1 * rng.normal(size=n),
+        design=csr_matrix(np.eye(n) + 0.2 * np.eye(n, k=1)),
+        precision=csr_matrix(q),
+        constraints=block_rows,
+        labels=tuple(str(i) for i in range(n)),
+        likelihood=CompiledGaussian(float(np.sqrt(variance))),
+        blocks=(),
+        **kwargs,
+    )
+
+
+def _lap(n):
+    w = np.eye(n, k=1) + np.eye(n, k=-1)
+    return np.diag(w.sum(1)), w
+
+
+def _gradient_case(kind):
+    """(Q(t) builder, dQ at t=0, constrained) per prior structure."""
+    d, w = _lap(12)
+    if kind == "iid":
+        return (lambda t: (2.0 + t) * np.eye(12)), csr_matrix(np.eye(12)), False
+    if kind == "rw1":  # singular, sum-to-zero constrained
+        return (lambda t: (1.5 + t) * (d - w)), csr_matrix(d - w), True
+    return (lambda t: d - (0.4 + t) * w), csr_matrix(-w), False  # proper CAR in rho
+
+
+@pytest.mark.parametrize("kind", ["iid", "rw1", "car"])
+@pytest.mark.parametrize("d_variance", [0.0, 1.0])
+@pytest.mark.parametrize("with_q", [True, False])
+@pytest.mark.parametrize("extra", [None, "rhs", "data"])
+def test_lml_gradient_matches_central_difference(kind, d_variance, with_q, extra) -> None:
+    build, d_q, constrained = _gradient_case(kind)
+    if not with_q and d_variance == 0.0:
+        pytest.skip("zero direction")
+    d_q = d_q if with_q else None
+    base_v, h = 0.7, 1e-5
+
+    def lml(t):
+        model = _chain_model(build(t * with_q), base_v + t * d_variance, constrained, extra=extra)
+        return fit_gaussian(model, predictive_variances=False).log_marginal_likelihood
+
+    result = fit_gaussian(
+        _chain_model(build(0.0), base_v, constrained, extra=extra),
+        lml_directions=((d_q, d_variance),),
+    )
+    (grad,) = result.diagnostics["lml_gradient"]
+    assert type(grad) is float
+    np.testing.assert_allclose(grad, (lml(h) - lml(-h)) / (2 * h), rtol=1e-6)
+
+
+def test_lml_gradient_key_and_validation() -> None:
+    direction = ((csr_matrix(np.eye(12)), 1.0),)
+    model = _chain_model(2 * np.eye(12), 0.7, False)
+    assert "lml_gradient" in fit_gaussian(model, lml_directions=direction).diagnostics
+    assert "lml_gradient" not in fit_gaussian(model).diagnostics
+    for bad in ([(None, 1.0)], ((np.eye(12), 1.0),), ((None, "x"),)):
+        with pytest.raises(TypeError, match="lml_directions"):
+            fit_gaussian(model, lml_directions=bad)
