@@ -442,10 +442,11 @@ def _fit_dense(
     )
 
 
-# ponytail: off by default. The sparse gradient is exact but its two Takahashi
-# sweeps (selected_inverse is a per-column Python loop) cost more than the 2d
-# plain fits finite differences need below ~7 hyperparameters, and far more on
-# high-fill graphs. Turn on once selected_inverse is vectorised/supernodal.
+# ponytail: off by default. The sparse gradient is exact; its two Takahashi
+# sweeps (supernodal selected_inverse) now cost about the same as the 2d plain
+# fits finite differences need at 3 hyperparameters on a 20k-latent RW1+IID fit
+# (~0.14s against ~0.17s) and about half on a high-fill random graph; flip once
+# a margin at typical hyperparameter counts is measured on real models.
 _SPARSE_LML_GRADIENT = False
 
 
