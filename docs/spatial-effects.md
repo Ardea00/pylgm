@@ -12,6 +12,7 @@ supply-chain networks as readily as adjacency.
 | [`BYM2`](#bym2-spatial-effect) | symmetric | `phi` | You want to split structured vs unstructured variance interpretably |
 | [`SAR`](#directed-spatial-autoregressive-sar-effect) | **directed** | `rho` | The relation is asymmetric — who is exposed to whom |
 | [`DynamicSpatialPanel`](#dynamic-spatial-panel-sdpd) | **directed, per period** | `rho`, `gamma`, `eta` | The network itself changes over time |
+| [`Matern`](#matern-spde) | none: point coordinates on a triangle mesh | `range`, `sigma` | Observations sit at continuous locations, not in areal units |
 
 The first three are the **CAR family** and require a *symmetric* graph. `SAR`
 and `DynamicSpatialPanel` do not: they build the precision from an
@@ -432,6 +433,138 @@ predictor:
   effects:
     - {name: influence, type: sar, index: bank, rho: 0.5, precision: 1.0, graph: {...}}
 ```
+
+## Matérn (SPDE)
+
+**The idea.** The effects above need a neighbour graph. Many spatial data
+come as *points* instead (monitoring stations, house sales, field plots), and
+what you want there is a smooth surface whose correlation decays with
+distance. The classical choice is a Matérn Gaussian field. Its dense
+`n × n` covariance gets expensive quickly. The SPDE trick avoids it: cover the
+domain with a triangle mesh, describe the field by its values at the mesh
+vertices, and interpolate linearly inside each triangle. Those vertex values
+then have a **sparse** precision matrix (each vertex talks only to its
+neighbours' neighbours), so the field fits through the same sparse machinery
+as a CAR effect. Two knobs are user-facing: `range`, the distance at which
+correlation has fallen to about 0.14, and `sigma`, the field's marginal
+standard deviation.
+
+```python
+import numpy as np
+from pylgm import Fixed, Gaussian, Hyperparameter, LGM, Matern
+
+# Mesh: here a regular grid, extended one range beyond the data on [0, 6]^2.
+xs = np.arange(-1.5, 7.5 + 1e-9, 0.3)
+vertices = np.array([[x, y] for x in xs for y in xs])   # (m, 2)
+
+model = LGM(
+    response="z",
+    predictor=Fixed("1") + Matern(
+        "field", coordinates=("x", "y"), vertices=vertices,   # triangles: Delaunay by default
+        range=Hyperparameter("field.range", initial=3.0),
+        sigma=Hyperparameter("field.sigma", initial=0.5),
+    ),
+    likelihood=Gaussian(Hyperparameter("noise", initial=0.5)),
+)
+result = model.fit(frame)                    # frame has columns x, y, z
+result.hyperparameters["field.range"]
+result.predict(new_points)                   # any (x, y) inside the mesh
+```
+
+**Inputs.** `coordinates` names the two data columns that locate each row.
+`vertices` is an `(m, 2)` array. `triangles` is an optional `(T, 3)` integer
+array of vertex indices, and defaults to `scipy.spatial.Delaunay(vertices)`.
+`range` and `sigma` each take a positive float (fixed) or a `Hyperparameter`
+(log scale; estimated by empirical Bayes or integrated with
+`hyperparameters="integrate"`). **Outputs.** The latent block has one entry
+per mesh vertex, labelled `field:0` … `field:{m-1}`. A row's design entry is
+the barycentric (P1) weights of its point in its triangle: at most three
+non-zeros, summing to one. A point outside the mesh raises an error, at fit
+and at predict time. The mesh is fixed when the effect is declared, so
+`predict` can score any new location inside it.
+
+**Formal statement.** The field `u(s)`, `s ∈ Ω ⊂ ℝ²`, is the stationary
+solution of
+
+$$
+(\kappa^2 - \Delta)\,\big(\tau\, u(s)\big) = \mathcal{W}(s), \qquad
+\partial_n u = 0 \ \text{on}\ \partial\Omega,
+$$
+
+where `𝒲` is Gaussian white noise and the boundary condition is homogeneous
+Neumann. This is the `α = 2` case of the Matérn SPDE. On `ℝ²` its solution has
+the Matérn covariance with smoothness `ν = α − d/2 = 1`:
+
+$$
+\operatorname{Cov}\big(u(s), u(s')\big) = \sigma^2\, (\kappa r)\, K_1(\kappa r),
+\quad r = \lVert s - s' \rVert, \qquad
+\sigma^2 = \frac{1}{4\pi\kappa^2\tau^2}, \qquad
+\rho = \frac{\sqrt{8\nu}}{\kappa} = \frac{\sqrt 8}{\kappa}.
+$$
+
+`K₁` is the modified Bessel function of the second kind. The correlation at
+`r = ρ` is `√8·K₁(√8) ≈ 0.140`. The discretization is Galerkin with continuous
+piecewise-linear hat functions `φ_k`, `u(s) = Σ_k w_k φ_k(s)`, the stiffness
+`G_kl = ∫ ∇φ_k·∇φ_l` and the **lumped** (diagonal) mass `C_kk = ∫ φ_k`. The
+weights then have precision
+
+$$
+Q = \tau^2\left(\kappa^4 C + 2\kappa^2 G + G C^{-1} G\right),
+$$
+
+which is sparse because `C` is diagonal. Lumping replaces the consistent mass
+matrix so that `C⁻¹` stays sparse. Internally `pylgm` maps `(range, sigma)` to
+`κ = √8 / range` and `τ² = 1 / (4π κ² σ²)`. The construction is Lindgren, Rue &
+Lindström (2011, JRSS-B). *That citation is from memory and has not been
+checked here.* What *is* checked, numerically, is the formula above:
+`tests/test_spde_matern.py` compares `Q⁻¹` with the analytic covariance on a
+regular mesh of `[−4, 4]²` with `range = 1` and `σ = 1.5`, at the centre node
+(four ranges from every edge):
+
+| mesh size `h` | max \|`Q⁻¹` − Matérn\| / σ² over `0 < r ≤ 2·range` | centre variance / σ² |
+| --- | --- | --- |
+| range / 5 | 2.7 % | 1.094 |
+| range / 10 | 1.7 % | 1.039 |
+| range / 20 (not in the test suite) | 0.7 % | 1.013 |
+
+The error falls as the mesh is refined. These three points are all that was
+measured; no convergence order is claimed. A mesh edge of about `range / 5`
+or finer is a reasonable default. A coarser mesh cannot resolve the field
+between vertices, and a Gaussian fit then pushes that unresolved variation
+into the observation noise. On one simulated data set (`n = 300`, true range
+1.5, σ = 1, noise sd 0.3) the estimated noise sd was 0.42 at `h = range/2.5`,
+0.34 at `h = range/5` and 0.26 at `h = range/10`.
+
+**Estimation.** `range` and `sigma` change only the precision, never the
+design, so the empirical-Bayes optimizer takes their gradient from the
+engine's analytic LML derivative wherever the engine provides one: the dense
+Gaussian engine, the sparse Gaussian engine (with at least three estimated
+hyperparameters), and the dense Laplace engine. Elsewhere it falls back to
+finite differences, notably on the sparse Laplace engine (1000 or more latent
+entries). Meshes beyond the dense-reference guard go through the sparse
+solver. The prediction design is rebuilt densely per call, as for every other
+effect. Individually, `range` and `sigma` are only weakly identified from a
+single realization; their ratio `σ²/ρ²` is the better-determined quantity.
+That is a property of Matérn fields, not of this implementation (stated
+without a checked reference).
+
+**Known limitations.**
+
+- **`α = 2` only, so `ν = 1`.** No other smoothness is available. A rougher
+  (exponential-like, `ν = 1/2`) or smoother field is out of scope.
+- **`d = 2` only:** planar coordinates. There are no sphere or 1-D meshes;
+  project longitude/latitude first.
+- **Boundary variance inflation.** The Neumann condition reflects the field at
+  the mesh edge, so the variance there is larger than `σ²`. Measured on the
+  `h = range/10` mesh, relative to the interior: about **2×** on an edge,
+  about **4.2×** in a corner, +13 % half a range in from an edge, and about +1 %
+  one range in. **Extend the mesh at least one range beyond the data,** as in
+  the example. The extension only adds vertices, which stay cheap because `Q`
+  is sparse.
+- No anisotropy, no non-stationary `κ(s)` or `τ(s)`, no PC prior bound to the
+  mesh, and no YAML (`type:`) frontend. `Matern` has no `index`, so it
+  cannot be wrapped in `Weighted`/`Replicated`/`Grouped` or `Shared` across a
+  `Joint` model.
 
 ## One spatial field per period: `Replicated` and `Grouped`
 

@@ -49,7 +49,7 @@ def _validate_max_driver_rows(max_driver_rows: int | None) -> int | None:
 # Every attribute an effect or likelihood uses to name a data column. Wrappers
 # (Weighted, Replicated, Grouped) nest the wrapped effect under ``.effect``.
 _COLUMN_FIELDS = ("index", "unit", "space", "time", "over", "by", "replicate", "group",
-                  "trials", "event", "entry")
+                  "trials", "event", "entry", "coordinates")
 
 
 def _declared_columns(item) -> set[str]:
