@@ -362,7 +362,7 @@ $Q = \tau^2(\kappa^4 C + 2\kappa^2 G + G C^{-1} G)$. See
 | Claim | Evidence |
 |---|---|
 | The FEM matrices are right | `C` and `G` against hand-computed values on the unit square; `G 1 = 0`; `Q` symmetric positive definite (`tests/test_spde_matern.py`). |
-| The discrete covariance converges to the analytic Matérn $\sigma^2 (\kappa r) K_1(\kappa r)$ | Regular mesh, interior node, $r \le 2\,$range, error relative to $\sigma^2$: 2.67% at $h = $ range/5, 1.71% at range/10. Independently, on a jittered (non-regular) Delaunay mesh: 6.5% at range/5, 2.7% at range/10, variance ratio 1.12 then 1.02. No convergence order is claimed. |
+| The discrete covariance converges to the analytic Matérn $\sigma^2 (\kappa r) K_1(\kappa r)$ | Regular mesh, interior node, $r \le 2\,$range, error relative to $\sigma^2$: 2.67% at $h = $ range/5, 1.71% at range/10. In a scratch run outside the suite, on a jittered (non-regular) Delaunay mesh: 6.5% at range/5, 2.7% at range/10, variance ratio 1.12 then 1.02. No convergence order is claimed. |
 | The design is P1 interpolation | Barycentric weights sum to 1 and reproduce linear functions (1e-12); a point outside the mesh raises. |
 | Range and sigma are identified | Data simulated from the analytic covariance (not from `Q`), range 1.5, sigma 1.0, n = 300: Gaussian fit gives 1.54 / 1.04, Poisson 1.75 / 1.07. |
 | The EB gradient is analytic on the dense paths | Matches a central difference to 1.6e-8 (Gaussian) and 3.1e-8 (Poisson), with no extra fits. |

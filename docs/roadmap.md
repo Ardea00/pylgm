@@ -10,7 +10,7 @@ For the precise semantics of each shipped feature, follow the links into the
 See [research status](research-status.md) for what is and is not verified.
 
 - **Matérn (SPDE) spatial fields** — `Matern` on a triangle mesh
-  ($lpha = 2$, $d = 2$), with `range` and `sigma` fixed or estimated. See
+  ($\alpha = 2$, $d = 2$), with `range` and `sigma` fixed or estimated. See
   [spatial effects](spatial-effects.md).
 - **Estimable group correlation** — `AR1Structure(rho=Hyperparameter(...))`
   inside `Grouped`, jointly with the inner effect's hyperparameters.
