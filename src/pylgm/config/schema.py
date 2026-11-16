@@ -53,7 +53,7 @@ _OPTIONAL_FIELDS = (
     "index", "space", "time", "unit", "columns", "precision", "graph",
     "graph_file", "graphs", "graph_files", "rho", "phi", "scale", "group",
     "period", "order", "ridge", "kernel", "interaction", "gamma", "eta",
-    "over", "effect", "structure", "correlation", "lkj",
+    "over", "effect", "structure", "correlation", "lkj", "by",
 )
 
 
@@ -84,9 +84,12 @@ class StructureConfig(StrictModel):
         return self
 # `grouped` wraps another effect instead of indexing a column, so its fields are
 # the wrapper's own: the group column and the between-group structure.
-_WRAPPER_EFFECTS = ("grouped",)
+_WRAPPER_EFFECTS = ("grouped", "weighted", "replicated")
 _ALLOWED_FIELDS = {
     "grouped": {"over", "effect", "structure"},
+    "replicated": {"over", "effect"},
+    "weighted": {"by", "effect"},
+    "copy": {"index", "scale"},
     "iid": {"index", "precision"},
     "rw1": {"index", "precision", "scale"},
     "rw2": {"index", "precision", "scale"},
@@ -112,7 +115,8 @@ class EffectConfig(StrictModel):
     name: str = ""
     type: Literal["iid", "rw1", "rw2", "besag", "proper_car", "bym2", "sar",
                   "ar1", "seasonal", "spacetime", "dynamicspatialpanel",
-                  "midas", "midas_parametric", "grouped", "correlated"]
+                  "midas", "midas_parametric", "grouped", "correlated",
+                  "replicated", "weighted", "copy"]
     # Most effects are indexed by a single column; correlated uses a list of
     # k >= 2 columns, MIDAS a list of HF lag columns instead, spacetime a (space, time) pair, and dynamicspatialpanel a
     # (unit, time) pair. Which fields each type accepts is _ALLOWED_FIELDS above.
@@ -136,7 +140,9 @@ class EffectConfig(StrictModel):
     graph_files: dict | None = None
     rho: float | None = None
     phi: float | None = None
-    scale: bool | None = None
+    # rw1/rw2/besag/spacetime: scale the precision (bool). copy: the fixed
+    # multiplier (number).
+    scale: bool | float | None = None
     # DynamicSpatialPanel temporal (gamma) and spatio-temporal-diffusion (eta)
     # coefficients; both default to 0.0 in the builder.
     gamma: float | None = None
@@ -151,6 +157,7 @@ class EffectConfig(StrictModel):
     # `grouped` family: the group column, the effect being copied, and the
     # precision tying the copies together. The inner spec omits `name`.
     over: str | None = None
+    by: str | None = None
     effect: "EffectConfig | None" = None
     structure: StructureConfig | None = None
     order: int | None = None
@@ -168,6 +175,14 @@ class EffectConfig(StrictModel):
             )
         if self.type in _WRAPPER_EFFECTS:
             return self._validate_wrapper()
+        if self.type == "copy":
+            if self.index is None or isinstance(self.index, tuple):
+                raise ValueError("index (a single column) is required for effect type 'copy'")
+            if isinstance(self.scale, bool):
+                raise ValueError("scale must be a number for effect type 'copy'")
+            return self
+        if self.scale is not None and not isinstance(self.scale, bool):
+            raise ValueError(f"scale must be true or false for effect type {self.type!r}")
         if self.type in _MIDAS_EFFECTS:
             return self._validate_midas()
         if self.type == "spacetime":
@@ -197,12 +212,10 @@ class EffectConfig(StrictModel):
         return self
 
     def _validate_wrapper(self) -> "EffectConfig":
-        if self.over is None or self.effect is None or self.structure is None:
-            raise ValueError(
-                f"effect type {self.type!r} requires over, effect and structure"
-            )
-        if self.effect.type in _WRAPPER_EFFECTS:
-            raise ValueError(f"effect type {self.type!r} must not wrap another wrapper")
+        required = {"grouped": ("over", "effect", "structure"),
+                    "replicated": ("over", "effect"), "weighted": ("by", "effect")}[self.type]
+        if any(getattr(self, f) is None for f in required):
+            raise ValueError(f"effect type {self.type!r} requires {', '.join(required)}")
         if self.effect.name:
             raise ValueError(
                 f"the inner effect of {self.name!r} must not set its own name; "
@@ -261,14 +274,22 @@ def build_structure(config: StructureConfig, base_dir: Path) -> object:
 
 def build_effect(config: EffectConfig, base_dir: Path) -> object:
     from pylgm.effects import (
-        AR1, IID, RW1, RW2, SAR, Besag, BYM2, Correlated, DynamicSpatialPanel, Grouped, MIDAS,
-        MIDASParametric, ProperCAR, Seasonal, SpaceTime, load_graph_file,
+        AR1, IID, RW1, RW2, SAR, Besag, BYM2, Copy, Correlated, DynamicSpatialPanel, Grouped,
+        MIDAS, MIDASParametric, ProperCAR, Replicated, Seasonal, SpaceTime, Weighted,
+        load_graph_file,
     )
 
-    if config.type == "grouped":
-        # The inner spec carries no name of its own; `Grouped.name` is the
-        # wrapper's, and that is the name hyperparameters are keyed on.
+    if config.type == "copy":
+        return Copy(config.name, config.index, 1.0 if config.scale is None else config.scale)
+    if config.type in _WRAPPER_EFFECTS:
+        # The inner spec carries no name of its own; the wrapper's `name` is the
+        # inner effect's, and that is the name hyperparameters are keyed on.
+        # Which wrappers may nest is the Python constructors' call, not ours.
         inner = build_effect(config.effect.model_copy(update={"name": config.name}), base_dir)
+        if config.type == "weighted":
+            return Weighted(inner, config.by)
+        if config.type == "replicated":
+            return Replicated(inner, config.over)
         return Grouped(inner, config.over, build_structure(config.structure, base_dir))
 
     if config.type in _SIMPLE_EFFECTS:
