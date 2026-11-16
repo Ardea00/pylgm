@@ -43,6 +43,7 @@ from pylgm import (
     Hyperparameter,
     IID,
     LGM,
+    Matern,
     Poisson,
     ProperCAR,
     Replicated,
@@ -87,11 +88,18 @@ def _frame(seed=0, n_rows=90):
         # column whose levels are meant to align with a graph, so this is
         # additive; no existing row references it.
         "group": rng.choice(["g0", "g1", "g2"], n_rows),
+        # Matern locations, drawn last so no existing column's draws shift.
+        "sx": rng.uniform(0.0, 1.0, n_rows),
+        "sy": rng.uniform(0.0, 1.0, n_rows),
     })
 
 
 FRAME = _frame()
 PANEL = CanonicalPanel.from_frame(FRAME, DataConfig(time="row", response="y", panel=()))
+
+MATERN_MESH = np.array(
+    [[x, y] for x in np.linspace(-0.2, 1.2, 6) for y in np.linspace(-0.2, 1.2, 6)]
+)
 
 _EFFECTIVENESS_GRAPH = {"g0": ["g1"], "g1": ["g0", "g2"], "g2": ["g1"]}
 
@@ -204,6 +212,14 @@ MODEL_TABLE = [
             Fixed("1") + SAR("u", index="i", graph=RING_GRAPH, rho=_rho(), precision=_tau())
             + Copy("u", index="j", scale=2.0)
         ),
+    ),
+    (
+        "Matern(range,sigma)",
+        _model(Fixed("1") + Matern(
+            "u", ("sx", "sy"), MATERN_MESH,
+            range=Hyperparameter("u.range", initial=0.5),
+            sigma=Hyperparameter("u.sigma", initial=1.0),
+        )),
     ),
     (
         "Replicated(IID(tau))",

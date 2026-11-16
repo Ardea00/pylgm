@@ -48,6 +48,7 @@ class PredictionContext:
     order: ``("fixed", ModelSpec)``,
     ``("structured", (block_name, index_column, labels_tuple))``,
     ``("midas", (block_name, columns_tuple))``,
+    ``("matern", (block_name, coordinates, vertices, triangles))``,
     ``("midas_parametric", (block_name, columns_tuple, kernel, theta))``,
     ``("spacetime", (block_name, space, time, area_labels, time_labels))``,
     ``("dynamic_spatial_panel", (block_name, unit, time, unit_labels, time_labels))``,
@@ -429,6 +430,21 @@ def _correlated_block(payload, new_data: pd.DataFrame) -> np.ndarray:
     return out
 
 
+def _matern_block(payload, new_data: pd.DataFrame) -> np.ndarray:
+    """``Matern``: each row's barycentric weights in its fitted-mesh triangle."""
+    from pylgm.effects.spde import barycentric_design
+
+    name, coordinates, vertices, triangles = payload
+    missing = [column for column in coordinates if column not in new_data.columns]
+    if missing:
+        raise ValueError(
+            f"predict() new_data is missing coordinate columns {missing!r} required by the "
+            f"{name!r} block"
+        )
+    locations = new_data[list(coordinates)].to_numpy(dtype=float)
+    return barycentric_design(vertices, triangles, locations).toarray()
+
+
 def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.ndarray:
     """Rebuild the dense predict-time design block for one ``(kind, payload)`` entry."""
     kind, payload = entry
@@ -440,6 +456,8 @@ def _design_block_for(entry: tuple[str, object], new_data: pd.DataFrame) -> np.n
         return _correlated_block(payload, new_data)
     elif kind == "midas":
         return _midas_block(payload, new_data)
+    elif kind == "matern":
+        return _matern_block(payload, new_data)
     elif kind == "midas_parametric":
         return _midas_parametric_block(payload, new_data)
     elif kind == "spacetime":

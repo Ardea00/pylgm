@@ -29,6 +29,7 @@ from pylgm.effects import (
     Fixed,
     Grouped,
     IID,
+    Matern,
     MIDAS,
     MIDASParametric,
     ProperCAR,
@@ -77,6 +78,7 @@ from pylgm.effects.bym2 import (
     bym2_spectrum,
 )
 from pylgm.effects.proper_car import car_rho_interval
+from pylgm.effects.spde import build_matern, matern_parts, matern_precision
 from pylgm.effects.scaling import sorbye_rue_scale
 from pylgm.exceptions import (
     CompilationError,
@@ -761,6 +763,8 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         for coeff in (effect.rho, effect.gamma, effect.eta):
             if isinstance(coeff, Hyperparameter):
                 found.append(coeff)
+    if isinstance(effect, Matern):
+        found.extend(p for p in (effect.range, effect.sigma) if isinstance(p, Hyperparameter))
     if isinstance(effect, MIDASParametric):
         for shape in (effect.shape1, effect.shape2):
             if isinstance(shape, Hyperparameter):
@@ -1350,6 +1354,29 @@ def _append_family_blocks(
             )
             if shape.prior is not None:
                 parameter_priors[shape.name] = shape.prior
+        return
+    if isinstance(effect, Matern):
+        # No `.precision` either: (range, sigma) set the whole precision.
+        parts = matern_parts(effect.vertices, effect.triangles)
+        template = _compiled_block(
+            effect.name, build_matern, frame, effect.name, effect.coordinates,
+            effect.vertices, effect.triangles, parts,
+            _resolved_precision(effect.range), _resolved_precision(effect.sigma),
+        )
+        estimated = [p for p in (effect.range, effect.sigma) if isinstance(p, Hyperparameter)]
+        if not estimated:
+            scalable.append(ScalableBlock(template, None, 1.0))
+            return
+
+        def build(values, parts=parts, range_=effect.range, sigma=effect.sigma):
+            def at(p):
+                return values[p.name] if isinstance(p, Hyperparameter) else p
+            return matern_precision(parts, at(range_), at(sigma))
+
+        scalable.append(ParametricBlock(template, tuple(p.name for p in estimated), build))
+        for hp in estimated:
+            parameter_names.append(hp.name)
+            parameter_bounds[hp.name] = _log_bounds(hp)
         return
     precision = effect.precision
     optimized = isinstance(precision, Hyperparameter)
@@ -1976,6 +2003,8 @@ def _prediction_entry(effect, model: "LGM", panel: CanonicalPanel, block: Latent
     if isinstance(effect, Correlated):
         return ("correlated", (effect.name, effect.index,
                                correlated_levels(panel.frame, effect.index)))
+    if isinstance(effect, Matern):
+        return ("matern", (effect.name, effect.coordinates, effect.vertices, effect.triangles))
     if isinstance(effect, MIDAS):
         # No index/one-hot: the design is the raw lag columns, rebuilt directly.
         return ("midas", (effect.name, effect.columns))

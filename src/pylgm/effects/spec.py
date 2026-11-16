@@ -357,6 +357,54 @@ class SAR(_ComposableEffect):
         object.__setattr__(self, "graph", canonical_directed_graph(self.graph))
 
 
+@dataclass(frozen=True, eq=False)
+class Matern(_ComposableEffect):
+    """A continuously-indexed Matérn spatial field (SPDE / P1 finite elements).
+
+    The field solves ``(kappa^2 - Delta)(tau x) = W`` on the triangulated domain
+    with homogeneous Neumann boundary conditions -- the ``alpha = 2`` SPDE, so
+    ``d = 2`` and smoothness ``nu = 1`` only. Its P1 weights on the mesh
+    ``vertices`` have precision ``tau^2 (kappa^4 C + 2 kappa^2 G + G C^{-1} G)``
+    with the **lumped** (diagonal) mass matrix ``C`` and stiffness ``G``.
+
+    ``coordinates`` names the two data columns locating each row; its design row
+    is the point's barycentric weights in its mesh triangle, and a point outside
+    the mesh is an error. ``triangles`` defaults to the Delaunay triangulation of
+    ``vertices``. ``range`` is ``sqrt(8 nu) / kappa`` (correlation about 0.14
+    there) and ``sigma`` the marginal standard deviation,
+    ``sigma^2 = 1 / (4 pi kappa^2 tau^2)``; either may be a ``Hyperparameter``.
+
+    The Neumann boundary inflates the variance near the mesh edge (about 2x on
+    an edge, 4x in a corner): extend the mesh well beyond the data, by at least
+    one range. See docs/spatial-effects.md.
+    """
+
+    name: str
+    coordinates: tuple
+    vertices: object
+    range: float | Hyperparameter
+    sigma: float | Hyperparameter = 1.0
+    triangles: object = None
+
+    def __post_init__(self) -> None:
+        from pylgm.effects.spde import mesh_arrays
+
+        object.__setattr__(self, "name", _non_empty_string(self.name, "name"))
+        coordinates = tuple(self.coordinates) if not isinstance(self.coordinates, str) else ()
+        if len(coordinates) != 2:
+            raise ValueError("Matern coordinates must name exactly two columns (x, y)")
+        for column in coordinates:
+            _non_empty_string(column, "coordinates")
+        object.__setattr__(self, "coordinates", coordinates)
+        for field_name in ("range", "sigma"):
+            object.__setattr__(
+                self, field_name, _positive_precision(getattr(self, field_name), field_name)
+            )
+        vertices, triangles = mesh_arrays(self.vertices, self.triangles)
+        object.__setattr__(self, "vertices", vertices)
+        object.__setattr__(self, "triangles", triangles)
+
+
 @dataclass(frozen=True)
 class DynamicSpatialPanel(_ComposableEffect):
     """A dynamic spatial panel (SDPD): per-period directed networks ``W_t`` with
@@ -778,6 +826,7 @@ EffectSpec: TypeAlias = (
     | Besag
     | ProperCAR
     | SAR
+    | Matern
     | DynamicSpatialPanel
     | BYM2
     | Copy
@@ -835,6 +884,7 @@ __all__ = [
     "Fixed",
     "Grouped",
     "IID",
+    "Matern",
     "MIDAS",
     "MIDASParametric",
     "Predictor",
