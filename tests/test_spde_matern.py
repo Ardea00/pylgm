@@ -184,7 +184,7 @@ def test_empirical_bayes_recovers_range_and_sigma_and_predicts(family):
     result = LGM("z", likelihood, Fixed("1") + _matern(), time="t").fit(frame, engine=engine)
 
     # Loose: a factor of 2 on the range, 1.5 on sigma. Measured (seed 2):
-    # Gaussian range 1.54, sigma 1.04; Poisson range 1.33, sigma 1.03.
+    # Gaussian range 1.54, sigma 1.04 (noise 0.34, true 0.3); Poisson range 1.75, sigma 1.07.
     estimates = result.hyperparameters
     assert TRUE_RANGE / 2 < estimates["s.range"] < 2 * TRUE_RANGE
     assert TRUE_SIGMA / 1.5 < estimates["s.sigma"] < 1.5 * TRUE_SIGMA
@@ -212,6 +212,54 @@ def test_large_mesh_takes_the_sparse_path():
     result = LGM("z", Gaussian(0.5), Fixed("1") + effect, time="t").fit(frame)
     assert result._sparse_posterior is not None
     assert result.diagnostics["sparse_dimension"] == len(points)
+
+
+def test_poisson_on_a_large_mesh_takes_the_sparse_laplace_path(monkeypatch):
+    points, triangles = _grid(0.0, 6.4, 0.2)  # 33^2 = 1089 nodes >= sparse Laplace switch
+    rng = np.random.default_rng(6)
+    locations = rng.uniform(0.5, 5.9, (150, 2))
+    frame = pd.DataFrame({"x": locations[:, 0], "y": locations[:, 1], "t": np.arange(150),
+                          "z": rng.poisson(2.0, 150).astype(float)})
+    effect = Matern("s", ("x", "y"), points, range=1.5, sigma=0.5, triangles=triangles)
+    dense = {"calls": 0}
+    original = laplace._fit_laplace_dense
+
+    def counting(*args, **kwargs):
+        dense["calls"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(laplace, "_fit_laplace_dense", counting)
+    result = LGM("z", Poisson(), Fixed("1") + effect, time="t").fit(frame, engine="laplace")
+    assert dense["calls"] == 0
+    np.testing.assert_allclose(
+        result.predict(frame).predictive_mean, result.predictive_mean, rtol=1e-10, atol=1e-10
+    )
+
+
+def test_integrate_and_predict_outside_the_mesh():
+    vertices, _ = _random_mesh()
+    rng = np.random.default_rng(7)
+    locations = rng.uniform(0, 1, (60, 2))
+    frame = pd.DataFrame({"x": locations[:, 0], "y": locations[:, 1], "t": np.arange(60),
+                          "z": np.sin(3 * locations[:, 0]) + 0.3 * rng.normal(size=60)})
+    effect = Matern("s", ("x", "y"), vertices, range=Hyperparameter("s.range", initial=0.5),
+                    sigma=1.0)
+    result = LGM("z", Gaussian(0.3), Fixed("1") + effect, time="t").fit(
+        frame, hyperparameters="integrate"
+    )
+    assert np.isfinite(result.predict(frame).predictive_mean).all()
+    outside = pd.DataFrame({"x": [1.5], "y": [0.5], "t": [0]})
+    with pytest.raises(ValueError, match="outside the Matern mesh"):
+        result.predict(outside)
+
+
+def test_spark_adapter_collects_the_coordinate_columns():
+    from pylgm.data.spark import _required_columns
+
+    vertices, _ = _random_mesh()
+    model = LGM("z", Gaussian(1.0), Fixed("1") + Matern("s", ("lon", "lat"), vertices, range=0.3),
+                time="t")
+    assert {"lon", "lat"} <= _required_columns(model)
 
 
 # --- 6. EB gradient ---------------------------------------------------------

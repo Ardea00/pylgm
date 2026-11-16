@@ -529,7 +529,11 @@ regular mesh of `[−4, 4]²` with `range = 1` and `σ = 1.5`, at the centre nod
 
 The error falls as the mesh is refined. These three points are all that was
 measured; no convergence order is claimed. A mesh edge of about `range / 5`
-or finer is a reasonable default.
+or finer is a reasonable default. A coarser mesh cannot resolve the field
+between vertices, and a Gaussian fit then pushes that unresolved variation
+into the observation noise. On one simulated data set (`n = 300`, true range
+1.5, σ = 1, noise sd 0.3) the estimated noise sd was 0.42 at `h = range/2.5`,
+0.34 at `h = range/5` and 0.26 at `h = range/10`.
 
 **Estimation.** `range` and `sigma` change only the precision, never the
 design, so the empirical-Bayes optimizer takes their gradient from the
