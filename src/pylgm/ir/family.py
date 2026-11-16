@@ -128,8 +128,14 @@ class ParametricDesignBlock:
     """A latent block whose DESIGN is a function of hyperparameters.
 
     Mirror of ``ParametricBlock``: ``build`` returns a fresh design column while
-    the precision, labels and constraints stay fixed. Used by restricted MIDAS,
-    whose single regressor is a theta-weighted aggregate of the HF lags.
+    the labels and constraints stay fixed. Used by restricted MIDAS, whose
+    single regressor is a theta-weighted aggregate of the HF lags, and by a
+    ``Shared`` effect with an estimated scale.
+
+    The precision is the template times ``parameter``/``scale``, or, when
+    ``precision_build`` is given, rebuilt by it per draw -- a shared effect
+    whose own structural parameter (AR1 rho, BYM2 phi, ...) is estimated
+    alongside its scale varies both.
     """
 
     block: LatentBlock
@@ -137,6 +143,7 @@ class ParametricDesignBlock:
     build: Callable[[Mapping[str, float]], csr_matrix]
     parameter: str | None
     scale: float
+    precision_build: Callable[[Mapping[str, float]], csr_matrix] | None
 
     def __init__(
         self,
@@ -145,9 +152,14 @@ class ParametricDesignBlock:
         build: Callable[[Mapping[str, float]], csr_matrix],
         parameter: str | None = None,
         scale: float = 1.0,
+        precision_build: Callable[[Mapping[str, float]], csr_matrix] | None = None,
     ) -> None:
         if not isinstance(block, LatentBlock):
             raise ModelValidationError("parametric-design block must contain a latent block")
+        if precision_build is not None and (parameter is not None or not callable(precision_build)):
+            raise ModelValidationError(
+                "parametric-design precision_build must be callable and replaces `parameter`"
+            )
         names = tuple(parameters)
         if not names or any(not isinstance(n, str) or not n for n in names):
             raise ModelValidationError("parametric-design block parameters must be non-empty strings")
@@ -160,6 +172,7 @@ class ParametricDesignBlock:
         object.__setattr__(self, "build", build)
         object.__setattr__(self, "parameter", parameter)
         object.__setattr__(self, "scale", _ordinary_positive(scale, "block scale"))
+        object.__setattr__(self, "precision_build", precision_build)
 
     def materialize(self, resolved: Mapping[str, float]) -> LatentBlock:
         design = self.build(resolved)
@@ -169,7 +182,10 @@ class ParametricDesignBlock:
             )
         multiplier = resolved[self.parameter] if self.parameter else self.scale
         with np.errstate(over="ignore", invalid="ignore"):
-            precision = self.block._precision * multiplier
+            precision = (
+                self.precision_build(resolved) if self.precision_build is not None
+                else self.block._precision * multiplier
+            )
         if not np.isfinite(precision.data).all():
             raise NumericalError(
                 f"precision scaling for block {self.block.name!r} must remain finite"

@@ -12,10 +12,10 @@ def test_estimated_delta_is_recovered_from_simulated_shared_component_data(
     shared_component_frame,
 ):
     # The shared IID's precision is fixed at the simulation's true value
-    # (1 / 0.7**2 ~= 2.041): a Hyperparameter here is rejected now (Finding 3 --
-    # a shared effect's own precision cannot be estimated yet), and it was never
-    # actually estimated before either -- it silently pinned at its initial 1.0,
-    # letting `delta` (the only free knob) absorb the misspecification.
+    # (1 / 0.7**2 ~= 2.041) so `delta` is the only free knob; estimating it too
+    # is covered in tests/test_shared_own_hyperparameters.py. (Before that was
+    # supported, a Hyperparameter here silently pinned at its initial 1.0,
+    # letting `delta` absorb the misspecification -- Finding 3.)
     frame, true_delta = shared_component_frame()
     joint = Joint(
         [LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
@@ -188,9 +188,10 @@ def test_mixture_restrict_reslices_bound_aux_on_unobserved_rows():
     assert len(result.predictive_mean) == 8
 
 
-def test_shared_effect_hyperparameter_precision_raises(shared_component_frame):
-    """Finding 3: a Hyperparameter on a shared effect's own precision must fail
-    loudly at compile time rather than silently pinning it at its initial value."""
+def test_shared_effect_hyperparameter_precision_is_estimated(shared_component_frame):
+    """Finding 3: a Hyperparameter on a shared effect's own precision once
+    silently pinned at its initial value, then was rejected; it is now
+    estimated jointly with the (delta, 1/delta) scale, which identifies it."""
     frame, _ = shared_component_frame()
     joint = Joint(
         [LGM(response="oral", likelihood=Poisson(), predictor=Fixed("1")),
@@ -200,8 +201,9 @@ def test_shared_effect_hyperparameter_precision_raises(shared_component_frame):
             scale=Hyperparameter("delta", initial=1.0),
         )],
     )
-    with pytest.raises(CompilationError, match="not supported"):
-        joint.fit(frame, engine="laplace")
+    result = joint.fit(frame, engine="laplace")
+    assert {"tau_u", "delta"} <= set(result.hyperparameters)
+    assert result.hyperparameters["tau_u"] != pytest.approx(1.0, rel=1e-3)
 
 
 def test_grouped_inside_joint_matches_its_replicated_equivalent(shared_component_frame):

@@ -21,6 +21,7 @@ from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects.fixed import _DIFFUSE_PRECISION
 from pylgm.effects import (
     AR1,
+    AR1Structure,
     Besag,
     BYM2,
     Copy,
@@ -722,13 +723,21 @@ def _resolve_scale(scale, resolved: "dict[str, float]", default: float = 1.0) ->
     return float(scale)
 
 
+def _structure_hyperparameters(structure) -> list[Hyperparameter]:
+    """A ``Grouped`` structure's own Hyperparameters: only ``AR1Structure`` has one."""
+    if isinstance(structure, AR1Structure) and isinstance(structure.rho, Hyperparameter):
+        return [structure.rho]
+    return []
+
+
 def _effect_hyperparameters(effect) -> list[Hyperparameter]:
     """Every Hyperparameter declared directly on one effect spec.
 
     Covers ``precision`` (every effect) plus the effect-specific bounded/real
     parameters (``rho``, ``phi``, ``gamma``, ``eta``, the MIDASParametric
-    shapes). Shared by ``_model_hyperparameters`` and the shared-effect guard
-    in ``_shared_block``, so both stay in sync with which fields can carry one.
+    shapes). Shared by ``_model_hyperparameters``, ``compile_joint_family``'s
+    shared loop and ``Joint._declared_hyperparameters``, so all three stay in
+    sync with which fields can carry one.
     """
     if isinstance(effect, Weighted):
         # Delegate: an unfound inner Hyperparameter would silently pin at its
@@ -739,10 +748,10 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         # unfound one would silently pin at its initial value.
         return _effect_hyperparameters(effect.effect)
     if isinstance(effect, Grouped):
-        # Delegate: groups share the inner effect's hyperparameters, and the
-        # structure's own parameters are fixed in this slice. An unfound inner
-        # Hyperparameter would silently pin at its initial value.
-        return _effect_hyperparameters(effect.effect)
+        # Delegate: groups share the inner effect's hyperparameters; the
+        # structure adds its own (AR1Structure rho). An unfound one would
+        # silently pin at its initial value.
+        return _effect_hyperparameters(effect.effect) + _structure_hyperparameters(effect.structure)
     if isinstance(effect, Copy):
         return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
     if isinstance(effect, Fixed):
@@ -819,33 +828,73 @@ def _correlated_stacked(effect, frames, starts, total: int, outcomes):
     return pd.DataFrame(columns), replace(effect, index=tuple(outcomes))
 
 
-def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> LatentBlock:
-    """Build the shared latent block: design = sum_k scale_k * A_k over the union index."""
-    if isinstance(entry.effect, Correlated):
-        return _effect_block(*reversed(_correlated_stacked(
-            entry.effect, frames, starts, total, joint.outcomes,
-        )))
-    own_hyperparameters = _effect_hyperparameters(entry.effect)
-    if own_hyperparameters:
-        names = ", ".join(sorted({hp.name for hp in own_hyperparameters}))
+def _check_shared_identified(entry, count: int) -> None:
+    """Reject a free shared precision when every outcome's scale is free too.
+
+    ``(s_1, ..., s_K, tau)`` and ``(c s_1, ..., c s_K, c^2 tau)`` give the same
+    likelihood for every ``c > 0``, so the pair is identified only if some
+    outcome's scale cannot absorb ``c``: a fixed number, or the ``1/delta``
+    half of the Knorr-Held & Best ``(delta, 1/delta)`` pairing. Without this
+    the optimizer walks the ridge and reports whichever point it stopped at.
+    """
+    precision = getattr(entry.effect, "precision", None)
+    scales = entry.scales_for(count)
+    if isinstance(precision, Hyperparameter) and all(
+        isinstance(scale, Hyperparameter) for scale in scales
+    ):
         raise CompilationError(
-            f"shared effect {entry.name!r} declares Hyperparameter(s) {names} on its own "
-            "precision/rho/phi/gamma/eta/shape -- estimating a shared effect's own "
-            "structural parameters is not supported yet. Pass a fixed value for "
-            "that field for now; only the Shared `scale` may be a Hyperparameter."
+            f"shared effect {entry.name!r} estimates its own precision "
+            f"{precision.name!r} and a free scale on every outcome "
+            f"({', '.join(scale.name for scale in scales)}); multiplying every scale by "
+            "c and the precision by c^2 leaves the model unchanged, so they are not "
+            "identified. Fix the precision, fix one outcome's scale (e.g. 1.0), or "
+            "use the (delta, 1/delta) pairing (scale=Hyperparameter(...) with two "
+            "outcomes)."
         )
+
+
+def _shared_family_item(entry, joint, frames, starts, sizes, total):
+    """``(item, names, bounds, priors, incidences)`` of a non-Correlated shared effect.
+
+    ``item`` is the effect's own family block over the union index, built by
+    the single-model family path, so its own Hyperparameters (precision, AR1/
+    ProperCAR/SAR rho, BYM2 phi) are rebuilt exactly as there. ``incidences``
+    are the per-outcome ``A_k``, realigned to the item's label order.
+    """
+    _check_shared_identified(entry, len(joint.submodels))
     levels, incidences = _shared_incidences(
         entry, frames, starts, sizes, total, joint.outcomes
     )
     dtype = frames[0][entry.effect.index].dtype
-    template = _effect_block(entry.effect, _levels_frame(entry.effect.index, levels, dtype))
-    incidences = _realign_shared_incidences(entry, levels, template, incidences)
-    scales = entry.scales_for(len(joint.submodels))
+    items, names, bounds, priors = _family_blocks(
+        [entry.effect], _levels_frame(entry.effect.index, levels, dtype)
+    )
+    if len(items) != 1:
+        raise CompilationError(f"effect {entry.name!r} compiled to {len(items)} blocks, expected 1")
+    incidences = _realign_shared_incidences(entry, levels, items[0].block, incidences)
+    return items[0], names, bounds, priors, incidences
+
+
+def _shared_design(entry, scales, incidences, resolved) -> csr_matrix:
+    """``sum_k scale_k A_k`` at the given hyperparameter values."""
     default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
-    design = sum(
+    return sum(
         _resolve_scale(scale, resolved, default) * incidence
         for scale, incidence in zip(scales, incidences, strict=False)
     ).tocsr()
+
+
+def _shared_block(entry, joint, frames, starts, sizes, total, resolved) -> LatentBlock:
+    """Build the shared latent block at initial values: design = sum_k scale_k * A_k."""
+    if isinstance(entry.effect, Correlated):
+        return _effect_block(*reversed(_correlated_stacked(
+            entry.effect, frames, starts, total, joint.outcomes,
+        )))
+    item, names, bounds, _, incidences = _shared_family_item(
+        entry, joint, frames, starts, sizes, total
+    )
+    template = _materialize_blocks((item,), {n: bounds[n].initial for n in names})[0]
+    design = _shared_design(entry, entry.scales_for(len(joint.submodels)), incidences, resolved)
     return LatentBlock(
         entry.name, template.labels, design, template.precision, template.constraints
     )
@@ -1172,6 +1221,26 @@ def _grouped_family_block(item, frame, effect, groups, index):
         )
     composed = grouped_block(item.block, frame, index, effect.over, groups, effect.structure)
     outer_precision = effect.structure.precision(groups)
+    estimated = _structure_hyperparameters(effect.structure)
+    if estimated:
+        # An estimated structure rho enters Q_S itself, so every inner block --
+        # a ScalableBlock too -- must re-Kron against Q_S(rho) on each draw.
+        rho_name = estimated[0].name
+        if isinstance(item, ParametricBlock):
+            inner_parameters, inner_build = item.parameters, item.build
+        else:
+            inner_parameters = (item.parameter,) if item.parameter else ()
+
+            def inner_build(values, template=item.block.precision, item=item):
+                return template * (values[item.parameter] if item.parameter else item.scale)
+
+        def build(values, inner_build=inner_build, count=len(groups), rho_name=rho_name):
+            return csr_matrix(kron(
+                ar1_structure(count, values[rho_name]), inner_build(values), format="csr",
+            ))
+
+        parameters = tuple(dict.fromkeys(inner_parameters + (rho_name,)))
+        return ParametricBlock(composed, parameters, build)
     if isinstance(item, ParametricBlock):
         def build(values, inner_build=item.build, outer_precision=outer_precision):
             return csr_matrix(
@@ -1253,6 +1322,16 @@ def _append_family_blocks(
             target, level_frame, scalable, parameter_names,
             parameter_bounds, parameter_priors,
         )
+        # Registered (and its transform/initial checked) before composing, so a
+        # bad declaration gets the named CompilationError, not ar1_structure's
+        # bare ValueError.
+        for rho in _structure_hyperparameters(effect.structure):
+            parameter_names.append(rho.name)
+            parameter_bounds[rho.name] = _bounded_parameter(
+                rho, -1.0, 1.0, label="AR1Structure rho", inset=1e-6
+            )
+            if rho.prior is not None:
+                parameter_priors[rho.name] = rho.prior
         for position in range(first, len(scalable)):
             scalable[position] = _grouped_family_block(
                 scalable[position], frame, effect, groups, index
@@ -1807,7 +1886,8 @@ def _copied_family_block(item, copy, incidence):
                       scale=float(copy.scale)):
                 return csr_matrix(inner_build(values) + scale * incidence)
 
-            return ParametricDesignBlock(baked, item.parameters, build, item.parameter, item.scale)
+            return ParametricDesignBlock(baked, item.parameters, build, item.parameter, item.scale,
+                                         item.precision_build)
         if isinstance(item, ParametricBlock):
             return ParametricBlock(baked, item.parameters, item.build)
         return ScalableBlock(baked, item.parameter, item.scale)
@@ -1827,7 +1907,8 @@ def _copied_family_block(item, copy, incidence):
     # an estimated copy scale already raised above), so item.parameter/item.scale
     # is always defined -- carry the target's own precision scaling across so an
     # estimated precision on the target block is not silently dropped.
-    return ParametricDesignBlock(baked, parameters, build, item.parameter, item.scale)
+    return ParametricDesignBlock(baked, parameters, build, item.parameter, item.scale,
+                                 getattr(item, "precision_build", None))
 
 
 def _family_blocks(effects, frame):
@@ -2249,7 +2330,8 @@ def _restack_family_block(item, outcome: str, before: int, after: int):
                 pieces.append(csr_matrix((after, width)))
             return vstack(pieces, format="csr") if len(pieces) > 1 else design
 
-        return ParametricDesignBlock(padded, item.parameters, build, item.parameter, item.scale)
+        return ParametricDesignBlock(padded, item.parameters, build, item.parameter, item.scale,
+                                     item.precision_build)
 
     if isinstance(item, ParametricBlock):
         return ParametricBlock(padded, item.parameters, item.build)
@@ -2330,27 +2412,44 @@ def compile_joint_family(
             continue
         scales = entry.scales_for(len(joint.submodels))
         estimated = [s for s in scales if isinstance(s, Hyperparameter)]
-        template = _shared_block(entry, joint, frames, starts, sizes, total, resolved={})
-        if not estimated:
-            scalable.append(ScalableBlock(template, None, 1.0))
-            continue
-
-        levels, incidences = _shared_incidences(
-            entry, frames, starts, sizes, total, joint.outcomes
+        # The effect's own family block, unmaterialized: its template precision
+        # and rebuild are the single-model ones, so an estimated precision/rho/
+        # phi on a shared effect is rebuilt exactly as it is in an LGM.
+        item, own_names, own_bounds, own_priors, incidences = _shared_family_item(
+            entry, joint, frames, starts, sizes, total
         )
-        # Same realignment _shared_block applies internally.
-        incidences = _realign_shared_incidences(entry, levels, template, incidences)
-        default = entry.scale.initial if isinstance(entry.scale, Hyperparameter) else 1.0
+        inner = item.block
+        block = LatentBlock(
+            entry.name, inner.labels, _shared_design(entry, scales, incidences, {}),
+            inner.precision, inner.constraints,
+        )
+        if not estimated:
+            scalable.append(
+                ParametricBlock(block, item.parameters, item.build)
+                if isinstance(item, ParametricBlock)
+                else ScalableBlock(block, item.parameter, item.scale)
+            )
+        else:
+            def build(values, entry=entry, scales=scales, incidences=incidences):
+                return _shared_design(entry, scales, incidences, values)
 
-        def build(values, scales=scales, incidences=incidences, default=default):
-            return sum(
-                _resolve_scale(scale, values, default) * incidence
-                for scale, incidence in zip(scales, incidences, strict=False)
-            ).tocsr()
-
-        names = tuple(dict.fromkeys(s.name for s in estimated))
-        scalable.append(ParametricDesignBlock(template, names, build))
-        for hyper in estimated:
+            scale_names = tuple(dict.fromkeys(s.name for s in estimated))
+            if isinstance(item, ParametricBlock):
+                scalable.append(ParametricDesignBlock(
+                    block, tuple(dict.fromkeys(item.parameters + scale_names)), build,
+                    precision_build=item.build,
+                ))
+            else:
+                parameters = tuple(dict.fromkeys(
+                    ((item.parameter,) if item.parameter else ()) + scale_names
+                ))
+                scalable.append(ParametricDesignBlock(
+                    block, parameters, build, item.parameter, item.scale,
+                ))
+        own = {hp.name: hp for hp in _effect_hyperparameters(entry.effect)}
+        declarations = [(own[name], own_bounds[name], own_priors.get(name)) for name in own_names]
+        declarations += [(hyper, _log_bounds(hyper), hyper.prior) for hyper in estimated]
+        for hyper, bounds, prior in declarations:
             existing = registered.get(hyper.name)
             if existing is not None:
                 if existing is hyper:
@@ -2363,9 +2462,9 @@ def compile_joint_family(
                 )
             registered[hyper.name] = hyper
             parameter_names.append(hyper.name)
-            parameter_bounds[hyper.name] = _log_bounds(hyper)
-            if hyper.prior is not None:
-                parameter_priors[hyper.name] = hyper.prior
+            parameter_bounds[hyper.name] = bounds
+            if prior is not None:
+                parameter_priors[hyper.name] = prior
 
     if not parameter_names:
         return None
