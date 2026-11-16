@@ -707,9 +707,6 @@ rejected. Only the *inner* effect's hyperparameters (`precision`, `rho`,
 `phi`, ...) are estimated — matching the restriction `Shared` effects carry
 today.
 
-**`Grouped` has no YAML block.** Unlike `SpaceTime`, there is no `type:
-grouped` in the config schema; declare it from the Python API only.
-
 ## MIDAS smooth-lag effect
 
 `MIDAS(name, columns, precision=1.0, order=2, ridge=1e-6)` declares a

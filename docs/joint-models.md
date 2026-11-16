@@ -13,6 +13,31 @@ than one sub-model with a per-sub-model scaling. This covers shared-component
 disease mapping, joint PD/LGD, longitudinal-plus-survival, and any model where
 several outcomes are believed to share part of their latent structure.
 
+## From YAML
+
+`pylgm.config.load_joint(path)` loads a `Joint` from a document with `outcomes`
+(each exactly a standalone `load_model` document: `response`, `likelihood`,
+`offset`, `data`, `predictor`) and `shared`. A shared entry names its effect
+inline and gives fixed `scale` values: one float for all outcomes, or one per
+outcome. The Knorr-Held & Best pairing with a fixed `delta` is `[delta, 1/delta]`.
+
+```yaml
+outcomes:
+  - response: oral
+    likelihood: {family: poisson}
+    predictor: {fixed: "1"}
+  - response: larynx
+    likelihood: {family: poisson}
+    predictor: {fixed: "1"}
+shared:
+  - effect: {name: u, type: iid, index: district, precision: 2.0}
+    scale: [1.6, 0.625]
+    allow_ragged: false      # optional
+```
+
+It builds the same `Joint([...], shared=[Shared(IID("u", ...), scale=(1.6, 0.625))])`
+as the Python API.
+
 ## The stacking model
 
 A `Joint` compiles to an ordinary `CompiledLGM` with more rows — the
@@ -499,8 +524,6 @@ absorb them later (see [prediction](prediction.md#joint-models)).
   # that field for now; only the Shared `scale` may be a Hyperparameter.
   ```
 
-- **A YAML frontend for `Joint`.** The Python API lands first; a declarative
-  surface is a natural follow-on once the shape is settled.
 - **Mixed-outcome `predict` in a single call.** `outcome=` selects exactly one
   sub-model per call.
 - **A shared spatial effect's graph must contain exactly the observed
@@ -509,5 +532,11 @@ absorb them later (see [prediction](prediction.md#joint-models)).
   shared index (a common case when a graph ships from a shapefile with more
   regions than the data covers) raises `CompilationError` rather than
   silently padding in an unobserved region.
-- **Spark input.** `LGM.fit` accepts a Spark DataFrame as well as pandas;
-  `Joint.fit` accepts only a pandas DataFrame.
+- **Row-aligned inputs on Spark.** `Joint.fit` accepts a Spark DataFrame
+  (projected to the declared columns, collected under `max_driver_rows`, then
+  fitted on the pandas path), but `observations`, `constraints` and `hold_out`
+  are aligned to frame rows and need a pandas frame. Rows keep Spark's
+  collection order.
+- **Estimated parameters from YAML.** The YAML frontend carries fixed values
+  only: a `Shared` `scale` that is a `Hyperparameter` (the Knorr-Held & Best
+  `delta`), and `CensoredHurdle`, stay Python-only.
