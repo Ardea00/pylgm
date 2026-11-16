@@ -400,6 +400,16 @@ result = LGM(
 ).fit(frame, engine="laplace")
 ```
 
+**From YAML:** `type: weighted` with `by` and the wrapped effect inline (the
+inner spec takes the wrapper's name; `precision` is fixed only).
+
+```yaml
+    - name: u
+      type: weighted
+      by: z
+      effect: {type: iid, index: region, precision: 1.0}
+```
+
 The effect of `z` now varies by `region`: region `s`'s slope is `u_s`, shrunk
 toward zero by the estimated `tau` exactly as an ordinary `IID` would shrink
 an intercept. Any indexed effect can be wrapped this way, not only `IID` — a
@@ -451,6 +461,14 @@ result = LGM(
     + IID("u", index="i", precision=1.0)
     + Copy("u", index="j", scale=Hyperparameter("beta", initial=1.0)),
 ).fit(frame, engine="laplace")
+```
+
+**From YAML:** `type: copy`, with `name` the *target* effect's name and a
+fixed numeric `scale` (an estimated one stays Python-only).
+
+```yaml
+    - {name: u, type: iid, index: i, precision: 1.0}
+    - {name: u, type: copy, index: j, scale: 0.7}
 ```
 
 **A copy contributes no labels or block of its own.** `IID("u", ...) +
@@ -515,6 +533,16 @@ result = LGM(
         IID("u", index="region", precision=Hyperparameter("tau", initial=1.0)), over="firm"
     ),
 ).fit(frame, engine="laplace")
+```
+
+**From YAML:** `type: replicated`, with `over` and the wrapped effect inline.
+The inner effect may itself be `grouped` (R-INLA's `group` + `replicate`).
+
+```yaml
+    - name: u
+      type: replicated
+      over: firm
+      effect: {type: iid, index: region, precision: 1.0}
 ```
 
 **Structure: `I_R ⊗ Q`, paired labels.** The precision is the Kronecker
@@ -608,8 +636,10 @@ carries the between-group factor, which has no scale of its own.
 ```
 
 `graph_file` paths — on the effect or on a `besag` structure — are relative to
-the YAML document. Wrappers do not nest: a `grouped` effect cannot wrap another
-`grouped`.
+the YAML document. Wrappers nest as far as the Python constructors allow
+(`replicated` over `grouped`, `weighted` over `replicated`, ...); the
+constructors do the rejecting, so `grouped` over `grouped` raises their
+`TypeError`, reported as a `ConfigurationError`.
 
 **Five between-group structures.** `structure` is any of `IIDStructure()`,
 `RW1Structure()` / `RW2Structure()`, `BesagStructure(graph)`, or
@@ -676,9 +706,6 @@ and wrapping an effect that already declares its own `replicate=` raise
 rejected. Only the *inner* effect's hyperparameters (`precision`, `rho`,
 `phi`, ...) are estimated — matching the restriction `Shared` effects carry
 today.
-
-**`Grouped` has no YAML block.** Unlike `SpaceTime`, there is no `type:
-grouped` in the config schema; declare it from the Python API only.
 
 ## MIDAS smooth-lag effect
 
