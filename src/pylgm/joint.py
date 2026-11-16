@@ -666,15 +666,15 @@ class Joint:
         )
 
     def _declared_hyperparameters(self) -> list:
-        """Every sub-model's Hyperparameters plus the shared scales."""
-        from pylgm.compiler import _model_hyperparameters
+        """Every sub-model's Hyperparameters, the shared effects' own, and the shared scales."""
+        from pylgm.compiler import _effect_hyperparameters, _model_hyperparameters
 
         declared = []
         for model in self.submodels:
             declared.extend(hp for _, hp in _model_hyperparameters(model))
         for entry in self.shared:
+            declared.extend(_effect_hyperparameters(entry.effect))
             if isinstance(entry.effect, Correlated):
-                declared.extend(entry.effect.hyperparameters)
                 continue
             for scale in entry.scales_for(len(self.submodels)):
                 if isinstance(scale, Hyperparameter):
