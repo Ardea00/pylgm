@@ -83,7 +83,7 @@ def test_yaml_modifier_equals_python(tmp_path: Path, case: str) -> None:
 def test_yaml_copy_equals_python(tmp_path: Path) -> None:
     path = tmp_path / "m.yaml"
     path.write_text(_doc(
-        f"    - {{name: u, type: iid, index: region, precision: 2.0}}\n"
+        "    - {name: u, type: iid, index: region, precision: 2.0}\n"
         "    - {name: u, type: copy, index: j, scale: 0.7}"
     ))
     expected = LGM(response="y", likelihood=Gaussian(0.5), time="k",

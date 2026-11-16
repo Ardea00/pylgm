@@ -5,6 +5,21 @@ honest map of what's shipped, what's next, and what's deliberately deferred.
 For the precise semantics of each shipped feature, follow the links into the
 [guide](index.md).
 
+## Unreleased (research-tier, after 0.7.0rc7)
+
+See [research status](research-status.md) for what is and is not verified.
+
+- **Matérn (SPDE) spatial fields** — `Matern` on a triangle mesh
+  ($lpha = 2$, $d = 2$), with `range` and `sigma` fixed or estimated. See
+  [spatial effects](spatial-effects.md).
+- **Estimable group correlation** — `AR1Structure(rho=Hyperparameter(...))`
+  inside `Grouped`, jointly with the inner effect's hyperparameters.
+- **A shared effect's own hyperparameters** — `Shared(IID(...,
+  precision=Hyperparameter(...)))` in a `Joint`, jointly with the scales: the
+  other half of R-INLA's `copy`.
+- **Frontend** — YAML `weighted`, `replicated` and `copy` effects;
+  `pylgm.config.load_joint` for joint models; `Joint.fit` on a Spark DataFrame.
+
 ## New in 0.7.0rc7 (research-tier)
 
 Network reconstruction — see [research status](research-status.md) for what is
@@ -209,9 +224,8 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
   `engine="laplace"` only; per-outcome prediction via
   `result.predict(new_data, outcome=...)`. This covers the *scaling* half of
   R-INLA's `copy` — a shared field entering another sub-model under an
-  estimated multiplicative scale — but the copied field's own hyperparameters
-  (precision, rho, phi, ...) must stay fixed, unlike `copy`, which estimates
-  those too. It also does **not** cover off-block-diagonal precision coupling
+  estimated multiplicative scale — and, since the release after 0.7.0rc7, the copied
+  field's own hyperparameters (precision, rho, phi) too. It does **not** cover off-block-diagonal precision coupling
   (coregionalization) — see [joint models](joint-models.md#not-supported-yet).
   `copy` and `replicate` *within* a single sub-model shipped separately, as the
   `Copy` and `Replicated` modifiers above.
@@ -228,7 +242,9 @@ New since 0.6 (the `research-tier` line, first released as `0.7.0rc1`):
 
 Ordered roughly by expected value to users. Nothing here is committed to a date.
 
-1. **Matérn / SPDE spatial fields** as an alternative to CAR neighbour graphs.
+1. **Matérn / SPDE beyond the first slice**: other smoothness ($\alpha \ne 2$),
+   a PC prior on range and sigma, a YAML surface, and a comparison with R-INLA
+   on real data.
 
 ## Deferred (not planned for the near term)
 

@@ -81,14 +81,27 @@ behaviour we believe is wrong.
 **Untested or unsupported surface.**
 
 - `hyperparameters="integrate"` is covered, but only on small simulated joints.
-- No YAML frontend for `Joint`; the declarative path does not reach joint models.
-- `Joint.fit` takes only a pandas DataFrame; `LGM.fit` also takes Spark.
+- `pylgm.config.load_joint` declares a `Joint` from YAML (fixed values only:
+  no `censoring`, no `Hyperparameter` scale). Checked against the Python
+  declaration (`tests/config/test_joint_yaml.py`).
+- `Joint.fit` takes a Spark DataFrame; equal to the pandas fit
+  (`tests/test_joint_spark.py`, which needs pyspark). Untested with a
+  `CensoredHurdle`, and `observations`/`constraints`/`hold_out` are refused
+  on Spark input.
 - `Joint.fit` drops NaN-response rows rather than holding them out. Deliberate —
   see [joint models](joint-models.md) — but it diverges from `LGM.fit`.
-- A shared effect's own precision, rho or phi cannot be estimated; only the
-  `Shared` scale may be a `Hyperparameter`. The exception is
-  `Shared(Correlated(...))`, whose per-outcome precisions and correlations are
-  estimable (see the network-reconstruction entry below).
+- A shared effect's own precision (and AR1/ProperCAR/SAR `rho`, BYM2 `phi`)
+  is estimable jointly with the `Shared` scales. Verified: a one-outcome joint
+  with scale 1 equals the plain `LGM` (same estimate, same evidence); a
+  simulated two-outcome Poisson joint recovers `tau = 2.04` as 2.185 and
+  `delta = 1.6` as 1.614 (`tests/test_shared_own_hyperparameters.py`). A free
+  precision with a free scale on every outcome is not identified and raises
+  `CompilationError`. **Not verified:** a fit or recovery for a shared
+  ProperCAR/SAR/BYM2 structural parameter (compile-level effectiveness only),
+  a shared `rho` together with an estimated scale (one 10-row fit, `rho` on
+  its bound), and priors on these hyperparameters. `Shared(Correlated(...))`
+  keeps its own estimable precisions and correlations (see the
+  network-reconstruction entry below).
 - Off-block-diagonal coupling across outcomes exists only as
   `Shared(Correlated(...))`, i.e. correlated IID components; there is no
   structured (spatial/temporal) coregionalization.
@@ -133,9 +146,8 @@ column, `diag(by) A`, so a covariate's slope can itself be a latent field. See
   wrapping a sub-model's own effect in `Weighted` does compile and predict —
   it just has no test or example exercising it, so it belongs under neither
   heading above yet.
-- **No YAML/config surface.** Every neighbouring effect in
-  [effects.md](effects.md) has a YAML block; `Weighted` has none, and the
-  config schema has no `weighted` effect type to parse one into.
+- **YAML:** `type: weighted` compiles to the same model as the Python
+  declaration (`tests/config/test_modifiers_yaml.py`).
 
 ---
 
@@ -175,8 +187,9 @@ unscaled and once (rescaled) again. It produces no block of its own. See
   compilation raises `CompilationError` rather than combining the two.
   Combining an estimated copy scale with an estimated structural parameter on
   the same target is a real modelling case that this slice does not cover.
-- **No YAML/config surface.** As with `Weighted`, `Copy` has no YAML block in
-  [effects.md](effects.md) and no config schema entry.
+- **YAML:** `type: copy` with a fixed scale compiles to the same model as the
+  Python declaration (`tests/config/test_modifiers_yaml.py`). An estimated
+  scale stays Python-only.
 
 ---
 
@@ -215,16 +228,12 @@ effect, one per level of `over`: precision `I_R ⊗ Q`, design on
   `index`, so `Replicated` rejects it at construction), but the compiler
   keeps a second guard for the same case so a future design-varying effect
   fails loudly rather than silently replicating over the wrong row space.
-- **No YAML/config surface.** As with `Weighted` and `Copy`, there is no
-  `replicated` effect type in the config schema and no YAML block in
-  [effects.md](effects.md); the Python API is the only way to declare one.
-- **Not supported on Spark.** `_required_columns` in `data/spark.py` reads
-  `effect.index` unconditionally, so a `Replicated` model raises a bare
-  `AttributeError` there, and `over` is never added to the projection either.
-  This slice did not introduce the gap: that helper is already blind to
-  `MIDAS`, `MIDASParametric`, `SpaceTime` and `DynamicSpatialPanel`, and it
-  drops even `AR1(replicate=)`'s replicate column. It is recorded here rather
-  than fixed because the fix belongs to that helper, across all of them.
+- **YAML:** `type: replicated` (also over `grouped`, and under `weighted`)
+  compiles to the same model as the Python declaration
+  (`tests/config/test_modifiers_yaml.py`).
+- **Spark:** the adapter projects every column an effect or wrapper declares
+  (`over`, `by`, `replicate`, `unit`, `space`, `time`, MIDAS `columns`,
+  Matérn `coordinates`).
 
 ---
 
@@ -275,10 +284,17 @@ control.group=list(model=...))`. `Replicated` is the special case
   `I_R ⊗ Q_S ⊗ Q_E`). Verified exactly: with the replicated term alone and a
   fixed noise, the fit decomposes into one `Grouped` fit per replicate (log
   marginal likelihood and predictions to 1e-8, `tests/test_replicated_grouped.py`).
-- **A `Hyperparameter` on a structure's own parameters is not supported.**
-  `AR1Structure(rho)` takes a fixed float only; passing a `Hyperparameter`
-  raises `TypeError` at construction. Only the *inner* effect's own
-  hyperparameters are estimated.
+- **A `Hyperparameter` on `AR1Structure`'s `rho` — supported** (logit
+  transform), jointly with the inner effect's hyperparameters and inside
+  `Replicated(Grouped(...))`. Verified: the precision is exactly
+  `kron(AR1(rho), inner)`; the fit equals its `Replicated(AR1)` oracle
+  (evidence to 3e-14); simulated recovery of `rho = 0.7` as 0.736 and
+  `tau = 2.0` as 2.020, the first known-parameter recovery for `Grouped`; the
+  integrated 95% interval [0.532, 0.764] covers the truth
+  (`tests/test_grouped_structure_hyperparameter.py`). **Not verified:**
+  integration on a non-Gaussian likelihood, and recovery for
+  `Replicated(Grouped)`. An estimated `Copy` scale on such a block is still
+  refused.
 
 
 ---
@@ -329,3 +345,41 @@ A mask-and-reconstruct validation on a real register (or ICIO) with the
 reconstruction scored against the held-out truth and compared with the
 standard baselines (maximum entropy / RAS, the density-corrected gravity
 model), recorded the way the joint models' MCMC cross-check is.
+
+---
+
+## Matérn fields (SPDE) — RESEARCH
+
+`Matern(name, coordinates, vertices, range, sigma, triangles=None)`: the
+stationary solution of $(\kappa^2 - \Delta)(\tau u) = \mathcal{W}$ on a
+triangulated planar domain, $\alpha = 2$ ($\nu = 1$), P1 finite elements with
+a lumped mass matrix and homogeneous Neumann boundary,
+$Q = \tau^2(\kappa^4 C + 2\kappa^2 G + G C^{-1} G)$. See
+[spatial effects](spatial-effects.md).
+
+### What is verified
+
+| Claim | Evidence |
+|---|---|
+| The FEM matrices are right | `C` and `G` against hand-computed values on the unit square; `G 1 = 0`; `Q` symmetric positive definite (`tests/test_spde_matern.py`). |
+| The discrete covariance converges to the analytic Matérn $\sigma^2 (\kappa r) K_1(\kappa r)$ | Regular mesh, interior node, $r \le 2\,$range, error relative to $\sigma^2$: 2.67% at $h = $ range/5, 1.71% at range/10. Independently, on a jittered (non-regular) Delaunay mesh: 6.5% at range/5, 2.7% at range/10, variance ratio 1.12 then 1.02. No convergence order is claimed. |
+| The design is P1 interpolation | Barycentric weights sum to 1 and reproduce linear functions (1e-12); a point outside the mesh raises. |
+| Range and sigma are identified | Data simulated from the analytic covariance (not from `Q`), range 1.5, sigma 1.0, n = 300: Gaussian fit gives 1.54 / 1.04, Poisson 1.75 / 1.07. |
+| The EB gradient is analytic on the dense paths | Matches a central difference to 1.6e-8 (Gaussian) and 3.1e-8 (Poisson), with no extra fits. |
+| Large meshes stay sparse | 4225 nodes on the sparse Gaussian path, 1089 on the sparse Laplace path. |
+
+### What is NOT verified
+
+- **No real data, and no comparison with R-INLA's `inla.spde2.matern`** on the
+  same mesh.
+- **Boundary effects are measured, not tested**: variance is about 2x at an
+  edge and 4x at a corner, +13% half a range inside, +1% one range inside.
+  Extend the mesh at least one range beyond the data.
+- **A coarse mesh biases the Gaussian noise estimate** (0.42 / 0.34 / 0.26 at
+  $h = $ range/2.5, /5, /10 against a true 0.30).
+- The analytic gradient on the sparse Gaussian path is not exercised by a
+  Matérn test; the sparse Laplace path uses finite differences.
+- The Spark column projection is checked at unit level only.
+- Only $\alpha = 2$, $d = 2$, stationary and isotropic. No PC prior, no YAML,
+  and `Weighted`/`Replicated`/`Grouped`/`Shared` reject it.
+- The literature reference for the construction is cited unverified.
