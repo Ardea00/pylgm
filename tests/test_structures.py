@@ -52,14 +52,18 @@ def test_ar1_rejects_a_rho_outside_the_stationary_range():
         AR1Structure(rho=1.0)
 
 
-def test_ar1_structure_rejects_a_hyperparameter_for_rho():
-    """Claimed in docs/effects.md and docs/research-status.md ('A Hyperparameter
-    on a structure's own parameters is not supported') but untested until now.
-    """
+def test_ar1_structure_accepts_a_hyperparameter_and_templates_at_its_initial():
+    """An estimated rho is rebuilt per draw by the compiler
+    (tests/test_grouped_structure_hyperparameter.py); the structure itself
+    gives the template at ``rho.initial``."""
     from pylgm.parameters import Hyperparameter
 
+    estimated = AR1Structure(rho=Hyperparameter("rho", initial=0.4, transform="logit"))
+    np.testing.assert_array_equal(
+        estimated.precision(LEVELS).toarray(), AR1Structure(0.4).precision(LEVELS).toarray()
+    )
     with pytest.raises(TypeError, match="real number"):
-        AR1Structure(rho=Hyperparameter("rho", initial=0.5))
+        AR1Structure(rho="0.5")
 
 
 @pytest.mark.parametrize("structure,null_dim", [(RW1Structure(), 1), (RW2Structure(), 2)])

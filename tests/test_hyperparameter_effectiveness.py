@@ -34,6 +34,7 @@ import pytest
 
 from pylgm import (
     AR1,
+    AR1Structure,
     Besag,
     BesagStructure,
     BYM2,
@@ -245,6 +246,30 @@ MODEL_TABLE = [
                 rho=Hyperparameter("u.rho", initial=0.2, transform="logit")),
             over="group", structure=BesagStructure(_EFFECTIVENESS_GRAPH),
         )),
+    ),
+    (
+        "grouped_ar1structure_rho_only",
+        _model(Fixed("1") + Grouped(
+            IID("u", index="i", precision=1.0), over="group",
+            structure=AR1Structure(Hyperparameter("g.rho", initial=0.2, transform="logit")),
+        )),
+    ),
+    (
+        "grouped_ar1structure_rho+iid_precision",
+        _model(Fixed("1") + Grouped(
+            IID("u", index="i", precision=Hyperparameter("u.precision", initial=1.5)),
+            over="group",
+            structure=AR1Structure(Hyperparameter("g.rho", initial=0.2, transform="logit")),
+        )),
+    ),
+    (
+        "replicated_grouped_ar1structure_rho+ar1_rho",
+        _model(Fixed("1") + Replicated(Grouped(
+            AR1("u", index="i", precision=1.0,
+                rho=Hyperparameter("u.rho", initial=0.2, transform="logit")),
+            over="group",
+            structure=AR1Structure(Hyperparameter("g.rho", initial=-0.3, transform="logit")),
+        ), over="firm")),
     ),
     (
         "grouped_weighted_precision",

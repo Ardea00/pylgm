@@ -21,6 +21,7 @@ from pylgm.data.scalars import ordered_observed_levels
 from pylgm.effects.fixed import _DIFFUSE_PRECISION
 from pylgm.effects import (
     AR1,
+    AR1Structure,
     Besag,
     BYM2,
     Copy,
@@ -722,6 +723,13 @@ def _resolve_scale(scale, resolved: "dict[str, float]", default: float = 1.0) ->
     return float(scale)
 
 
+def _structure_hyperparameters(structure) -> list[Hyperparameter]:
+    """A ``Grouped`` structure's own Hyperparameters: only ``AR1Structure`` has one."""
+    if isinstance(structure, AR1Structure) and isinstance(structure.rho, Hyperparameter):
+        return [structure.rho]
+    return []
+
+
 def _effect_hyperparameters(effect) -> list[Hyperparameter]:
     """Every Hyperparameter declared directly on one effect spec.
 
@@ -739,10 +747,10 @@ def _effect_hyperparameters(effect) -> list[Hyperparameter]:
         # unfound one would silently pin at its initial value.
         return _effect_hyperparameters(effect.effect)
     if isinstance(effect, Grouped):
-        # Delegate: groups share the inner effect's hyperparameters, and the
-        # structure's own parameters are fixed in this slice. An unfound inner
-        # Hyperparameter would silently pin at its initial value.
-        return _effect_hyperparameters(effect.effect)
+        # Delegate: groups share the inner effect's hyperparameters; the
+        # structure adds its own (AR1Structure rho). An unfound one would
+        # silently pin at its initial value.
+        return _effect_hyperparameters(effect.effect) + _structure_hyperparameters(effect.structure)
     if isinstance(effect, Copy):
         return [effect.scale] if isinstance(effect.scale, Hyperparameter) else []
     if isinstance(effect, Fixed):
@@ -1172,6 +1180,26 @@ def _grouped_family_block(item, frame, effect, groups, index):
         )
     composed = grouped_block(item.block, frame, index, effect.over, groups, effect.structure)
     outer_precision = effect.structure.precision(groups)
+    estimated = _structure_hyperparameters(effect.structure)
+    if estimated:
+        # An estimated structure rho enters Q_S itself, so every inner block --
+        # a ScalableBlock too -- must re-Kron against Q_S(rho) on each draw.
+        rho_name = estimated[0].name
+        if isinstance(item, ParametricBlock):
+            inner_parameters, inner_build = item.parameters, item.build
+        else:
+            inner_parameters = (item.parameter,) if item.parameter else ()
+
+            def inner_build(values, template=item.block.precision, item=item):
+                return template * (values[item.parameter] if item.parameter else item.scale)
+
+        def build(values, inner_build=inner_build, count=len(groups), rho_name=rho_name):
+            return csr_matrix(kron(
+                ar1_structure(count, values[rho_name]), inner_build(values), format="csr",
+            ))
+
+        parameters = tuple(dict.fromkeys(inner_parameters + (rho_name,)))
+        return ParametricBlock(composed, parameters, build)
     if isinstance(item, ParametricBlock):
         def build(values, inner_build=item.build, outer_precision=outer_precision):
             return csr_matrix(
@@ -1253,6 +1281,16 @@ def _append_family_blocks(
             target, level_frame, scalable, parameter_names,
             parameter_bounds, parameter_priors,
         )
+        # Registered (and its transform/initial checked) before composing, so a
+        # bad declaration gets the named CompilationError, not ar1_structure's
+        # bare ValueError.
+        for rho in _structure_hyperparameters(effect.structure):
+            parameter_names.append(rho.name)
+            parameter_bounds[rho.name] = _bounded_parameter(
+                rho, -1.0, 1.0, label="AR1Structure rho", inset=1e-6
+            )
+            if rho.prior is not None:
+                parameter_priors[rho.name] = rho.prior
         for position in range(first, len(scalable)):
             scalable[position] = _grouped_family_block(
                 scalable[position], frame, effect, groups, index

@@ -613,7 +613,7 @@ the YAML document. Wrappers do not nest: a `grouped` effect cannot wrap another
 
 **Five between-group structures.** `structure` is any of `IIDStructure()`,
 `RW1Structure()` / `RW2Structure()`, `BesagStructure(graph)`, or
-`AR1Structure(rho)` (rho fixed). The first three, paired with the inner
+`AR1Structure(rho)` (rho fixed or estimated). The first three, paired with the inner
 effect's own precision, reproduce all four Knorr-Held space-time interaction
 types — `structure` plays the role of `K_s` (the `over`/space factor) and the
 inner effect's own precision plays `K_t` (the time factor), exactly as in
@@ -627,7 +627,7 @@ inner effect's own precision plays `K_t` (the time factor), exactly as in
 | `BesagStructure(graph)` | `RW1`/`RW2` | type IV — inseparable: neighbours tied in both factors |
 
 `AR1Structure(rho)` has no direct Knorr-Held type; it is the panel analogue
-(groups correlated by a stationary AR1, `rho` fixed), used the same way `AR1`
+(groups correlated by a stationary AR1), used the same way `AR1`
 is used as a temporal main effect outside the Knorr-Held family. This
 equivalence to `SpaceTime` is checked directly, matrix for matrix, in
 `tests/test_grouped_spacetime_oracle.py`. For the RW-based types (II and IV)
@@ -671,11 +671,26 @@ and `predict()` resolves all three. The reverse nesting, `Grouped(Replicated(...
 and wrapping an effect that already declares its own `replicate=` raise
 `TypeError` at construction.
 
-**The between-group structure's own parameters are fixed, not estimated.**
-`AR1Structure(rho)` takes a plain float; a declared `Hyperparameter` there is
-rejected. Only the *inner* effect's hyperparameters (`precision`, `rho`,
-`phi`, ...) are estimated — matching the restriction `Shared` effects carry
-today.
+**`AR1Structure`'s `rho` can be estimated.** Pass a fixed float, or a
+`Hyperparameter` with `transform="logit"` (bounded to `(-1, 1)` inset by
+`1e-6`, like `AR1`'s own `rho`) — R-INLA's `control.group=list(model="ar1")`
+with the group correlation estimated. It is estimated jointly with the inner
+effect's own hyperparameters, by empirical Bayes or with
+`hyperparameters="integrate"`, and composes inside `Replicated(Grouped(...))`:
+
+```python
+Grouped(
+    IID("u", index="unit", precision=Hyperparameter("u.tau", initial=1.0)),
+    over="year",
+    structure=AR1Structure(Hyperparameter("year.rho", initial=0.0, transform="logit")),
+)
+```
+
+Every draw rebuilds `Q_S(rho) ⊗ Q_E(θ_E)`; the precision-only direction keeps
+`rho` on the analytic empirical-Bayes gradient. The other structures
+(`IIDStructure`, `RW1Structure`, `RW2Structure`, `BesagStructure`) have no
+parameter of their own. `AR1Structure` with an estimated `rho` is Python-API
+only (the YAML `rho` stays a float).
 
 **`Grouped` has no YAML block.** Unlike `SpaceTime`, there is no `type:
 grouped` in the config schema; declare it from the Python API only.

@@ -23,6 +23,7 @@ from pylgm.effects.ar1 import ar1_structure
 from pylgm.effects.besag import _sparse_structure
 from pylgm.effects.graph import normalize_graph
 from pylgm.effects.random_walk import rw_structure
+from pylgm.parameters import Hyperparameter
 
 
 @dataclass(frozen=True)
@@ -47,16 +48,20 @@ class IIDStructure:
 class AR1Structure:
     """Autoregressively correlated groups -- the panel case.
 
-    ``rho`` is fixed in this slice, matching the restriction ``Shared`` carries
-    today; estimating a structure's own hyperparameter jointly with the inner
-    effect's is out of scope.
+    ``rho`` is a fixed float or a ``Hyperparameter`` (``transform="logit"``),
+    estimated jointly with the inner effect's own hyperparameters -- R-INLA's
+    ``control.group=list(model="ar1")``. The compiler rebuilds
+    ``Q_S(rho) (x) Q_E`` per draw; ``precision`` here gives the template at
+    ``rho.initial``.
     """
 
-    rho: float
+    rho: float | Hyperparameter
 
     def __post_init__(self) -> None:
+        if isinstance(self.rho, Hyperparameter):
+            return  # bounds and transform are checked where the compiler registers it
         if not isinstance(self.rho, (int, float)) or isinstance(self.rho, bool):
-            raise TypeError("AR1Structure rho must be a real number")
+            raise TypeError("AR1Structure rho must be a real number or a Hyperparameter")
         if not -1.0 < float(self.rho) < 1.0:
             raise ValueError("AR1Structure rho must lie strictly inside (-1, 1)")
 
@@ -64,7 +69,8 @@ class AR1Structure:
         return observed
 
     def precision(self, levels: tuple[str, ...]) -> csr_matrix:
-        return ar1_structure(len(levels), float(self.rho))
+        rho = self.rho.initial if isinstance(self.rho, Hyperparameter) else self.rho
+        return ar1_structure(len(levels), float(rho))
 
     def null_basis(self, levels: tuple[str, ...]) -> np.ndarray:
         # The stationary AR1 precision is proper: no null space.
