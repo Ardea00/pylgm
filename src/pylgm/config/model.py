@@ -19,6 +19,7 @@ from pylgm.config.schema import (
 )
 
 if TYPE_CHECKING:
+    from pylgm.joint import Joint
     from pylgm.model import LGM
 
 
@@ -91,6 +92,26 @@ class _StandaloneModelConfig(StrictModel):
     predictor: _PredictorModelConfig
 
 
+class _SharedModelConfig(StrictModel):
+    # `effect` carries the shared field's name. `scale` is fixed numbers only: a
+    # float broadcast to every outcome, or one per outcome -- the Knorr-Held & Best
+    # pairing with a fixed delta is [delta, 1/delta]. Estimating it stays Python-only.
+    effect: EffectConfig
+    scale: float | tuple[float, ...] = 1.0
+    allow_ragged: bool = False
+
+    @model_validator(mode="after")
+    def _named(self) -> "_SharedModelConfig":
+        if not self.effect.name:
+            raise ValueError("a shared effect needs a name")
+        return self
+
+
+class _JointModelConfig(StrictModel):
+    outcomes: tuple[_StandaloneModelConfig, ...]
+    shared: tuple[_SharedModelConfig, ...] = ()
+
+
 def _build_likelihood(config: _LikelihoodModelConfig) -> object:
     from pylgm.likelihoods import (
         Bernoulli,
@@ -140,6 +161,22 @@ def _build_model(config: _StandaloneModelConfig, base_dir: Path) -> LGM:
     )
 
 
+def load_joint(path: Path) -> Joint:
+    """Load a declarative :class:`Joint` YAML document: ``outcomes`` + ``shared``."""
+    from pylgm.joint import Joint, Shared
+
+    try:
+        payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeySafeLoader)
+        config = _JointModelConfig.model_validate(payload)
+        return Joint(
+            [_build_model(outcome, path.parent) for outcome in config.outcomes],
+            [Shared(build_effect(entry.effect, path.parent), entry.scale, entry.allow_ragged)
+             for entry in config.shared],
+        )
+    except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
 def load_model(path: Path) -> LGM:
     """Load a standalone declarative :class:`LGM` YAML document."""
     try:
@@ -149,4 +186,4 @@ def load_model(path: Path) -> LGM:
         raise ConfigurationError(str(exc)) from exc
 
 
-__all__ = ["load_model"]
+__all__ = ["load_joint", "load_model"]

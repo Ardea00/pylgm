@@ -49,7 +49,7 @@ def _validate_max_driver_rows(max_driver_rows: int | None) -> int | None:
 # Every attribute an effect or likelihood uses to name a data column. Wrappers
 # (Weighted, Replicated, Grouped) nest the wrapped effect under ``.effect``.
 _COLUMN_FIELDS = ("index", "unit", "space", "time", "over", "by", "replicate", "group",
-                  "trials", "event", "entry")
+                  "trials", "event", "entry", "coordinates")
 
 
 def _declared_columns(item) -> set[str]:
@@ -66,7 +66,9 @@ def _declared_columns(item) -> set[str]:
 
 
 def _required_columns(model) -> set[str]:
-    required = {model.response, *model.panel, model.time}
+    required = {model.response, *model.panel}
+    if model.time is not None:
+        required.add(model.time)
     if model.offset is not None:
         required.add(model.offset)
     required |= _declared_columns(model.likelihood)
@@ -131,4 +133,32 @@ def canonicalize_spark_frame(
     return SparkCanonicalized(panel=panel, prediction_keys=prediction_keys)
 
 
-__all__ = ["SparkCanonicalized", "canonicalize_spark_frame", "is_spark_dataframe"]
+def collect_joint_frame(frame: object, joint, *, max_driver_rows: int | None) -> pd.DataFrame:
+    """Project a Spark frame to the columns a ``Joint`` declares and collect it.
+
+    Rows come back in Spark's order: a ``Joint`` has no mandatory time key to
+    sort on, and its row-aligned inputs (operators, masks) are pandas-only.
+    """
+    max_driver_rows = _validate_max_driver_rows(max_driver_rows)
+    required = set().union(*(_required_columns(model) for model in joint.submodels))
+    for shared in joint.shared:
+        required |= _declared_columns(shared.effect)
+    hurdle = joint.censoring
+    if hurdle is not None:
+        required |= {hurdle.censored, *([hurdle.threshold] if isinstance(hurdle.threshold, str) else [])}
+    # A response column may be absent from the frame (see Joint.fit).
+    missing = sorted(required - set(frame.columns) - {m.response for m in joint.submodels})
+    if missing:
+        raise DataContractError(f"missing columns: {missing}")
+    projected = frame.select(*(c for c in frame.columns if c in required))
+    if max_driver_rows is not None and projected.limit(max_driver_rows + 1).count() > max_driver_rows:
+        raise DataContractError(
+            f"Spark input exceeds max_driver_rows={max_driver_rows}; "
+            "raise or disable the limit with max_driver_rows=None"
+        )
+    return projected.toPandas()
+
+
+__all__ = [
+    "SparkCanonicalized", "canonicalize_spark_frame", "collect_joint_frame", "is_spark_dataframe",
+]

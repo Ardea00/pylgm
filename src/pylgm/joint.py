@@ -414,8 +414,13 @@ class Joint:
             latent_strategy: str = "gaussian", mean_correction: bool = False,
             observations=None, constraints=None,
             num_workers: int = 1, blas_threads: int | None = None, warm_start=None,
-            hold_out=None):
+            hold_out=None, max_driver_rows: int | None = 100_000):
         """Compile and fit this joint model. Only ``engine='laplace'`` is supported.
+
+        ``frame`` is a pandas or a Spark DataFrame; a Spark frame is projected to
+        the columns the joint declares, collected (``max_driver_rows`` bounds the
+        collection), and fitted on the pandas path. ``observations``,
+        ``constraints`` and ``hold_out`` are row-aligned and need pandas input.
 
         ``observations`` and ``constraints`` are mappings from sub-model
         response name to a list of :class:`~pylgm.observations.LinearObservation`
@@ -472,6 +477,14 @@ class Joint:
                 "needs a single CompiledGaussian likelihood, and a mixture is not one. "
                 "Laplace is exact for an all-Gaussian stack anyway."
             )
+        from pylgm.data.spark import collect_joint_frame, is_spark_dataframe
+
+        if is_spark_dataframe(frame):
+            if observations or constraints or hold_out:
+                raise UnsupportedEngineError(
+                    "linear observations, constraints and hold_out currently require pandas input"
+                )
+            frame = collect_joint_frame(frame, self, max_driver_rows=max_driver_rows)
         if not isinstance(frame, pd.DataFrame):
             raise DataContractError("frame must be a Pandas DataFrame")
 
@@ -666,15 +679,15 @@ class Joint:
         )
 
     def _declared_hyperparameters(self) -> list:
-        """Every sub-model's Hyperparameters plus the shared scales."""
-        from pylgm.compiler import _model_hyperparameters
+        """Every sub-model's Hyperparameters, the shared effects' own, and the shared scales."""
+        from pylgm.compiler import _effect_hyperparameters, _model_hyperparameters
 
         declared = []
         for model in self.submodels:
             declared.extend(hp for _, hp in _model_hyperparameters(model))
         for entry in self.shared:
+            declared.extend(_effect_hyperparameters(entry.effect))
             if isinstance(entry.effect, Correlated):
-                declared.extend(entry.effect.hyperparameters)
                 continue
             for scale in entry.scales_for(len(self.submodels)):
                 if isinstance(scale, Hyperparameter):

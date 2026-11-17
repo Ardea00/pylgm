@@ -34,6 +34,7 @@ import pytest
 
 from pylgm import (
     AR1,
+    AR1Structure,
     Besag,
     BesagStructure,
     BYM2,
@@ -43,6 +44,7 @@ from pylgm import (
     Hyperparameter,
     IID,
     LGM,
+    Matern,
     Poisson,
     ProperCAR,
     Replicated,
@@ -51,9 +53,10 @@ from pylgm import (
     Seasonal,
     Weighted,
 )
-from pylgm.compiler import _model_hyperparameters, compile_family
+from pylgm.compiler import _model_hyperparameters, compile_family, compile_joint_family
 from pylgm.config.schema import DataConfig
 from pylgm.data.panel import CanonicalPanel
+from pylgm.joint import Joint, Shared
 
 N = 12
 LEVELS = [str(k) for k in range(N)]
@@ -87,11 +90,18 @@ def _frame(seed=0, n_rows=90):
         # column whose levels are meant to align with a graph, so this is
         # additive; no existing row references it.
         "group": rng.choice(["g0", "g1", "g2"], n_rows),
+        # Matern locations, drawn last so no existing column's draws shift.
+        "sx": rng.uniform(0.0, 1.0, n_rows),
+        "sy": rng.uniform(0.0, 1.0, n_rows),
     })
 
 
 FRAME = _frame()
 PANEL = CanonicalPanel.from_frame(FRAME, DataConfig(time="row", response="y", panel=()))
+
+MATERN_MESH = np.array(
+    [[x, y] for x in np.linspace(-0.2, 1.2, 6) for y in np.linspace(-0.2, 1.2, 6)]
+)
 
 _EFFECTIVENESS_GRAPH = {"g0": ["g1"], "g1": ["g0", "g2"], "g2": ["g1"]}
 
@@ -206,6 +216,14 @@ MODEL_TABLE = [
         ),
     ),
     (
+        "Matern(range,sigma)",
+        _model(Fixed("1") + Matern(
+            "u", ("sx", "sy"), MATERN_MESH,
+            range=Hyperparameter("u.range", initial=0.5),
+            sigma=Hyperparameter("u.sigma", initial=1.0),
+        )),
+    ),
+    (
         "Replicated(IID(tau))",
         _model(Fixed("1") + Replicated(
             IID("u", index="t", precision=Hyperparameter("tau", initial=1.0)), over="firm")),
@@ -245,6 +263,30 @@ MODEL_TABLE = [
                 rho=Hyperparameter("u.rho", initial=0.2, transform="logit")),
             over="group", structure=BesagStructure(_EFFECTIVENESS_GRAPH),
         )),
+    ),
+    (
+        "grouped_ar1structure_rho_only",
+        _model(Fixed("1") + Grouped(
+            IID("u", index="i", precision=1.0), over="group",
+            structure=AR1Structure(Hyperparameter("g.rho", initial=0.2, transform="logit")),
+        )),
+    ),
+    (
+        "grouped_ar1structure_rho+iid_precision",
+        _model(Fixed("1") + Grouped(
+            IID("u", index="i", precision=Hyperparameter("u.precision", initial=1.5)),
+            over="group",
+            structure=AR1Structure(Hyperparameter("g.rho", initial=0.2, transform="logit")),
+        )),
+    ),
+    (
+        "replicated_grouped_ar1structure_rho+ar1_rho",
+        _model(Fixed("1") + Replicated(Grouped(
+            AR1("u", index="i", precision=1.0,
+                rho=Hyperparameter("u.rho", initial=0.2, transform="logit")),
+            over="group",
+            structure=AR1Structure(Hyperparameter("g.rho", initial=-0.3, transform="logit")),
+        ), over="firm")),
     ),
     (
         "grouped_weighted_precision",
@@ -324,3 +366,68 @@ def test_hyperparameter_changes_the_compiled_model(label, model, name):
         "it produced an identical compiled design AND precision -- it has zero "
         "effect on the fit."
     )
+
+
+# A Shared effect's own hyperparameters in a Joint (instance 1 above, now
+# estimable): the same declared -> registered -> effective cross-check, on
+# compile_joint_family's output.
+def _joint_panels():
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame({
+        "i": LEVELS * 2,
+        "a": list(rng.poisson(3.0, N).astype(float)) + [np.nan] * N,
+        "b": [np.nan] * N + list(rng.poisson(3.0, N).astype(float)),
+    })
+    panels = {}
+    for name in ("a", "b"):
+        sub = frame[frame[name].notna()].reset_index(drop=True)
+        panels[name] = CanonicalPanel.from_frame(
+            sub.assign(row=range(len(sub))), DataConfig(time="row", response=name, panel=())
+        )
+    return panels
+
+
+def _joint(effect, scale):
+    return Joint(
+        [LGM(response=name, likelihood=Poisson(), predictor=Fixed("1")) for name in ("a", "b")],
+        shared=[Shared(effect, scale=scale)],
+    )
+
+
+JOINT_TABLE = [
+    ("Shared(IID(tau))+fixed scale", _joint(IID("u", index="i", precision=_tau()), (1.0, 2.0))),
+    ("Shared(IID(tau))+delta", _joint(IID("u", index="i", precision=_tau()), _beta("delta"))),
+    ("Shared(AR1(tau,rho))+delta", _joint(
+        AR1("u", index="i", precision=_tau(), rho=Hyperparameter("u.rho", 0.2, transform="logit")),
+        _beta("delta"),
+    )),
+    ("Shared(ProperCAR(rho))+fixed scale", _joint(
+        ProperCAR("u", index="i", graph=CHAIN_GRAPH, rho=_rho(), precision=1.0), (1.0, 0.5),
+    )),
+    ("Shared(SAR(tau,rho))+delta", _joint(
+        SAR("u", index="i", graph=RING_GRAPH, rho=_rho(), precision=_tau()), _beta("delta"),
+    )),
+    ("Shared(BYM2(tau,phi))+delta", _joint(
+        BYM2("u", index="i", graph=CHAIN_GRAPH, precision=_tau(), phi=_phi()), _beta("delta"),
+    )),
+]
+JOINT_PANELS = _joint_panels()
+JOINT_CASES = [
+    (label, joint, name)
+    for label, joint in JOINT_TABLE
+    for name in compile_joint_family(joint, JOINT_PANELS).parameter_names
+]
+
+
+@pytest.mark.parametrize(
+    "label, joint, name", JOINT_CASES, ids=[f"{label}::{name}" for label, _, name in JOINT_CASES]
+)
+def test_shared_hyperparameter_changes_the_compiled_joint(label, joint, name):
+    family = compile_joint_family(joint, JOINT_PANELS)
+    baseline = {n: family.parameter_bounds[n].initial for n in family.parameter_names}
+    variant = dict(baseline, **{name: _alternate_value(family.parameter_bounds[name])})
+    at_baseline, at_variant = family.materialize(baseline), family.materialize(variant)
+    assert not (
+        np.allclose(at_baseline.design.toarray(), at_variant.design.toarray())
+        and np.allclose(at_baseline.precision.toarray(), at_variant.precision.toarray(), atol=1e-10)
+    ), f"{label}: {name!r} is registered but has zero effect on the compiled joint"

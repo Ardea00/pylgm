@@ -13,6 +13,31 @@ than one sub-model with a per-sub-model scaling. This covers shared-component
 disease mapping, joint PD/LGD, longitudinal-plus-survival, and any model where
 several outcomes are believed to share part of their latent structure.
 
+## From YAML
+
+`pylgm.config.load_joint(path)` loads a `Joint` from a document with `outcomes`
+(each exactly a standalone `load_model` document: `response`, `likelihood`,
+`offset`, `data`, `predictor`) and `shared`. A shared entry names its effect
+inline and gives fixed `scale` values: one float for all outcomes, or one per
+outcome. The Knorr-Held & Best pairing with a fixed `delta` is `[delta, 1/delta]`.
+
+```yaml
+outcomes:
+  - response: oral
+    likelihood: {family: poisson}
+    predictor: {fixed: "1"}
+  - response: larynx
+    likelihood: {family: poisson}
+    predictor: {fixed: "1"}
+shared:
+  - effect: {name: u, type: iid, index: district, precision: 2.0}
+    scale: [1.6, 0.625]
+    allow_ragged: false      # optional
+```
+
+It builds the same `Joint([...], shared=[Shared(IID("u", ...), scale=(1.6, 0.625))])`
+as the Python API.
+
 ## The stacking model
 
 A `Joint` compiles to an ordinary `CompiledLGM` with more rows — the
@@ -148,6 +173,39 @@ With three or more sub-models — or whenever you want scales other than the
 KHB pairing — pass an explicit per-sub-model tuple:
 `Shared(u, scale=(delta_1, delta_2, delta_3))`, mixing floats and
 `Hyperparameter`s freely.
+
+## Estimating the shared effect's own hyperparameters
+
+A shared effect's own fields may be `Hyperparameter`s too — its `precision`,
+and the structural parameter the single-model effect already estimates (`AR1`,
+`ProperCAR` and `SAR` `rho`, `BYM2` `phi`). They are estimated jointly with the
+`Shared` scales, by empirical Bayes or with `hyperparameters="integrate"`, and
+compile through the same family path as in a single `LGM` — a one-outcome
+joint with `scale=1.0` reproduces the plain `LGM` exactly. This is the other
+half of R-INLA's `copy`: the copied field's hyperparameters are estimated, not
+just its scaling.
+
+```python
+Shared(
+    IID("u", index="district", precision=Hyperparameter("tau_u", initial=1.0)),
+    scale=Hyperparameter("delta", initial=1.0),   # (delta, 1/delta)
+)
+```
+
+**Identifiability.** `(s_1, …, s_K, τ)` and `(c·s_1, …, c·s_K, c²·τ)` give the
+same model for every `c > 0`, so an estimated precision needs at least one
+outcome whose scale cannot absorb `c`: a fixed number, or the `1/delta` half
+of the `(delta, delta⁻¹)` pairing. A free precision with a free scale on
+*every* outcome — `scale=(Hyperparameter("a", 1.0), Hyperparameter("b", 1.0))`,
+or the same `Hyperparameter` on each — raises `CompilationError` naming the
+precision and the scales, rather than letting the optimizer walk the ridge.
+Fix the precision, fix one outcome's scale (`scale=(1.0, b)`), or use the
+pairing. Structural parameters (`rho`, `phi`) are not scale-like and never
+trigger this.
+
+The precision and structural parameters vary only `Q`, so they stay on the
+analytic empirical-Bayes gradient; an estimated scale moves the design and
+falls back to finite differences for that coordinate only.
 
 ## `engine="laplace"` only
 
@@ -485,22 +543,11 @@ absorb them later (see [prediction](prediction.md#joint-models)).
 - **Latent fields in the likelihood's scale.** Effects still sum into the
   mean's linear predictor only; a shared or private field cannot enter a
   likelihood's dispersion/scale parameter.
-- **A `Hyperparameter` on a `Shared` effect's own structural fields**
-  (`precision`, `rho`, `phi`, `gamma`, `eta`, the `MIDASParametric` shapes).
-  Only `Shared.scale` may be a `Hyperparameter`; the effect's own fields must
-  be fixed values, or compilation raises `CompilationError`:
-
-  ```python
-  Shared(IID("u", index="district", precision=Hyperparameter("tau_u", initial=1.0)),
-         scale=Hyperparameter("delta", initial=1.0))
-  # CompilationError: shared effect 'u' declares Hyperparameter(s) tau_u on
-  # its own precision/rho/phi/gamma/eta/shape -- estimating a shared effect's
-  # own structural parameters is not supported yet. Pass a fixed value for
-  # that field for now; only the Shared `scale` may be a Hyperparameter.
-  ```
-
-- **A YAML frontend for `Joint`.** The Python API lands first; a declarative
-  surface is a natural follow-on once the shape is settled.
+- **A free shared precision with a free scale on every outcome.** Not
+  identified, so it raises `CompilationError`; see
+  [Estimating the shared effect's own hyperparameters](#estimating-the-shared-effects-own-hyperparameters).
+  (Estimating a shared effect's own `precision`/`rho`/`phi` is otherwise
+  supported.)
 - **Mixed-outcome `predict` in a single call.** `outcome=` selects exactly one
   sub-model per call.
 - **A shared spatial effect's graph must contain exactly the observed
@@ -509,5 +556,11 @@ absorb them later (see [prediction](prediction.md#joint-models)).
   shared index (a common case when a graph ships from a shapefile with more
   regions than the data covers) raises `CompilationError` rather than
   silently padding in an unobserved region.
-- **Spark input.** `LGM.fit` accepts a Spark DataFrame as well as pandas;
-  `Joint.fit` accepts only a pandas DataFrame.
+- **Row-aligned inputs on Spark.** `Joint.fit` accepts a Spark DataFrame
+  (projected to the declared columns, collected under `max_driver_rows`, then
+  fitted on the pandas path), but `observations`, `constraints` and `hold_out`
+  are aligned to frame rows and need a pandas frame. Rows keep Spark's
+  collection order.
+- **Estimated parameters from YAML.** The YAML frontend carries fixed values
+  only: a `Shared` `scale` that is a `Hyperparameter` (the Knorr-Held & Best
+  `delta`), and `CensoredHurdle`, stay Python-only.
